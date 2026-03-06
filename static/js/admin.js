@@ -1,3 +1,26 @@
+function formatDateTime(value) {
+    if (!value) return '-';
+
+    const date = new Date(value);
+
+    return new Intl.DateTimeFormat('ru-RU', {
+        timeZone: 'Europe/Moscow',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+    }).format(date);
+}
+
+function updateDeleteButtonState() {
+    const reportSelect = document.getElementById('admin-report-select');
+    const deleteBtn = document.getElementById('delete-report-btn');
+    if (!deleteBtn || !reportSelect) return;
+
+    deleteBtn.disabled = !reportSelect.value;
+}
+
 async function loadReportsList(location) {
     const select = document.getElementById('admin-report-select');
     select.disabled = true;
@@ -10,6 +33,7 @@ async function loadReportsList(location) {
     if (!data.reports.length) {
         select.innerHTML = '<option value="">Нет сохраненных ревизий</option>';
         select.disabled = true;
+        updateDeleteButtonState();
         return null;
     }
 
@@ -17,6 +41,7 @@ async function loadReportsList(location) {
         `<option value="${report.report_id}">${report.label}</option>`
     )).join('');
     select.disabled = false;
+    updateDeleteButtonState();
     return Number(select.value);
 }
 
@@ -30,15 +55,24 @@ async function loadAdminReport(location, reportId) {
     const categoriesContainer = document.getElementById('report-categories');
 
     try {
-        const params = new URLSearchParams({ location });
-        if (reportId) params.set('report_id', String(reportId));
+        if (!reportId) {
+            locationSpan.textContent = location;
+            dateSpan.textContent = '-';
+            statusSpan.textContent = '-';
+            idSpan.textContent = '-';
+            totalPlusSpan.textContent = '+0';
+            totalMinusSpan.textContent = '0';
+            categoriesContainer.innerHTML = '<p style="text-align:center;">Для этой точки пока нет сохраненных ревизий.</p>';
+            return;
+        }
 
+        const params = new URLSearchParams({ location, report_id: String(reportId) });
         const response = await fetch(`/api/report?${params.toString()}`);
         if (!response.ok) throw new Error('Ошибка загрузки отчета');
         const report = await response.json();
 
         locationSpan.textContent = report.location;
-        dateSpan.textContent = report.date;
+        dateSpan.textContent = formatDateTime(report.date);
         statusSpan.textContent = report.status || '-';
         idSpan.textContent = report.report_id ?? '-';
         totalPlusSpan.textContent = `+${report.total_plus}`;
@@ -96,6 +130,36 @@ async function loadAdminReport(location, reportId) {
     }
 }
 
+async function deleteSelectedReport() {
+    const locationSelect = document.getElementById('admin-location-select');
+    const reportSelect = document.getElementById('admin-report-select');
+    const reportId = reportSelect.value ? Number(reportSelect.value) : null;
+
+    if (!reportId) {
+        return;
+    }
+
+    const confirmed = confirm('Удалить выбранную ревизию? Это действие нельзя отменить.');
+    if (!confirmed) return;
+
+    const response = await fetch(`/api/report/${reportId}?location=${encodeURIComponent(locationSelect.value)}`, {
+        method: 'DELETE'
+    });
+
+    let result = {};
+    try {
+        result = await response.json();
+    } catch (error) {
+        result = {};
+    }
+
+    if (!response.ok || result.success === false) {
+        throw new Error(result.message || 'Не удалось удалить ревизию');
+    }
+
+    await reloadAdminPage();
+}
+
 async function reloadAdminPage() {
     const locationSelect = document.getElementById('admin-location-select');
     const reportSelect = document.getElementById('admin-report-select');
@@ -103,6 +167,7 @@ async function reloadAdminPage() {
     await loadAdminReport(locationSelect.value, reportId);
 
     reportSelect.onchange = async () => {
+        updateDeleteButtonState();
         const selected = reportSelect.value ? Number(reportSelect.value) : null;
         await loadAdminReport(locationSelect.value, selected);
     };
@@ -110,9 +175,19 @@ async function reloadAdminPage() {
 
 document.addEventListener('DOMContentLoaded', async () => {
     const locationSelect = document.getElementById('admin-location-select');
+    const deleteBtn = document.getElementById('delete-report-btn');
 
     locationSelect.addEventListener('change', async () => {
         await reloadAdminPage();
+    });
+
+    deleteBtn.addEventListener('click', async () => {
+        try {
+            await deleteSelectedReport();
+        } catch (error) {
+            console.error(error);
+            alert(error.message || 'Ошибка удаления ревизии');
+        }
     });
 
     await reloadAdminPage();

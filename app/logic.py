@@ -479,13 +479,54 @@ async def verify_item_or_category(data: VerifyRequest, db: AsyncSession) -> Veri
     )
 
 
-async def finish_report(report_id: int, db: AsyncSession) -> bool:
+async def _report_all_categories_completed(report: Report, db: AsyncSession) -> bool:
+    inventory = _inventory_for(report.location)
+    expected_subcategory_ids = {
+        sub["id"]
+        for category in inventory["categories"]
+        for sub in category["subcategories"]
+    }
+    if not expected_subcategory_ids:
+        return False
+
+    stmt = select(CheckResult).where(
+        CheckResult.report_id == report.id,
+        CheckResult.target_type == "subcategory",
+        CheckResult.status.in_([StatusEnum.GREEN.value, StatusEnum.RED.value]),
+    )
+    result = await db.execute(stmt)
+    completed_subcategory_ids = {row.target_id for row in result.scalars().all()}
+    return expected_subcategory_ids.issubset(completed_subcategory_ids)
+
+
+async def finish_report(report_id: int, db: AsyncSession) -> tuple[bool, str]:
     report = await db.get(Report, report_id)
     if not report:
-        return False
+        return False, "Отчет не найден."
+
+    if report.status == "completed":
+        return True, "Ревизия уже была завершена."
+
+    if not await _report_all_categories_completed(report, db):
+        return False, "Нельзя завершить ревизию, пока не пройдены все категории."
+
     report.status = "completed"
     await db.commit()
-    return True
+    return True, "Ревизия завершена."
+
+
+async def delete_report(report_id: int, location: str, db: AsyncSession) -> tuple[bool, str]:
+    normalized = _normalize_location(location)
+    report = await db.get(Report, report_id)
+    if not report:
+        return False, "Ревизия не найдена."
+
+    if report.location != normalized:
+        return False, "Эта ревизия относится к другой точке."
+
+    await db.delete(report)
+    await db.commit()
+    return True, "Ревизия удалена."
 
 
 async def get_reports_history(location: str, db: AsyncSession) -> ReportHistoryResponse:

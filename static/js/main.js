@@ -65,6 +65,30 @@ function renderMessageHtml(targetId, status, targetType) {
     return `<div id="msg-${targetId}" class="message" style="color:${color};">${text}</div>`;
 }
 
+function resetToStartScreen() {
+    document.getElementById('inventory-screen').style.display = 'none';
+    document.getElementById('start-screen').style.display = 'block';
+    document.getElementById('categories-container').innerHTML = '';
+    document.getElementById('current-location-title').textContent = '';
+    window.currentReportId = null;
+    window.currentLocation = null;
+    window.manualCategoryState = {};
+    window.manualSubcategoryState = {};
+    window.lastMessages = {};
+}
+
+function allCategoriesCompleted(categories) {
+    return Array.isArray(categories) && categories.length > 0 && categories.every(category => category.is_completed);
+}
+
+function updateFinishButtonState(categories) {
+    const finishBtn = document.getElementById('finish-btn');
+    if (!finishBtn) return;
+    const canFinish = allCategoriesCompleted(categories);
+    finishBtn.disabled = !canFinish;
+    finishBtn.title = canFinish ? 'Завершить ревизию' : 'Завершение доступно только после прохождения всех категорий';
+}
+
 function renderCategories(categories) {
     const categoriesContainer = document.getElementById('categories-container');
     categoriesContainer.innerHTML = '';
@@ -146,6 +170,7 @@ async function loadStructure(location) {
     document.getElementById('inventory-screen').style.display = 'block';
     document.getElementById('current-location-title').textContent = `Точка: ${data.location}`;
     renderCategories(data.categories);
+    updateFinishButtonState(data.categories);
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -269,23 +294,26 @@ window.verifyItem = async function(id, subId) {
     }
 };
 
-window.finishInventory = async function () {
+window.finishInventory = async function() {
     if (!window.currentReportId) {
         alert('Не найден активный отчет.');
         return;
     }
 
-    if (!confirm('Завершить ревизию на этой точке?')) {
+    const finishBtn = document.getElementById('finish-btn');
+    if (finishBtn && finishBtn.disabled) {
+        alert('Нельзя завершить ревизию, пока не пройдены все категории.');
         return;
     }
+
+    const confirmed = confirm('Завершить ревизию на этой точке?');
+    if (!confirmed) return;
 
     try {
         const response = await fetch('/finish-report', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                report_id: Number(window.currentReportId)
-            })
+            body: JSON.stringify({ report_id: Number(window.currentReportId) })
         });
 
         const data = await response.json();
@@ -298,7 +326,7 @@ window.finishInventory = async function () {
         alert(data.message || 'Ревизия завершена.');
         localStorage.removeItem('inventoryLocation');
         localStorage.removeItem('inventoryReportId');
-        location.reload();
+        resetToStartScreen();
     } catch (error) {
         console.error(error);
         alert('Ошибка при завершении ревизии.');

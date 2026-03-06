@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import Base, engine, get_db
 from app.logic import (
+    delete_report,
     finish_report,
     get_admin_report,
     get_inventory_data,
@@ -30,17 +32,11 @@ import app.models  # noqa: F401
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 
-
 REQUIRED_REPORT_COLUMNS = {"id", "location", "store_id", "status", "date_created"}
 LEGACY_TABLES = {"category_results", "discrepancies"}
 
 
 def _bootstrap_schema(sync_conn):
-    """
-    Для локальной SQLite-разработки.
-    Если на диске осталась старая БД от предыдущей версии проекта,
-    аккуратно пересоздаем схему, чтобы приложение стартовало без ручных миграций.
-    """
     inspector = inspect(sync_conn)
     table_names = set(inspector.get_table_names())
 
@@ -74,6 +70,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Умная ревизия", lifespan=lifespan)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -108,11 +105,18 @@ async def verify_count(req: VerifyRequest, db: AsyncSession = Depends(get_db)):
 
 @app.post("/finish-report", response_model=FinishReportResponse)
 async def complete_report(req: FinishReportRequest, db: AsyncSession = Depends(get_db)):
-    success = await finish_report(req.report_id, db)
-    return FinishReportResponse(
-        success=success,
-        message="Ревизия завершена." if success else "Отчет не найден.",
-    )
+    success, message = await finish_report(req.report_id, db)
+    return FinishReportResponse(success=success, message=message)
+
+
+@app.delete("/api/report/{report_id}", response_model=FinishReportResponse)
+async def api_delete_report(
+    report_id: int,
+    location: str = "Дубна",
+    db: AsyncSession = Depends(get_db),
+):
+    success, message = await delete_report(report_id, location, db)
+    return FinishReportResponse(success=success, message=message)
 
 
 @app.get("/api/reports", response_model=ReportHistoryResponse)
@@ -123,7 +127,7 @@ async def api_get_reports(location: str = "Дубна", db: AsyncSession = Depen
 @app.get("/api/report", response_model=AdminReport)
 async def api_get_report(
     location: str = "Дубна",
-    report_id: int | None = None,
+    report_id: Optional[int] = None,
     db: AsyncSession = Depends(get_db),
 ):
     return await get_admin_report(location, db, report_id)

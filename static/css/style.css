@@ -226,3 +226,30 @@ select, input[type="number"] {
         font-size: 24px;
     }
 }
+
+
+.admin-actions-row {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.danger-btn {
+    background: #dc3545;
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.danger-btn:disabled {
+    background: #bfc5cc;
+    cursor: not-allowed;
+}
+
+#delete-report-btn {
+    margin-top: -85px;
+}
