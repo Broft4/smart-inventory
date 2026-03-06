@@ -83,10 +83,18 @@ function allCategoriesCompleted(categories) {
 
 function updateFinishButtonState(categories) {
     const finishBtn = document.getElementById('finish-btn');
+    const finishHint = document.getElementById('finish-hint');
     if (!finishBtn) return;
-    const canFinish = allCategoriesCompleted(categories);
-    finishBtn.disabled = !canFinish;
-    finishBtn.title = canFinish ? 'Завершить ревизию' : 'Завершение доступно только после прохождения всех категорий';
+
+    const allCompleted = categories.length > 0 && categories.every(cat => cat.is_completed);
+
+    finishBtn.disabled = !allCompleted;
+
+    if (finishHint) {
+        finishHint.textContent = allCompleted
+            ? 'Все категории пройдены. Ревизию можно завершить.'
+            : 'Кнопка станет доступна после прохождения всех категорий.';
+    }
 }
 
 function renderCategories(categories) {
@@ -323,7 +331,6 @@ window.finishInventory = async function() {
             return;
         }
 
-        alert(data.message || 'Ревизия завершена.');
         localStorage.removeItem('inventoryLocation');
         localStorage.removeItem('inventoryReportId');
         resetToStartScreen();

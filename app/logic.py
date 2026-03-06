@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime, timedelta
 
 from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -115,6 +116,11 @@ MOCK_INVENTORY = {
     },
 }
 
+def _format_moscow_datetime(dt) -> str:
+    if dt is None:
+        return "-"
+
+    return (dt + timedelta(hours=3)).strftime("%d.%m.%Y %H:%M")
 
 def _normalize_location(location: str) -> str:
     value = (location or "").strip().lower()
@@ -540,9 +546,9 @@ async def get_reports_history(location: str, db: AsyncSession) -> ReportHistoryR
         reports=[
             ReportHistoryItem(
                 report_id=report.id,
-                date=report.date_created.strftime("%d.%m.%Y %H:%M"),
+                date=_format_moscow_datetime(report.date_created),
                 status=report.status,
-                label=f"{report.date_created.strftime('%d.%m.%Y %H:%M')} — {_report_status_label(report.status)}",
+                label=f"{_format_moscow_datetime(report.date_created)} — {_report_status_label(report.status)}",
             )
             for report in reports
         ],
@@ -617,7 +623,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
 
     return AdminReport(
         report_id=report.id,
-        date=report.date_created.strftime("%d.%m.%Y %H:%M"),
+        date=_format_moscow_datetime(report.date_created),
         location=report.location,
         status=_report_status_label(report.status),
         categories=categories,

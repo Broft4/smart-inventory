@@ -72,7 +72,7 @@ async function loadAdminReport(location, reportId) {
         const report = await response.json();
 
         locationSpan.textContent = report.location;
-        dateSpan.textContent = formatDateTime(report.date);
+        dateSpan.textContent = report.date;
         statusSpan.textContent = report.status || '-';
         idSpan.textContent = report.report_id ?? '-';
         totalPlusSpan.textContent = `+${report.total_plus}`;

@@ -24,7 +24,15 @@
     <div id="inventory-screen" class="screen" style="display: none;">
         <div class="top-bar">
             <h2 id="current-location-title" style="margin: 0;"></h2>
-            <button id="finish-btn" onclick="finishInventory()" class="finish-btn" disabled>Завершить</button>
+
+            <div class="finish-block">
+                <button id="finish-btn" onclick="finishInventory()" class="finish-btn" disabled>
+                    Завершить
+                </button>
+                <div id="finish-hint" class="finish-hint">
+                    Кнопка станет доступна после прохождения всех категорий.
+                </div>
+            </div>
         </div>
         <div id="categories-container"></div>
     </div>
