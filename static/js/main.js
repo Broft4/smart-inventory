@@ -6,6 +6,45 @@ document.addEventListener('DOMContentLoaded', () => {
     const categoriesContainer = document.getElementById('categories-container');
     const currentLocationTitle = document.getElementById('current-location-title');
 
+
+// --- БЛОК ПАМЯТИ (LOCAL STORAGE) ---
+document.addEventListener('DOMContentLoaded', () => {
+    // При загрузке страницы проверяем, есть ли сохраненные данные
+    const savedLocation = localStorage.getItem('currentLocation');
+    const savedHtml = localStorage.getItem('inventoryHtml');
+
+    if (savedLocation && savedHtml) {
+        // Если есть - восстанавливаем экран без выбора города
+        document.getElementById('location-screen').style.display = 'none';
+        document.getElementById('scanner-screen').style.display = 'block';
+        document.getElementById('current-location').textContent = savedLocation;
+        document.getElementById('categories-container').innerHTML = savedHtml;
+
+        // Восстанавливаем попытки
+        window.categoryAttempts = JSON.parse(localStorage.getItem('catAttempts') || '{}');
+        window.itemAttempts = JSON.parse(localStorage.getItem('itemAttempts') || '{}');
+    }
+});
+
+// Функция, которая делает "снимок" экрана и сохраняет его
+window.saveState = function() {
+    const html = document.getElementById('categories-container').innerHTML;
+    localStorage.setItem('inventoryHtml', html);
+    localStorage.setItem('catAttempts', JSON.stringify(window.categoryAttempts || {}));
+    localStorage.setItem('itemAttempts', JSON.stringify(window.itemAttempts || {}));
+};
+
+// Функция завершения (сбрасывает память)
+window.finishInventory = function() {
+    if(confirm("Точно завершить ревизию на этой точке?")) {
+        localStorage.clear(); // Очищаем память
+        location.reload();    // Перезагружаем страницу (вернет на выбор города)
+    }
+};
+// --- КОНЕЦ БЛОКА ПАМЯТИ ---
+
+
+
     startBtn.addEventListener('click', async () => {
         const selectedLocation = locationSelect.value;
         startBtn.disabled = true;
@@ -21,6 +60,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Вызываем функцию отрисовки
             renderCategories(data.categories);
+
+            localStorage.setItem('currentLocation', selectedLocation);
+            window.saveState();
             
         } catch (error) {
             alert('Ошибка при загрузке данных!');
@@ -115,7 +157,7 @@ window.verifyCategory = async function(id) {
             cardElement.className = 'category-card status-green';
             
             // Блокируем поле ввода
-            inputElement.disabled = true;
+            inputElement.setAttribute('disabled', 'true');
         } else {
             // Ошибка! Красим текст в красный
             msgElement.textContent = result.message;
@@ -133,11 +175,15 @@ window.verifyCategory = async function(id) {
                 // Очищаем поле для новой попытки
                 inputElement.value = '';
             }
+
+            
         }
+        window.saveState(); // <--- ДОБАВИТЬ ЭТО В КОНЕЦ БЛОКА TRY
     } catch (error) {
         console.error("Ошибка:", error);
         msgElement.textContent = "Ошибка связи с сервером";
     }
+
 };
 
 // Объект для хранения счетчика попыток для товаров
@@ -176,7 +222,7 @@ window.verifyItem = async function(itemId, categoryId) {
         if (result.is_correct) {
             msgElement.textContent = result.message;
             msgElement.style.color = "green";
-            inputElement.disabled = true;
+            inputElement.setAttribute('disabled', 'true');
         } else {
             msgElement.textContent = result.message;
             msgElement.style.color = "red";

@@ -25,6 +25,17 @@
             <h2 id="current-location-title"></h2>
             <div id="categories-container"></div>
         </div>
+
+        <div id="scanner-screen" style="display: none;">
+            <header>
+                <h2>Точка: <span id="current-location"></span></h2>
+                <button onclick="finishInventory()" style="background: #dc3545; color: white; border: none; padding: 5px 10px; border-radius: 5px; cursor: pointer;">Завершить ревизию</button>
+            </header>
+            
+            <div id="categories-container">
+                </div>
+        </div>
+
     </div>
 
     <script src="/static/js/main.js"></script>
