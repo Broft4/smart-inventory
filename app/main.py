@@ -9,12 +9,19 @@ from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import Base, engine, get_db
-from app.logic import finish_report, get_admin_report, get_inventory_data, verify_item_or_category
+from app.logic import (
+    finish_report,
+    get_admin_report,
+    get_inventory_data,
+    get_reports_history,
+    verify_item_or_category,
+)
 from app.schemas import (
     AdminReport,
     FinishReportRequest,
     FinishReportResponse,
     InventoryStructureResponse,
+    ReportHistoryResponse,
     VerifyRequest,
     VerifyResponse,
 )
@@ -25,7 +32,6 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 
 
 REQUIRED_REPORT_COLUMNS = {"id", "location", "store_id", "status", "date_created"}
-REQUIRED_TABLES = {"reports", "check_results"}
 LEGACY_TABLES = {"category_results", "discrepancies"}
 
 
@@ -109,6 +115,15 @@ async def complete_report(req: FinishReportRequest, db: AsyncSession = Depends(g
     )
 
 
+@app.get("/api/reports", response_model=ReportHistoryResponse)
+async def api_get_reports(location: str = "Дубна", db: AsyncSession = Depends(get_db)):
+    return await get_reports_history(location, db)
+
+
 @app.get("/api/report", response_model=AdminReport)
-async def api_get_report(location: str = "Дубна", db: AsyncSession = Depends(get_db)):
-    return await get_admin_report(location, db)
+async def api_get_report(
+    location: str = "Дубна",
+    report_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    return await get_admin_report(location, db, report_id)

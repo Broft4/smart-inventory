@@ -10,19 +10,30 @@
     <div class="container admin-container">
         <header>
             <h1>Итоги ревизии</h1>
-            <div class="admin-controls">
-                <label for="admin-location-select">Точка:</label>
-                <select id="admin-location-select">
-                    <option value="Дубна">Дубна</option>
-                    <option value="Дмитров">Дмитров</option>
-                </select>
+            <div class="admin-controls stacked-controls">
+                <div class="control-block">
+                    <label for="admin-location-select">Точка:</label>
+                    <select id="admin-location-select">
+                        <option value="Дубна">Дубна</option>
+                        <option value="Дмитров">Дмитров</option>
+                    </select>
+                </div>
+                <div class="control-block">
+                    <label for="admin-report-select">Ревизия:</label>
+                    <select id="admin-report-select"></select>
+                </div>
                 <a href="/" class="back-link">← Вернуться к ревизии</a>
             </div>
         </header>
 
         <div class="report-summary category-card">
-            <h2>Сводка по точке: <span id="report-location">Загрузка...</span></h2>
-            <p><strong>Дата:</strong> <span id="report-date">-</span></p>
+            <h2>Сводка по ревизии</h2>
+            <div class="report-meta-grid">
+                <p><strong>Точка:</strong> <span id="report-location">-</span></p>
+                <p><strong>Дата:</strong> <span id="report-date">-</span></p>
+                <p><strong>Статус:</strong> <span id="report-status">-</span></p>
+                <p><strong>ID:</strong> <span id="report-id">-</span></p>
+            </div>
             <div class="totals">
                 <p class="total-plus">Излишки: <span id="total-plus">0</span> шт.</p>
                 <p class="total-minus">Недостача: <span id="total-minus">0</span> шт.</p>

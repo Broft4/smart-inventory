@@ -34,6 +34,9 @@ class CategoryModel(BaseModel):
     id: str
     name: str
     status: StatusEnum = Field(default=StatusEnum.GREY)
+    is_locked: bool = Field(default=False)
+    is_completed: bool = Field(default=False)
+    is_expanded: bool = Field(default=False)
     subcategories: list[SubcategoryModel] = Field(default_factory=list)
 
 
@@ -83,8 +86,22 @@ class CategoryResult(BaseModel):
 
 
 class AdminReport(BaseModel):
+    report_id: int | None = None
     date: str
     location: str
+    status: str = "-"
     categories: list[CategoryResult]
     total_plus: float
     total_minus: float
+
+
+class ReportHistoryItem(BaseModel):
+    report_id: int
+    date: str
+    status: str
+    label: str
+
+
+class ReportHistoryResponse(BaseModel):
+    location: str
+    reports: list[ReportHistoryItem] = Field(default_factory=list)

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
 
 from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +13,8 @@ from app.schemas import (
     DiscrepancyItem,
     InventoryStructureResponse,
     ItemModel,
+    ReportHistoryItem,
+    ReportHistoryResponse,
     StatusEnum,
     SubcategoryModel,
     VerifyRequest,
@@ -164,6 +165,14 @@ def _status_from_value(value: str | None) -> StatusEnum:
         return StatusEnum.GREY
 
 
+def _report_status_label(status: str) -> str:
+    if status == "completed":
+        return "завершена"
+    if status == "in_progress":
+        return "в процессе"
+    return status or "-"
+
+
 async def _get_or_create_active_report(location: str, db: AsyncSession) -> Report:
     normalized = _normalize_location(location)
     stmt = (
@@ -192,36 +201,57 @@ async def _fetch_results_for_report(report_id: int, db: AsyncSession) -> list[Ch
 
 async def get_inventory_data(location_name: str, db: AsyncSession) -> InventoryStructureResponse:
     normalized = _normalize_location(location_name)
+    inventory = _inventory_for(normalized)
     report = await _get_or_create_active_report(normalized, db)
     results = await _fetch_results_for_report(report.id, db)
     result_by_target = {row.target_id: row for row in results}
 
-    ordered_subcategory_ids = [subcategory["id"] for _, subcategory in _iter_subcategories(normalized)]
-    completed_subcategories = {
+    completed_subcategory_ids = {
         row.subcategory_id
         for row in results
         if row.target_type == "subcategory" and row.status in {StatusEnum.GREEN.value, StatusEnum.RED.value}
     }
-    first_open_subcategory_id = next(
-        (subcategory_id for subcategory_id in ordered_subcategory_ids if subcategory_id not in completed_subcategories),
+
+    raw_categories = inventory["categories"]
+    active_category_index = next(
+        (
+            idx
+            for idx, category in enumerate(raw_categories)
+            if not all(sub["id"] in completed_subcategory_ids for sub in category["subcategories"])
+        ),
         None,
     )
 
     categories: list[CategoryModel] = []
-    for category in _inventory_for(normalized)["categories"]:
+
+    for idx, category in enumerate(raw_categories):
+        category_completed = all(
+            sub["id"] in completed_subcategory_ids for sub in category["subcategories"]
+        ) if category["subcategories"] else False
+        category_locked = active_category_index is not None and idx > active_category_index
+        category_expanded = active_category_index is not None and idx == active_category_index
+
+        local_first_open_subcategory_id = next(
+            (
+                sub["id"]
+                for sub in category["subcategories"]
+                if sub["id"] not in completed_subcategory_ids
+            ),
+            None,
+        )
+
         subcategories: list[SubcategoryModel] = []
         category_statuses: list[StatusEnum] = []
 
         for subcategory in category["subcategories"]:
             sub_row = result_by_target.get(subcategory["id"])
             sub_status = _status_from_value(sub_row.status if sub_row else None)
-            items: list[ItemModel] = []
-            item_statuses: list[StatusEnum] = []
+            is_completed = sub_status in {StatusEnum.GREEN, StatusEnum.RED}
 
+            items: list[ItemModel] = []
             for item in subcategory["items"]:
                 item_row = result_by_target.get(item["id"])
                 item_status = _status_from_value(item_row.status if item_row else None)
-                item_statuses.append(item_status)
                 items.append(
                     ItemModel(
                         id=item["id"],
@@ -232,9 +262,19 @@ async def get_inventory_data(location_name: str, db: AsyncSession) -> InventoryS
                     )
                 )
 
-            is_completed = sub_status in {StatusEnum.GREEN, StatusEnum.RED}
-            is_locked = not is_completed and subcategory["id"] != first_open_subcategory_id
-            is_expanded = subcategory["id"] == first_open_subcategory_id or sub_status == StatusEnum.ORANGE
+            if category_locked:
+                is_locked = True
+            elif category_completed:
+                is_locked = False
+            else:
+                is_locked = not is_completed and subcategory["id"] != local_first_open_subcategory_id
+
+            is_expanded = False
+            if not category_locked:
+                if sub_status == StatusEnum.ORANGE:
+                    is_expanded = True
+                elif not category_completed and subcategory["id"] == local_first_open_subcategory_id:
+                    is_expanded = True
 
             subcategories.append(
                 SubcategoryModel(
@@ -254,7 +294,9 @@ async def get_inventory_data(location_name: str, db: AsyncSession) -> InventoryS
         if category_statuses:
             if all(status == StatusEnum.GREEN for status in category_statuses):
                 category_status = StatusEnum.GREEN
-            elif any(status == StatusEnum.RED for status in category_statuses):
+            elif all(status in {StatusEnum.GREEN, StatusEnum.RED} for status in category_statuses) and any(
+                status == StatusEnum.RED for status in category_statuses
+            ):
                 category_status = StatusEnum.RED
             elif any(status == StatusEnum.ORANGE for status in category_statuses):
                 category_status = StatusEnum.ORANGE
@@ -264,13 +306,16 @@ async def get_inventory_data(location_name: str, db: AsyncSession) -> InventoryS
                 id=category["id"],
                 name=category["name"],
                 status=category_status,
+                is_locked=category_locked,
+                is_completed=category_completed,
+                is_expanded=category_expanded,
                 subcategories=subcategories,
             )
         )
 
     return InventoryStructureResponse(
         location=normalized,
-        store_id=_inventory_for(normalized)["store_id"],
+        store_id=inventory["store_id"],
         report_id=report.id,
         categories=categories,
     )
@@ -320,7 +365,11 @@ async def _finalize_subcategory_by_items(report: Report, subcategory_id: str, db
 
     item_rows = await _get_subcategory_item_rows(report.id, subcategory_id, db)
     expected_item_ids = {item["id"] for item in target_meta["subcategory"]["items"]}
-    completed_item_ids = {row.target_id for row in item_rows if row.status in {StatusEnum.GREEN.value, StatusEnum.RED.value}}
+    completed_item_ids = {
+        row.target_id
+        for row in item_rows
+        if row.status in {StatusEnum.GREEN.value, StatusEnum.RED.value}
+    }
     if expected_item_ids != completed_item_ids:
         return False
 
@@ -439,21 +488,54 @@ async def finish_report(report_id: int, db: AsyncSession) -> bool:
     return True
 
 
-async def get_admin_report(location: str, db: AsyncSession) -> AdminReport:
+async def get_reports_history(location: str, db: AsyncSession) -> ReportHistoryResponse:
     normalized = _normalize_location(location)
-    stmt = select(Report).where(Report.location == normalized).order_by(Report.id.desc()).limit(1)
-    report = await db.scalar(stmt)
+    stmt = select(Report).where(Report.location == normalized).order_by(Report.id.desc())
+    result = await db.execute(stmt)
+    reports = list(result.scalars().all())
+
+    return ReportHistoryResponse(
+        location=normalized,
+        reports=[
+            ReportHistoryItem(
+                report_id=report.id,
+                date=report.date_created.strftime("%d.%m.%Y %H:%M"),
+                status=report.status,
+                label=f"{report.date_created.strftime('%d.%m.%Y %H:%M')} — {_report_status_label(report.status)}",
+            )
+            for report in reports
+        ],
+    )
+
+
+async def get_admin_report(location: str, db: AsyncSession, report_id: int | None = None) -> AdminReport:
+    normalized = _normalize_location(location)
+
+    report: Report | None = None
+    if report_id is not None:
+        report = await db.get(Report, report_id)
+        if report and report.location != normalized:
+            report = None
+
+    if report is None:
+        stmt = select(Report).where(Report.location == normalized).order_by(Report.id.desc()).limit(1)
+        report = await db.scalar(stmt)
+
     if not report:
         return AdminReport(
+            report_id=None,
             date="-",
             location=normalized,
+            status="-",
             categories=[],
             total_plus=0.0,
             total_minus=0.0,
         )
 
     results = await _fetch_results_for_report(report.id, db)
-    subcategory_rows = [row for row in results if row.target_type == "subcategory" and row.status in {"green", "red", "orange"}]
+    subcategory_rows = [
+        row for row in results if row.target_type == "subcategory" and row.status in {"green", "red", "orange"}
+    ]
     item_rows = [row for row in results if row.target_type == "item" and row.status == "red"]
 
     grouped_problem_items: dict[str, list[DiscrepancyItem]] = defaultdict(list)
@@ -479,8 +561,8 @@ async def get_admin_report(location: str, db: AsyncSession) -> AdminReport:
             category_status_map[row.category_name] = StatusEnum.GREEN
 
     categories = []
-    all_category_names = {cat["name"] for cat in _inventory_for(normalized)["categories"]}
-    for category_name in all_category_names:
+    ordered_category_names = [cat["name"] for cat in _inventory_for(report.location)["categories"]]
+    for category_name in ordered_category_names:
         categories.append(
             CategoryResult(
                 name=category_name,
@@ -493,9 +575,11 @@ async def get_admin_report(location: str, db: AsyncSession) -> AdminReport:
     total_minus = abs(sum(min(float(row.diff or 0), 0.0) for row in item_rows))
 
     return AdminReport(
+        report_id=report.id,
         date=report.date_created.strftime("%d.%m.%Y %H:%M"),
         location=report.location,
-        categories=sorted(categories, key=lambda c: c.name),
+        status=_report_status_label(report.status),
+        categories=categories,
         total_plus=float(total_plus),
         total_minus=float(total_minus),
     )

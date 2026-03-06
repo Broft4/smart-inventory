@@ -1,23 +1,52 @@
-async function loadAdminReport(location) {
+async function loadReportsList(location) {
+    const select = document.getElementById('admin-report-select');
+    select.disabled = true;
+    select.innerHTML = '<option>Загрузка...</option>';
+
+    const response = await fetch(`/api/reports?location=${encodeURIComponent(location)}`);
+    if (!response.ok) throw new Error('Ошибка загрузки списка ревизий');
+    const data = await response.json();
+
+    if (!data.reports.length) {
+        select.innerHTML = '<option value="">Нет сохраненных ревизий</option>';
+        select.disabled = true;
+        return null;
+    }
+
+    select.innerHTML = data.reports.map(report => (
+        `<option value="${report.report_id}">${report.label}</option>`
+    )).join('');
+    select.disabled = false;
+    return Number(select.value);
+}
+
+async function loadAdminReport(location, reportId) {
     const locationSpan = document.getElementById('report-location');
     const dateSpan = document.getElementById('report-date');
+    const statusSpan = document.getElementById('report-status');
+    const idSpan = document.getElementById('report-id');
     const totalPlusSpan = document.getElementById('total-plus');
     const totalMinusSpan = document.getElementById('total-minus');
     const categoriesContainer = document.getElementById('report-categories');
 
     try {
-        const response = await fetch(`/api/report?location=${encodeURIComponent(location)}`);
+        const params = new URLSearchParams({ location });
+        if (reportId) params.set('report_id', String(reportId));
+
+        const response = await fetch(`/api/report?${params.toString()}`);
         if (!response.ok) throw new Error('Ошибка загрузки отчета');
         const report = await response.json();
 
         locationSpan.textContent = report.location;
         dateSpan.textContent = report.date;
+        statusSpan.textContent = report.status || '-';
+        idSpan.textContent = report.report_id ?? '-';
         totalPlusSpan.textContent = `+${report.total_plus}`;
         totalMinusSpan.textContent = report.total_minus;
         categoriesContainer.innerHTML = '';
 
         if (!report.categories.length) {
-            categoriesContainer.innerHTML = '<p style="text-align:center;">По этой точке пока нет данных.</p>';
+            categoriesContainer.innerHTML = '<p style="text-align:center;">По этой ревизии пока нет данных.</p>';
             return;
         }
 
@@ -29,7 +58,7 @@ async function loadAdminReport(location) {
             if (cat.status === 'green') {
                 html += '<p style="color:#28a745; font-weight:bold;">✅ Расхождений нет</p>';
             } else if (cat.status === 'orange') {
-                html += '<p style="color:#fd7e14; font-weight:bold;">⏳ Подкатегория еще в поштучной проверке</p>';
+                html += '<p style="color:#fd7e14; font-weight:bold;">⏳ Категория еще проверяется поштучно</p>';
             } else if (cat.problem_items.length > 0) {
                 html += '<p style="color:#dc3545; font-weight:bold;">⚠️ Зафиксированы расхождения</p>';
                 html += `
@@ -55,7 +84,7 @@ async function loadAdminReport(location) {
                 });
                 html += '</table>';
             } else {
-                html += '<p>Пока нет завершенных проверок по этой категории.</p>';
+                html += '<p>По этой категории пока нет завершенных проверок.</p>';
             }
 
             card.innerHTML = html;
@@ -67,8 +96,24 @@ async function loadAdminReport(location) {
     }
 }
 
+async function reloadAdminPage() {
+    const locationSelect = document.getElementById('admin-location-select');
+    const reportSelect = document.getElementById('admin-report-select');
+    const reportId = await loadReportsList(locationSelect.value);
+    await loadAdminReport(locationSelect.value, reportId);
+
+    reportSelect.onchange = async () => {
+        const selected = reportSelect.value ? Number(reportSelect.value) : null;
+        await loadAdminReport(locationSelect.value, selected);
+    };
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
-    const select = document.getElementById('admin-location-select');
-    select.addEventListener('change', () => loadAdminReport(select.value));
-    await loadAdminReport(select.value);
+    const locationSelect = document.getElementById('admin-location-select');
+
+    locationSelect.addEventListener('change', async () => {
+        await reloadAdminPage();
+    });
+
+    await reloadAdminPage();
 });
