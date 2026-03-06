@@ -6,7 +6,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const categoriesContainer = document.getElementById('categories-container');
     const currentLocationTitle = document.getElementById('current-location-title');
 
-    // --- БЛОК ПАМЯТИ (LOCAL STORAGE) ПРИ ЗАГРУЗКЕ ---
+    // --- БЛОК ПАМЯТИ ---
     const savedLocation = localStorage.getItem('currentLocation');
     const savedHtml = localStorage.getItem('inventoryHtml');
 
@@ -16,10 +16,10 @@ document.addEventListener('DOMContentLoaded', () => {
         currentLocationTitle.textContent = "Точка: " + savedLocation;
         categoriesContainer.innerHTML = savedHtml;
 
-        window.categoryAttempts = JSON.parse(localStorage.getItem('catAttempts') || '{}');
+        window.subAttempts = JSON.parse(localStorage.getItem('subAttempts') || '{}');
         window.itemAttempts = JSON.parse(localStorage.getItem('itemAttempts') || '{}');
     } else {
-        window.categoryAttempts = {};
+        window.subAttempts = {};
         window.itemAttempts = {};
     }
 
@@ -50,54 +50,68 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // --- ОТРИСОВКА КАРТОЧЕК ---
+    // --- НОВАЯ 3-УРОВНЕВАЯ ОТРИСОВКА ---
     function renderCategories(categories) {
         categoriesContainer.innerHTML = ''; 
         
         categories.forEach(cat => {
-            const card = document.createElement('div');
-            card.className = `category-card status-${cat.status}`; 
+            // Уровень 1: Категория (просто большой заголовок)
+            const catBlock = document.createElement('div');
+            catBlock.className = 'main-category-block';
+            catBlock.innerHTML = `<h2 style="background: #343a40; color: white; padding: 10px; border-radius: 8px; margin-top: 20px;">${cat.name}</h2>`;
             
-            let itemsHtml = '';
-            cat.items.forEach(item => {
-                itemsHtml += `
-                    <div class="item-card" style="margin-top: 15px; padding: 10px; background: #f1f3f5; border-radius: 8px;">
-                        <h4 style="margin: 0 0 10px 0;">${item.name} (${item.uom})</h4>
-                        <div class="input-group">
-                            <input type="number" id="input-${item.id}" placeholder="Факт. кол-во" min="0" step="1">
-                            <button class="btn check" onclick="verifyItem('${item.id}', '${cat.id}')">Ввод</button>
+            // Уровень 2: Подкатегории
+            cat.subcategories.forEach(sub => {
+                const subCard = document.createElement('div');
+                subCard.className = `category-card`; 
+                subCard.style.marginLeft = '10px';
+                subCard.style.borderLeft = '4px solid #6c757d';
+                
+                // Уровень 3: Товары (скрыты по умолчанию)
+                let itemsHtml = '';
+                sub.items.forEach(item => {
+                    itemsHtml += `
+                        <div class="item-card" style="margin-top: 10px; padding: 10px; background: #e9ecef; border-radius: 8px;">
+                            <h4 style="margin: 0 0 10px 0;">${item.name} (${item.uom})</h4>
+                            <div class="input-group">
+                                <input type="number" id="input-${item.id}" placeholder="Факт. шт." min="0" step="1">
+                                <button class="btn check" onclick="verifyItem('${item.id}')">Ввод</button>
+                            </div>
+                            <div id="msg-${item.id}" class="message"></div>
                         </div>
-                        <div id="msg-${item.id}" class="message"></div>
+                    `;
+                });
+
+                subCard.innerHTML = `
+                    <h3>📂 ${sub.name}</h3>
+                    <p style="font-size: 0.85em; color: #666;">Посчитайте всё вместе:</p>
+                    <div class="input-group">
+                        <input type="number" id="input-${sub.id}" placeholder="Общее кол-во" min="0" step="1">
+                        <button class="btn check" onclick="verifySubcategory('${sub.id}')">Ввод</button>
+                    </div>
+                    <div id="msg-${sub.id}" class="message"></div>
+                    
+                    <div id="items-${sub.id}" class="items-container" style="display: none; margin-top: 15px; border-top: 2px dashed #ccc; padding-top: 10px;">
+                        <p style="color: #dc3545; font-weight: bold; margin-bottom: 5px;">⚠️ Не сошлось. Считаем поштучно:</p>
+                        ${itemsHtml}
                     </div>
                 `;
+                catBlock.appendChild(subCard);
             });
 
-            card.innerHTML = `
-                <h3>${cat.name}</h3>
-                <div class="input-group">
-                    <input type="number" id="input-${cat.id}" placeholder="Общее кол-во" min="0" step="1">
-                    <button class="btn check" onclick="verifyCategory('${cat.id}')">Ввод</button>
-                </div>
-                <div id="msg-${cat.id}" class="message"></div>
-                
-                <div id="items-${cat.id}" class="items-container" style="display: none; margin-top: 15px; border-top: 2px dashed #ccc; padding-top: 10px;">
-                    <p style="color: #fd7e14; font-weight: bold; margin-bottom: 5px;">Поштучный пересчет:</p>
-                    ${itemsHtml}
-                </div>
-            `;
-            categoriesContainer.appendChild(card);
+            categoriesContainer.appendChild(catBlock);
         });
     }
-}); // <-- ЗАКРЫВАЕМ БЛОК ИНИЦИАЛИЗАЦИИ
+}); 
 
 // ==========================================
-// ГЛОБАЛЬНЫЕ ФУНКЦИИ (ДЛЯ КНОПОК И ПАМЯТИ)
+// ФУНКЦИИ ПРОВЕРКИ И ПАМЯТИ
 // ==========================================
 
 window.saveState = function() {
     const html = document.getElementById('categories-container').innerHTML;
     localStorage.setItem('inventoryHtml', html);
-    localStorage.setItem('catAttempts', JSON.stringify(window.categoryAttempts || {}));
+    localStorage.setItem('subAttempts', JSON.stringify(window.subAttempts || {}));
     localStorage.setItem('itemAttempts', JSON.stringify(window.itemAttempts || {}));
 };
 
@@ -108,40 +122,29 @@ window.finishInventory = function() {
     }
 };
 
-window.verifyCategory = async function(id) {
+window.verifySubcategory = async function(id) {
     const inputElement = document.getElementById(`input-${id}`);
     const inputValue = parseFloat(inputElement.value);
     const msgElement = document.getElementById(`msg-${id}`);
     const cardElement = inputElement.closest('.category-card');
     
-    if (isNaN(inputValue)) {
-        msgElement.textContent = "Пожалуйста, введите число!";
-        return;
-    }
+    if (isNaN(inputValue)) return;
 
-    if (!window.categoryAttempts[id]) window.categoryAttempts[id] = 1;
-    else window.categoryAttempts[id]++;
+    if (!window.subAttempts[id]) window.subAttempts[id] = 1;
+    else window.subAttempts[id]++;
 
     try {
         const response = await fetch('/verify', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                target_id: id,
-                is_category: true,
-                quantity: inputValue,
-                attempt_number: window.categoryAttempts[id]
-            })
+            body: JSON.stringify({ target_id: id, target_type: 'subcategory', quantity: inputValue, attempt_number: window.subAttempts[id] })
         });
-        
         const result = await response.json();
         
         if (result.is_correct) {
             msgElement.textContent = result.message;
             msgElement.style.color = "green";
-            cardElement.className = 'category-card status-green';
-            
-            // Фиксируем введенное значение и блокируем поле!
+            cardElement.style.borderColor = "green";
             inputElement.setAttribute('value', inputValue);
             inputElement.setAttribute('disabled', 'true');
         } else {
@@ -149,62 +152,45 @@ window.verifyCategory = async function(id) {
             msgElement.style.color = "red";
             
             if (result.expand_category) {
-                msgElement.textContent += " Переходим к поштучной проверке...";
-                cardElement.className = 'category-card status-orange';
-                
-                // Фиксируем введенное значение и блокируем поле!
+                cardElement.style.borderColor = "orange";
                 inputElement.setAttribute('value', inputValue);
                 inputElement.setAttribute('disabled', 'true');
-                
                 document.getElementById(`items-${id}`).style.display = 'block';
             } else {
-                inputElement.value = ''; // Очищаем для новой попытки
+                inputElement.value = ''; 
             }
         }
-        window.saveState(); // Сохраняем "снимок"
+        window.saveState();
     } catch (error) {
-        console.error("Ошибка:", error);
-        msgElement.textContent = "Ошибка связи с сервером";
+        msgElement.textContent = "Ошибка сервера";
     }
 };
 
-window.verifyItem = async function(itemId, categoryId) {
-    const inputElement = document.getElementById(`input-${itemId}`);
+window.verifyItem = async function(id) {
+    const inputElement = document.getElementById(`input-${id}`);
     const inputValue = parseFloat(inputElement.value);
-    const msgElement = document.getElementById(`msg-${itemId}`);
+    const msgElement = document.getElementById(`msg-${id}`);
     
-    if (isNaN(inputValue)) {
-        msgElement.textContent = "Пожалуйста, введите число!";
-        return;
-    }
+    if (isNaN(inputValue)) return;
 
-    if (!window.itemAttempts[itemId]) window.itemAttempts[itemId] = 1;
-    else window.itemAttempts[itemId]++;
+    if (!window.itemAttempts[id]) window.itemAttempts[id] = 1;
+    else window.itemAttempts[id]++;
 
     try {
         const response = await fetch('/verify', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                target_id: itemId,
-                is_category: false,
-                quantity: inputValue,
-                attempt_number: window.itemAttempts[itemId]
-            })
+            body: JSON.stringify({ target_id: id, target_type: 'item', quantity: inputValue, attempt_number: window.itemAttempts[id] })
         });
-        
         const result = await response.json();
         
+        msgElement.textContent = result.message;
         if (result.is_correct) {
-            msgElement.textContent = result.message;
             msgElement.style.color = "green";
-            
             inputElement.setAttribute('value', inputValue);
             inputElement.setAttribute('disabled', 'true');
         } else {
-            msgElement.textContent = result.message;
             msgElement.style.color = "red";
-            
             if (result.attempts_left === 0) {
                 inputElement.setAttribute('value', inputValue);
                 inputElement.setAttribute('disabled', 'true');
@@ -214,7 +200,6 @@ window.verifyItem = async function(itemId, categoryId) {
         }
         window.saveState();
     } catch (error) {
-        console.error("Ошибка:", error);
-        msgElement.textContent = "Ошибка связи с сервером";
+        msgElement.textContent = "Ошибка сервера";
     }
 };
