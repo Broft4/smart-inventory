@@ -1,44 +1,47 @@
-from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime
-from sqlalchemy.orm import relationship
 from datetime import datetime
+
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
 from app.database import Base
 
+
 class Report(Base):
-    """Главная таблица: Общий отчет по ревизии"""
     __tablename__ = "reports"
 
-    id = Column(Integer, primary_key=True, index=True)
-    location = Column(String, index=True) # Дмитров или Дубна
-    date_created = Column(DateTime, default=datetime.utcnow)
-    status = Column(String, default="в процессе") # Можно менять на "завершена"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    location: Mapped[str] = mapped_column(String, index=True)
+    store_id: Mapped[str] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String, default="in_progress", index=True)
+    date_created: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
-    # Связь: у одного отчета может быть много проверенных категорий
-    categories = relationship("CategoryResult", back_populates="report", cascade="all, delete-orphan")
+    results: Mapped[list["CheckResult"]] = relationship(
+        back_populates="report", cascade="all, delete-orphan"
+    )
 
-class CategoryResult(Base):
-    """Таблица: Результат проверки конкретной категории"""
-    __tablename__ = "category_results"
 
-    id = Column(Integer, primary_key=True, index=True)
-    report_id = Column(Integer, ForeignKey("reports.id")) # Ссылка на главный отчет
-    category_id = Column(String) # ID папки из МоегоСклада
-    name = Column(String)        # Название (Напитки, Снеки)
-    status = Column(String)      # green, orange, red
-    attempts_used = Column(Integer, default=0)
+class CheckResult(Base):
+    __tablename__ = "check_results"
+    __table_args__ = (
+        UniqueConstraint("report_id", "target_id", name="uq_report_target"),
+    )
 
-    report = relationship("Report", back_populates="categories")
-    discrepancies = relationship("DiscrepancyItem", back_populates="category", cascade="all, delete-orphan")
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    report_id: Mapped[int] = mapped_column(ForeignKey("reports.id"), index=True)
 
-class DiscrepancyItem(Base):
-    """Таблица: Конкретные товары с расхождениями"""
-    __tablename__ = "discrepancies"
+    category_id: Mapped[str] = mapped_column(String, index=True)
+    category_name: Mapped[str] = mapped_column(String)
+    subcategory_id: Mapped[str] = mapped_column(String, index=True)
+    subcategory_name: Mapped[str] = mapped_column(String)
 
-    id = Column(Integer, primary_key=True, index=True)
-    category_result_id = Column(Integer, ForeignKey("category_results.id"))
-    item_id = Column(String)     # ID товара из МоегоСклада
-    name = Column(String)        # Название товара
-    expected = Column(Float)     # Ожидаемый остаток
-    actual = Column(Float)       # Фактический остаток
-    diff = Column(Float)         # Разница
+    target_type: Mapped[str] = mapped_column(String, index=True)  # subcategory | item
+    target_id: Mapped[str] = mapped_column(String, index=True)
+    target_name: Mapped[str] = mapped_column(String)
 
-    category = relationship("CategoryResult", back_populates="discrepancies")
+    expected_qty: Mapped[float] = mapped_column(Float)
+    actual_qty: Mapped[float | None] = mapped_column(Float, nullable=True)
+    diff: Mapped[float | None] = mapped_column(Float, nullable=True)
+    attempts_used: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String, default="grey", index=True)
+
+    report: Mapped[Report] = relationship(back_populates="results")

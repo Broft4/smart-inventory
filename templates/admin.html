@@ -3,15 +3,20 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Панель Администратора - Ревизия</title>
+    <title>Панель администратора</title>
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
     <div class="container admin-container">
         <header>
             <h1>Итоги ревизии</h1>
-            <div style="text-align: center; margin-bottom: 20px;">
-                <a href="/" style="color: #007bff; text-decoration: none;">← Вернуться к сканеру</a>
+            <div class="admin-controls">
+                <label for="admin-location-select">Точка:</label>
+                <select id="admin-location-select">
+                    <option value="Дубна">Дубна</option>
+                    <option value="Дмитров">Дмитров</option>
+                </select>
+                <a href="/" class="back-link">← Вернуться к ревизии</a>
             </div>
         </header>
 

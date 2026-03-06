@@ -1,205 +1,209 @@
-document.addEventListener('DOMContentLoaded', () => {
+window.currentReportId = null;
+window.currentLocation = null;
+
+function getIcon(sub) {
+    if (sub.is_completed) return '✅';
+    if (sub.status === 'orange') return '⚠️';
+    if (sub.is_locked) return '🔒';
+    return '📂';
+}
+
+function renderCategories(categories) {
+    const categoriesContainer = document.getElementById('categories-container');
+    categoriesContainer.innerHTML = '';
+
+    categories.forEach(cat => {
+        const catBlock = document.createElement('div');
+        catBlock.className = 'main-category-block';
+        catBlock.innerHTML = `<h2>${cat.name}</h2>`;
+
+        cat.subcategories.forEach(sub => {
+            const subCard = document.createElement('div');
+            subCard.className = `category-card subcategory-card status-${sub.status}`;
+            if (sub.is_locked) subCard.classList.add('locked-card');
+            subCard.id = `card-${sub.id}`;
+            subCard.dataset.id = sub.id;
+
+            const itemsHtml = sub.items.map(item => `
+                <div class="item-card status-${item.status}">
+                    <h4 style="margin: 0 0 10px 0;">${item.name} (${item.uom})</h4>
+                    <div class="input-group">
+                        <input type="number" id="input-${item.id}" placeholder="Факт. кол-во" min="0" step="1" ${item.status === 'green' || item.status === 'red' ? 'disabled' : ''} value="${item.entered_quantity ?? ''}">
+                        <button class="btn check" onclick="verifyItem('${item.id}', '${sub.id}')" ${sub.status !== 'orange' || item.status === 'green' || item.status === 'red' ? 'disabled' : ''}>Ввод</button>
+                    </div>
+                    <div id="msg-${item.id}" class="message">${item.status === 'green' ? 'Товар подтвержден.' : item.status === 'red' ? 'Расхождение зафиксировано.' : ''}</div>
+                </div>
+            `).join('');
+
+            const showItems = sub.status === 'orange' || sub.items.some(item => item.status === 'green' || item.status === 'red');
+            subCard.innerHTML = `
+                <h3 id="title-${sub.id}" onclick="toggleCard('${sub.id}')" style="cursor: pointer; margin-top: 0;">${getIcon(sub)} ${sub.name}</h3>
+                <div id="body-${sub.id}" style="display: ${sub.is_expanded ? 'block' : 'none'};">
+                    <p style="font-size: 0.9em; color: #666;">Сначала введите общее количество по подкатегории.</p>
+                    <div class="input-group">
+                        <input type="number" id="input-${sub.id}" placeholder="Общее кол-во" min="0" step="1" ${sub.is_completed || sub.status === 'orange' ? 'disabled' : ''} value="${sub.entered_quantity ?? ''}">
+                        <button class="btn check" onclick="verifySubcategory('${sub.id}')" ${sub.is_locked || sub.is_completed || sub.status === 'orange' ? 'disabled' : ''}>Ввод</button>
+                    </div>
+                    <div id="msg-${sub.id}" class="message">${sub.status === 'green' ? 'Подкатегория подтверждена.' : sub.status === 'red' ? 'Подкатегория завершена с расхождениями.' : sub.status === 'orange' ? 'Откройте товары и проверьте их поштучно.' : ''}</div>
+                    <div id="items-${sub.id}" class="items-container" style="display: ${showItems ? 'block' : 'none'};">
+                        <p style="color: #dc3545; font-weight: bold; margin-bottom: 8px;">Поштучная проверка товаров</p>
+                        ${itemsHtml}
+                    </div>
+                </div>
+            `;
+            catBlock.appendChild(subCard);
+        });
+
+        categoriesContainer.appendChild(catBlock);
+    });
+}
+
+async function loadStructure(location) {
+    const response = await fetch(`/get-structure?location=${encodeURIComponent(location)}`);
+    if (!response.ok) throw new Error('Ошибка загрузки структуры');
+    const data = await response.json();
+    window.currentReportId = data.report_id;
+    window.currentLocation = data.location;
+    localStorage.setItem('inventoryLocation', data.location);
+    localStorage.setItem('inventoryReportId', String(data.report_id));
+
+    document.getElementById('start-screen').style.display = 'none';
+    document.getElementById('inventory-screen').style.display = 'block';
+    document.getElementById('current-location-title').textContent = `Точка: ${data.location}`;
+    renderCategories(data.categories);
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
     const startBtn = document.getElementById('start-btn');
     const locationSelect = document.getElementById('location-select');
-    const startScreen = document.getElementById('start-screen');
-    const inventoryScreen = document.getElementById('inventory-screen');
-    const categoriesContainer = document.getElementById('categories-container');
-    const currentLocationTitle = document.getElementById('current-location-title');
+    const savedLocation = localStorage.getItem('inventoryLocation');
 
-    // --- БЛОК ПАМЯТИ ---
-    const savedLocation = localStorage.getItem('currentLocation');
-    const savedHtml = localStorage.getItem('inventoryHtml');
-
-    if (savedLocation && savedHtml) {
-        startScreen.style.display = 'none';
-        inventoryScreen.style.display = 'block';
-        currentLocationTitle.textContent = "Точка: " + savedLocation;
-        categoriesContainer.innerHTML = savedHtml;
-
-        window.subAttempts = JSON.parse(localStorage.getItem('subAttempts') || '{}');
-        window.itemAttempts = JSON.parse(localStorage.getItem('itemAttempts') || '{}');
-    } else {
-        window.subAttempts = {};
-        window.itemAttempts = {};
+    if (savedLocation) {
+        locationSelect.value = savedLocation;
+        try {
+            await loadStructure(savedLocation);
+        } catch (error) {
+            console.error(error);
+        }
     }
 
-    // --- КНОПКА "НАЧАТЬ" ---
     startBtn.addEventListener('click', async () => {
         const selectedLocation = locationSelect.value;
         startBtn.disabled = true;
         startBtn.textContent = 'Загрузка...';
-
         try {
-            const response = await fetch(`/get-structure?location=${selectedLocation}`);
-            const data = await response.json();
-
-            startScreen.style.display = 'none';
-            inventoryScreen.style.display = 'block';
-            currentLocationTitle.textContent = `Точка: ${data.location}`;
-
-            renderCategories(data.categories);
-
-            localStorage.setItem('currentLocation', selectedLocation);
-            window.saveState();
-            
+            await loadStructure(selectedLocation);
         } catch (error) {
-            alert('Ошибка при загрузке данных!');
+            alert('Ошибка при загрузке данных');
             console.error(error);
+        } finally {
             startBtn.disabled = false;
-            startBtn.textContent = 'Начать инвентаризацию';
+            startBtn.textContent = 'Начать ревизию';
         }
     });
+});
 
-    // --- НОВАЯ 3-УРОВНЕВАЯ ОТРИСОВКА ---
-    function renderCategories(categories) {
-        categoriesContainer.innerHTML = ''; 
-        
-        categories.forEach(cat => {
-            // Уровень 1: Категория (просто большой заголовок)
-            const catBlock = document.createElement('div');
-            catBlock.className = 'main-category-block';
-            catBlock.innerHTML = `<h2 style="background: #343a40; color: white; padding: 10px; border-radius: 8px; margin-top: 20px;">${cat.name}</h2>`;
-            
-            // Уровень 2: Подкатегории
-            cat.subcategories.forEach(sub => {
-                const subCard = document.createElement('div');
-                subCard.className = `category-card`; 
-                subCard.style.marginLeft = '10px';
-                subCard.style.borderLeft = '4px solid #6c757d';
-                
-                // Уровень 3: Товары (скрыты по умолчанию)
-                let itemsHtml = '';
-                sub.items.forEach(item => {
-                    itemsHtml += `
-                        <div class="item-card" style="margin-top: 10px; padding: 10px; background: #e9ecef; border-radius: 8px;">
-                            <h4 style="margin: 0 0 10px 0;">${item.name} (${item.uom})</h4>
-                            <div class="input-group">
-                                <input type="number" id="input-${item.id}" placeholder="Факт. шт." min="0" step="1">
-                                <button class="btn check" onclick="verifyItem('${item.id}')">Ввод</button>
-                            </div>
-                            <div id="msg-${item.id}" class="message"></div>
-                        </div>
-                    `;
-                });
-
-                subCard.innerHTML = `
-                    <h3>📂 ${sub.name}</h3>
-                    <p style="font-size: 0.85em; color: #666;">Посчитайте всё вместе:</p>
-                    <div class="input-group">
-                        <input type="number" id="input-${sub.id}" placeholder="Общее кол-во" min="0" step="1">
-                        <button class="btn check" onclick="verifySubcategory('${sub.id}')">Ввод</button>
-                    </div>
-                    <div id="msg-${sub.id}" class="message"></div>
-                    
-                    <div id="items-${sub.id}" class="items-container" style="display: none; margin-top: 15px; border-top: 2px dashed #ccc; padding-top: 10px;">
-                        <p style="color: #dc3545; font-weight: bold; margin-bottom: 5px;">⚠️ Не сошлось. Считаем поштучно:</p>
-                        ${itemsHtml}
-                    </div>
-                `;
-                catBlock.appendChild(subCard);
-            });
-
-            categoriesContainer.appendChild(catBlock);
-        });
-    }
-}); 
-
-// ==========================================
-// ФУНКЦИИ ПРОВЕРКИ И ПАМЯТИ
-// ==========================================
-
-window.saveState = function() {
-    const html = document.getElementById('categories-container').innerHTML;
-    localStorage.setItem('inventoryHtml', html);
-    localStorage.setItem('subAttempts', JSON.stringify(window.subAttempts || {}));
-    localStorage.setItem('itemAttempts', JSON.stringify(window.itemAttempts || {}));
-};
-
-window.finishInventory = function() {
-    if(confirm("Точно завершить ревизию на этой точке?")) {
-        localStorage.clear(); 
-        location.reload();    
-    }
+window.toggleCard = function(id) {
+    const body = document.getElementById(`body-${id}`);
+    if (!body) return;
+    body.style.display = body.style.display === 'none' ? 'block' : 'none';
 };
 
 window.verifySubcategory = async function(id) {
     const inputElement = document.getElementById(`input-${id}`);
-    const inputValue = parseFloat(inputElement.value);
     const msgElement = document.getElementById(`msg-${id}`);
-    const cardElement = inputElement.closest('.category-card');
-    
-    if (isNaN(inputValue)) return;
-
-    if (!window.subAttempts[id]) window.subAttempts[id] = 1;
-    else window.subAttempts[id]++;
+    const inputValue = parseFloat(inputElement.value);
+    if (Number.isNaN(inputValue)) {
+        msgElement.textContent = 'Введите количество.';
+        msgElement.style.color = '#dc3545';
+        return;
+    }
 
     try {
         const response = await fetch('/verify', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ target_id: id, target_type: 'subcategory', quantity: inputValue, attempt_number: window.subAttempts[id] })
+            body: JSON.stringify({
+                report_id: window.currentReportId,
+                target_id: id,
+                target_type: 'subcategory',
+                quantity: inputValue
+            })
         });
         const result = await response.json();
-        
-        if (result.is_correct) {
-            msgElement.textContent = result.message;
-            msgElement.style.color = "green";
-            cardElement.style.borderColor = "green";
-            inputElement.setAttribute('value', inputValue);
-            inputElement.setAttribute('disabled', 'true');
-        } else {
-            msgElement.textContent = result.message;
-            msgElement.style.color = "red";
-            
-            if (result.expand_category) {
-                cardElement.style.borderColor = "orange";
-                inputElement.setAttribute('value', inputValue);
-                inputElement.setAttribute('disabled', 'true');
-                document.getElementById(`items-${id}`).style.display = 'block';
-            } else {
-                inputElement.value = ''; 
-            }
+        const message = result.message;
+        const color = result.is_correct ? '#28a745' : '#dc3545';
+        await loadStructure(window.currentLocation);
+        const freshMessage = document.getElementById(`msg-${id}`);
+        if (freshMessage) {
+            freshMessage.textContent = message;
+            freshMessage.style.color = color;
         }
-        window.saveState();
     } catch (error) {
-        msgElement.textContent = "Ошибка сервера";
+        msgElement.textContent = 'Ошибка сервера';
+        msgElement.style.color = '#dc3545';
     }
 };
 
-window.verifyItem = async function(id) {
+window.verifyItem = async function(id, subId) {
     const inputElement = document.getElementById(`input-${id}`);
-    const inputValue = parseFloat(inputElement.value);
     const msgElement = document.getElementById(`msg-${id}`);
-    
-    if (isNaN(inputValue)) return;
-
-    if (!window.itemAttempts[id]) window.itemAttempts[id] = 1;
-    else window.itemAttempts[id]++;
+    const inputValue = parseFloat(inputElement.value);
+    if (Number.isNaN(inputValue)) {
+        msgElement.textContent = 'Введите количество.';
+        msgElement.style.color = '#dc3545';
+        return;
+    }
 
     try {
         const response = await fetch('/verify', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ target_id: id, target_type: 'item', quantity: inputValue, attempt_number: window.itemAttempts[id] })
+            body: JSON.stringify({
+                report_id: window.currentReportId,
+                target_id: id,
+                target_type: 'item',
+                quantity: inputValue
+            })
         });
         const result = await response.json();
-        
-        msgElement.textContent = result.message;
-        if (result.is_correct) {
-            msgElement.style.color = "green";
-            inputElement.setAttribute('value', inputValue);
-            inputElement.setAttribute('disabled', 'true');
-        } else {
-            msgElement.style.color = "red";
-            if (result.attempts_left === 0) {
-                inputElement.setAttribute('value', inputValue);
-                inputElement.setAttribute('disabled', 'true');
-            } else {
-                inputElement.value = '';
-            }
+        const message = result.message;
+        const color = result.is_correct ? '#28a745' : '#dc3545';
+        await loadStructure(window.currentLocation);
+        const freshMessage = document.getElementById(`msg-${id}`);
+        if (freshMessage) {
+            freshMessage.textContent = message;
+            freshMessage.style.color = color;
         }
-        window.saveState();
+        const body = document.getElementById(`body-${subId}`);
+        if (body) body.style.display = 'block';
     } catch (error) {
-        msgElement.textContent = "Ошибка сервера";
+        msgElement.textContent = 'Ошибка сервера';
+        msgElement.style.color = '#dc3545';
+    }
+};
+
+window.finishInventory = async function() {
+    if (!window.currentReportId) {
+        localStorage.removeItem('inventoryLocation');
+        localStorage.removeItem('inventoryReportId');
+        location.reload();
+        return;
+    }
+    const confirmed = confirm('Завершить ревизию на этой точке?');
+    if (!confirmed) return;
+
+    try {
+        await fetch('/finish-report', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ report_id: window.currentReportId })
+        });
+    } catch (error) {
+        console.error(error);
+    } finally {
+        localStorage.removeItem('inventoryLocation');
+        localStorage.removeItem('inventoryReportId');
+        location.reload();
     }
 };

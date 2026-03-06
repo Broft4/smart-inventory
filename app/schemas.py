@@ -1,62 +1,90 @@
-from pydantic import BaseModel, Field
-from typing import List
 from enum import Enum
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
 
 class StatusEnum(str, Enum):
-    GREY = "grey"       # Не проверено
-    GREEN = "green"     # Сошлось
-    ORANGE = "orange"   # Идет проверка внутри категории
-    RED = "red"         # Расхождение зафиксировано (после 3 попыток)
+    GREY = "grey"
+    GREEN = "green"
+    ORANGE = "orange"
+    RED = "red"
+
 
 class ItemModel(BaseModel):
+    id: str = Field(..., description="ID товара")
+    name: str = Field(..., description="Название товара")
+    uom: str = Field(default="шт", description="Единица измерения")
+    status: StatusEnum = Field(default=StatusEnum.GREY)
+    entered_quantity: float | None = Field(default=None)
+
+
+class SubcategoryModel(BaseModel):
     id: str
     name: str
-    uom: str = "шт"
-    status: StatusEnum = StatusEnum.GREY
+    status: StatusEnum = Field(default=StatusEnum.GREY)
+    is_locked: bool = Field(default=True)
+    is_completed: bool = Field(default=False)
+    is_expanded: bool = Field(default=False)
+    items: list[ItemModel] = Field(default_factory=list)
+    entered_quantity: float | None = Field(default=None)
+
 
 class CategoryModel(BaseModel):
     id: str
     name: str
-    status: StatusEnum = StatusEnum.GREY
-    items: List[ItemModel] = []
+    status: StatusEnum = Field(default=StatusEnum.GREY)
+    subcategories: list[SubcategoryModel] = Field(default_factory=list)
+
 
 class InventoryStructureResponse(BaseModel):
     location: str
     store_id: str
-    categories: List[CategoryModel]
+    report_id: int
+    categories: list[CategoryModel]
 
-# Схемы для проверки попыток
+
 class VerifyRequest(BaseModel):
+    report_id: int
     target_id: str
-    is_category: bool
+    target_type: Literal["subcategory", "item"]
     quantity: float
-    attempt_number: int
+
 
 class VerifyResponse(BaseModel):
     is_correct: bool
     attempts_left: int
     message: str
-    expand_category: bool = False
+    expand_items: bool = False
+    subcategory_completed: bool = False
+    target_status: StatusEnum
 
-    # ... твои старые схемы ...
+
+class FinishReportRequest(BaseModel):
+    report_id: int
+
+
+class FinishReportResponse(BaseModel):
+    success: bool
+    message: str
+
 
 class DiscrepancyItem(BaseModel):
-    """Модель для проблемного товара"""
     name: str
-    expected: float  # Сколько должно быть
-    actual: float    # Сколько по факту
-    diff: float      # Разница (плюс или минус)
+    expected: float
+    actual: float
+    diff: float
+
 
 class CategoryResult(BaseModel):
-    """Результат по одной категории"""
     name: str
     status: StatusEnum
-    problem_items: List[DiscrepancyItem] = []
+    problem_items: list[DiscrepancyItem] = Field(default_factory=list)
+
 
 class AdminReport(BaseModel):
-    """Общий отчет по инвентаризации"""
     date: str
     location: str
-    categories: List[CategoryResult]
-    total_plus: float   # Сумма излишков
-    total_minus: float  # Сумма недостач
+    categories: list[CategoryResult]
+    total_plus: float
+    total_minus: float

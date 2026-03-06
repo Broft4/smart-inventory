@@ -1,14 +1,19 @@
-from pydantic_settings import BaseSettings
+from pathlib import Path
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
 
 class Settings(BaseSettings):
-    moysklad_token: str
+    moysklad_token: str | None = None
     store_dmitrov: str = "Дмитров"
     store_dubna: str = "Дубна"
-    
-    # Базовый URL API МоегоСклада версии 1.2
     ms_api_base_url: str = "https://api.moysklad.ru/api/remap/1.2"
+    database_url: str = "sqlite+aiosqlite:///./inventory.db"
 
-    class Config:
-        env_file = ".env"
+    model_config = SettingsConfigDict(
+        env_file=Path(__file__).resolve().parents[1] / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
 
 settings = Settings()

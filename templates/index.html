@@ -3,34 +3,33 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Умная Ревизия</title>
+    <title>Умная ревизия</title>
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
 <div class="container">
-        <header>
-            <h1>Умная Ревизия</h1>
-        </header>
+    <header>
+        <h1>Умная ревизия</h1>
+    </header>
 
-        <div id="start-screen" class="screen active">
-            <h2>Выберите точку:</h2>
-            <select id="location-select">
-                <option value="Дмитров">Дмитров</option>
-                <option value="Дубна">Дубна</option>
-            </select>
-            <button id="start-btn" class="btn primary">Начать инвентаризацию</button>
-        </div>
-
-        <div id="inventory-screen" class="screen" style="display: none;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-                <h2 id="current-location-title" style="margin: 0;"></h2>
-                <button onclick="finishInventory()" style="background: #dc3545; color: white; border: none; padding: 8px 12px; border-radius: 5px; cursor: pointer;">Завершить</button>
-            </div>
-            
-            <div id="categories-container"></div>
-        </div>
+    <div id="start-screen" class="screen active">
+        <h2>Выберите точку</h2>
+        <select id="location-select">
+            <option value="Дмитров">Дмитров</option>
+            <option value="Дубна">Дубна</option>
+        </select>
+        <button id="start-btn" class="btn primary">Начать ревизию</button>
     </div>
 
-    <script src="/static/js/main.js"></script>
+    <div id="inventory-screen" class="screen" style="display: none;">
+        <div class="top-bar">
+            <h2 id="current-location-title" style="margin: 0;"></h2>
+            <button onclick="finishInventory()" class="finish-btn">Завершить</button>
+        </div>
+        <div id="categories-container"></div>
+    </div>
+</div>
+
+<script src="/static/js/main.js"></script>
 </body>
 </html>
