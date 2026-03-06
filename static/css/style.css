@@ -250,6 +250,3 @@ select, input[type="number"] {
     cursor: not-allowed;
 }
 
-#delete-report-btn {
-    margin-top: -85px;
-}
