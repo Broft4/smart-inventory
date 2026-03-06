@@ -229,12 +229,13 @@ window.verifyItem = async function(itemId, categoryId) {
             
             // Если 3 попытки кончились - фиксируем ошибку намертво
             if (result.attempts_left === 0) {
-                inputElement.disabled = true;
+                inputElement.setAttribute('disabled', 'true');
                 // Тут в будущем мы будем отправлять данные в БД FastAPI о недостаче
             } else {
                 inputElement.value = '';
             }
         }
+        window.saveState();
     } catch (error) {
         console.error("Ошибка:", error);
         msgElement.textContent = "Ошибка связи с сервером";
