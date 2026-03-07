@@ -1,95 +1,14 @@
-window.currentReportId = null;
-window.currentLocation = null;
-window.manualCategoryState = {};
-window.manualSubcategoryState = {};
-window.lastMessages = {};
+let inventoryState = null;
+let subcategoryAttempts = {};
+let itemAttempts = {};
 
-function getSubcategoryIcon(sub) {
-    if (sub.is_completed) return '✅';
-    if (sub.status === 'orange') return '⚠️';
-    if (sub.is_locked) return '🔒';
-    return '📂';
-}
-
-function getCategoryIcon(category) {
-    if (category.is_completed && category.status === 'green') return '✅';
-    if (category.is_completed && category.status === 'red') return '⚠️';
-    if (category.status === 'orange') return '🟠';
-    if (category.is_locked) return '🔒';
-    return '📁';
-}
-
-function getDefaultMessage(status, targetType) {
-    if (targetType === 'subcategory') {
-        if (status === 'green') return 'Подкатегория подтверждена.';
-        if (status === 'red') return 'Подкатегория завершена с расхождениями.';
-        if (status === 'orange') return 'Откройте товары и проверьте их поштучно.';
-        return '';
-    }
-
-    if (status === 'green') return 'Товар подтвержден.';
-    if (status === 'red') return 'Расхождение по товару зафиксировано.';
-    return '';
-}
-
-function getMessageColor(status) {
-    if (status === 'green') return '#28a745';
-    if (status === 'red' || status === 'orange') return '#dc3545';
-    return '#333';
-}
-
-function getCategoryExpanded(category) {
-    if (category.is_locked) return false;
-    if (Object.prototype.hasOwnProperty.call(window.manualCategoryState, category.id)) {
-        return window.manualCategoryState[category.id];
-    }
-    return category.is_expanded;
-}
-
-function getSubcategoryExpanded(subcategory, itemsVisible) {
-    if (subcategory.is_locked) return false;
-    if (Object.prototype.hasOwnProperty.call(window.manualSubcategoryState, subcategory.id)) {
-        return window.manualSubcategoryState[subcategory.id];
-    }
-    return subcategory.is_expanded || itemsVisible;
-}
-
-function setTransientMessage(targetId, text, color) {
-    window.lastMessages[targetId] = { text, color };
-}
-
-function renderMessageHtml(targetId, status, targetType) {
-    const saved = window.lastMessages[targetId];
-    const text = saved?.text ?? getDefaultMessage(status, targetType);
-    const color = saved?.color ?? getMessageColor(status);
-    return `<div id="msg-${targetId}" class="message" style="color:${color};">${text}</div>`;
-}
-
-function resetToStartScreen() {
-    document.getElementById('inventory-screen').style.display = 'none';
-    document.getElementById('start-screen').style.display = 'block';
-    document.getElementById('categories-container').innerHTML = '';
-    document.getElementById('current-location-title').textContent = '';
-    window.currentReportId = null;
-    window.currentLocation = null;
-    window.manualCategoryState = {};
-    window.manualSubcategoryState = {};
-    window.lastMessages = {};
-}
-
-function allCategoriesCompleted(categories) {
-    return Array.isArray(categories) && categories.length > 0 && categories.every(category => category.is_completed);
-}
-
-function updateFinishButtonState(categories) {
+function updateFinishButtonState() {
     const finishBtn = document.getElementById('finish-btn');
     const finishHint = document.getElementById('finish-hint');
-    if (!finishBtn) return;
+    if (!finishBtn || !inventoryState) return;
 
-    const allCompleted = categories.length > 0 && categories.every(cat => cat.is_completed);
-
+    const allCompleted = inventoryState.categories.length > 0 && inventoryState.categories.every(cat => cat.is_completed);
     finishBtn.disabled = !allCompleted;
-
     if (finishHint) {
         finishHint.textContent = allCompleted
             ? 'Все категории пройдены. Ревизию можно завершить.'
@@ -97,245 +16,275 @@ function updateFinishButtonState(categories) {
     }
 }
 
-function renderCategories(categories) {
-    const categoriesContainer = document.getElementById('categories-container');
-    categoriesContainer.innerHTML = '';
+function findSubcategory(subId) {
+    for (const category of inventoryState.categories) {
+        for (const sub of category.subcategories) {
+            if (sub.id === subId) return { category, sub };
+        }
+    }
+    return null;
+}
 
-    categories.forEach(category => {
-        const catExpanded = getCategoryExpanded(category);
+function findItem(itemId) {
+    for (const category of inventoryState.categories) {
+        for (const sub of category.subcategories) {
+            for (const item of sub.items) {
+                if (item.id === itemId) return { category, sub, item };
+            }
+        }
+    }
+    return null;
+}
+
+function renderCategories() {
+    const container = document.getElementById('categories-container');
+    container.innerHTML = '';
+
+    inventoryState.categories.forEach((cat) => {
         const catBlock = document.createElement('div');
-        catBlock.className = `main-category-block category-shell ${category.is_locked ? 'locked-category-shell' : ''}`;
+        catBlock.className = `main-category-block ${cat.is_available ? '' : 'blocked-category'}`;
+        const categoryHeaderIcon = cat.is_completed ? '✅' : (cat.is_available ? (cat.is_open ? '📂' : '📁') : '🔒');
         catBlock.innerHTML = `
-            <button
-                type="button"
-                class="category-toggle status-${category.status} ${category.is_locked ? 'locked-toggle' : ''}"
-                onclick="toggleCategory('${category.id}', ${category.is_locked})"
-            >
-                <span class="category-toggle-left">${getCategoryIcon(category)} ${category.name}</span>
-                <span id="category-arrow-${category.id}" class="category-arrow">${catExpanded ? '▾' : '▸'}</span>
-            </button>
-            <div id="category-body-${category.id}" class="category-body" style="display:${catExpanded ? 'block' : 'none'};"></div>
+            <div class="category-header" onclick="toggleCategory('${cat.id}')">
+                <span>${categoryHeaderIcon} ${cat.name}</span>
+                <span class="category-meta">${cat.is_completed ? 'завершена' : (cat.is_available ? 'в работе' : 'ожидает')}</span>
+            </div>
+            <div id="cat-body-${cat.id}" class="category-body" style="display:${cat.is_open ? 'block' : 'none'}"></div>
         `;
 
-        const categoryBody = catBlock.querySelector(`#category-body-${category.id}`);
+        const body = catBlock.querySelector(`#cat-body-${cat.id}`);
 
-        category.subcategories.forEach(sub => {
-            const itemsHtml = sub.items.map(item => `
-                <div class="item-card status-${item.status}">
-                    <h4 style="margin: 0 0 10px 0;">${item.name} (${item.uom})</h4>
-                    <div class="input-group">
-                        <input type="number" id="input-${item.id}" placeholder="Факт. кол-во" min="0" step="1" ${item.status === 'green' || item.status === 'red' ? 'disabled' : ''} value="${item.entered_quantity ?? ''}">
-                        <button class="btn check" onclick="verifyItem('${item.id}', '${sub.id}')" ${sub.status !== 'orange' || item.status === 'green' || item.status === 'red' ? 'disabled' : ''}>Ввод</button>
-                    </div>
-                    ${renderMessageHtml(item.id, item.status, 'item')}
-                </div>
-            `).join('');
-
-            const itemsVisible = sub.status === 'orange' || sub.items.some(item => item.status === 'green' || item.status === 'red');
-            const subExpanded = getSubcategoryExpanded(sub, itemsVisible);
-
+        cat.subcategories.forEach((sub) => {
             const subCard = document.createElement('div');
             subCard.className = `category-card subcategory-card status-${sub.status}`;
-            if (sub.is_locked) subCard.classList.add('locked-card');
             subCard.id = `card-${sub.id}`;
             subCard.dataset.id = sub.id;
 
-            subCard.innerHTML = `
-                <button type="button" class="subcategory-toggle" onclick="toggleSubcategory('${sub.id}', ${sub.is_locked})">
-                    <span>${getSubcategoryIcon(sub)} ${sub.name}</span>
-                    <span id="sub-arrow-${sub.id}" class="subcategory-arrow">${subExpanded ? '▾' : '▸'}</span>
-                </button>
-                <div id="body-${sub.id}" style="display:${subExpanded ? 'block' : 'none'};">
-                    <p class="subcategory-hint">Сначала введите общее количество по подкатегории.</p>
+            const locked = !cat.is_available || sub.is_locked;
+            const icon = locked ? '🔒' : (sub.is_completed ? '✅' : '📂');
+            const itemsHtml = sub.items.map(item => `
+                <div class="item-card">
+                    <h4>${item.name} (${item.uom})</h4>
+                    <p class="muted-text">По системе: ${item.expected_qty}</p>
                     <div class="input-group">
-                        <input type="number" id="input-${sub.id}" placeholder="Общее кол-во" min="0" step="1" ${sub.is_completed || sub.status === 'orange' ? 'disabled' : ''} value="${sub.entered_quantity ?? ''}">
-                        <button class="btn check" onclick="verifySubcategory('${sub.id}')" ${sub.is_locked || sub.is_completed || sub.status === 'orange' ? 'disabled' : ''}>Ввод</button>
+                        <input type="number" id="input-${item.id}" placeholder="Факт. шт." min="0" step="1" ${sub.status !== 'orange' ? 'disabled' : ''}>
+                        <button class="btn check btn-inline" onclick="verifyItem('${item.id}', '${sub.id}')" ${sub.status !== 'orange' ? 'disabled' : ''}>Ввод</button>
                     </div>
-                    ${renderMessageHtml(sub.id, sub.status, 'subcategory')}
-                    <div id="items-${sub.id}" class="items-container" style="display:${itemsVisible ? 'block' : 'none'};">
-                        <p class="items-title">Поштучная проверка товаров</p>
+                    <div id="msg-${item.id}" class="message"></div>
+                </div>
+            `).join('');
+
+            subCard.innerHTML = `
+                <h3 id="title-${sub.id}" onclick="toggleSubcategory('${sub.id}')">${icon} ${sub.name}</h3>
+                <div id="body-${sub.id}" style="display:${sub.is_expanded ? 'block' : 'none'}; ${locked ? 'opacity:.65;' : ''}">
+                    <p class="muted-text">Посчитайте всё вместе. По системе должно быть: <strong>${sub.expected_total}</strong></p>
+                    <div class="input-group">
+                        <input type="number" id="input-${sub.id}" placeholder="Общее кол-во" min="0" step="1" ${locked || sub.is_completed ? 'disabled' : ''}>
+                        <button class="btn check btn-inline" onclick="verifySubcategory('${sub.id}')" ${locked || sub.is_completed ? 'disabled' : ''}>Ввод</button>
+                    </div>
+                    <div id="msg-${sub.id}" class="message"></div>
+                    <div id="items-${sub.id}" class="items-container" style="display:${sub.status === 'orange' ? 'block' : 'none'};">
+                        <p class="items-warning">⚠️ Не сошлось. Считаем поштучно:</p>
                         ${itemsHtml}
                     </div>
                 </div>
             `;
-            categoryBody.appendChild(subCard);
+            body.appendChild(subCard);
         });
 
-        categoriesContainer.appendChild(catBlock);
+        container.appendChild(catBlock);
     });
+
+    updateFinishButtonState();
 }
 
-async function loadStructure(location) {
-    const response = await fetch(`/get-structure?location=${encodeURIComponent(location)}`);
-    if (!response.ok) throw new Error('Ошибка загрузки структуры');
-    const data = await response.json();
-    window.currentReportId = data.report_id;
-    window.currentLocation = data.location;
-    localStorage.setItem('inventoryLocation', data.location);
-    localStorage.setItem('inventoryReportId', String(data.report_id));
+function markSubcategoryComplete(subId) {
+    const found = findSubcategory(subId);
+    if (!found) return;
+    const { category, sub } = found;
+    sub.is_completed = true;
+    sub.is_expanded = false;
+    sub.is_locked = false;
+    if (sub.status === 'grey' || sub.status === 'orange') {
+        sub.status = 'green';
+    }
 
-    document.getElementById('start-screen').style.display = 'none';
-    document.getElementById('inventory-screen').style.display = 'block';
-    document.getElementById('current-location-title').textContent = `Точка: ${data.location}`;
-    renderCategories(data.categories);
-    updateFinishButtonState(data.categories);
-}
-
-document.addEventListener('DOMContentLoaded', async () => {
-    const startBtn = document.getElementById('start-btn');
-    const locationSelect = document.getElementById('location-select');
-    const savedLocation = localStorage.getItem('inventoryLocation');
-
-    if (savedLocation) {
-        locationSelect.value = savedLocation;
-        try {
-            await loadStructure(savedLocation);
-        } catch (error) {
-            console.error(error);
+    const currentSubIndex = category.subcategories.findIndex(item => item.id === subId);
+    const nextSub = category.subcategories[currentSubIndex + 1];
+    if (nextSub) {
+        nextSub.is_locked = false;
+        nextSub.is_expanded = true;
+    } else {
+        category.is_completed = true;
+        category.is_open = false;
+        const currentCategoryIndex = inventoryState.categories.findIndex(item => item.id === category.id);
+        const nextCategory = inventoryState.categories[currentCategoryIndex + 1];
+        if (nextCategory) {
+            nextCategory.is_available = true;
+            nextCategory.is_open = true;
+            if (nextCategory.subcategories[0]) {
+                nextCategory.subcategories[0].is_locked = false;
+                nextCategory.subcategories[0].is_expanded = true;
+            }
         }
     }
 
-    startBtn.addEventListener('click', async () => {
-        const selectedLocation = locationSelect.value;
-        startBtn.disabled = true;
-        startBtn.textContent = 'Загрузка...';
-        try {
-            window.manualCategoryState = {};
-            window.manualSubcategoryState = {};
-            window.lastMessages = {};
-            await loadStructure(selectedLocation);
-        } catch (error) {
-            alert('Ошибка при загрузке данных');
-            console.error(error);
-        } finally {
-            startBtn.disabled = false;
-            startBtn.textContent = 'Начать ревизию';
-        }
+    renderCategories();
+}
+
+function checkAllItemsCompleted(subId) {
+    const found = findSubcategory(subId);
+    if (!found) return;
+    const { sub } = found;
+    const allProcessed = sub.items.every(item => {
+        const attempts = itemAttempts[item.id] || 0;
+        const input = document.getElementById(`input-${item.id}`);
+        return attempts >= 3 || (input && input.disabled);
     });
-});
+    if (allProcessed) {
+        markSubcategoryComplete(subId);
+    }
+}
 
-window.toggleCategory = function(id, isLocked) {
-    if (isLocked) return;
-    const body = document.getElementById(`category-body-${id}`);
-    const arrow = document.getElementById(`category-arrow-${id}`);
-    if (!body || !arrow) return;
-
-    const shouldOpen = body.style.display === 'none';
-    body.style.display = shouldOpen ? 'block' : 'none';
-    arrow.textContent = shouldOpen ? '▾' : '▸';
-    window.manualCategoryState[id] = shouldOpen;
+window.toggleCategory = function (categoryId) {
+    const category = inventoryState.categories.find(item => item.id === categoryId);
+    if (!category || !category.is_available) return;
+    category.is_open = !category.is_open;
+    renderCategories();
 };
 
-window.toggleSubcategory = function(id, isLocked) {
-    if (isLocked) return;
-    const body = document.getElementById(`body-${id}`);
-    const arrow = document.getElementById(`sub-arrow-${id}`);
-    if (!body || !arrow) return;
-
-    const shouldOpen = body.style.display === 'none';
-    body.style.display = shouldOpen ? 'block' : 'none';
-    arrow.textContent = shouldOpen ? '▾' : '▸';
-    window.manualSubcategoryState[id] = shouldOpen;
+window.toggleSubcategory = function (subId) {
+    const found = findSubcategory(subId);
+    if (!found || found.sub.is_locked) return;
+    found.sub.is_expanded = !found.sub.is_expanded;
+    renderCategories();
 };
 
-window.verifySubcategory = async function(id) {
-    const inputElement = document.getElementById(`input-${id}`);
+window.verifySubcategory = async function (subId) {
+    const found = findSubcategory(subId);
+    if (!found) return;
+
+    const inputElement = document.getElementById(`input-${subId}`);
+    const msgElement = document.getElementById(`msg-${subId}`);
     const inputValue = parseFloat(inputElement.value);
-    const msgElement = document.getElementById(`msg-${id}`);
-    if (Number.isNaN(inputValue)) {
-        msgElement.textContent = 'Введите количество.';
-        msgElement.style.color = '#dc3545';
-        return;
-    }
+    if (Number.isNaN(inputValue)) return;
+
+    subcategoryAttempts[subId] = (subcategoryAttempts[subId] || 0) + 1;
 
     try {
         const response = await fetch('/verify', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                report_id: window.currentReportId,
-                target_id: id,
-                target_type: 'subcategory',
-                quantity: inputValue
-            })
+                report_id: inventoryState.report_id,
+                target_id: subId,
+                is_category: true,
+                quantity: inputValue,
+                attempt_number: subcategoryAttempts[subId],
+            }),
         });
         const result = await response.json();
-        const color = result.is_correct ? '#28a745' : '#dc3545';
-        setTransientMessage(id, result.message, color);
-        window.manualSubcategoryState[id] = true;
-        await loadStructure(window.currentLocation);
+        msgElement.textContent = result.message;
+        if (result.is_correct) {
+            msgElement.style.color = 'green';
+            inputElement.disabled = true;
+            markSubcategoryComplete(subId);
+            return;
+        }
+
+        msgElement.style.color = 'red';
+        if (result.expand_category) {
+            found.sub.status = 'orange';
+            found.sub.is_expanded = true;
+            inputElement.disabled = true;
+            renderCategories();
+        } else {
+            inputElement.value = '';
+        }
     } catch (error) {
+        console.error(error);
         msgElement.textContent = 'Ошибка сервера';
-        msgElement.style.color = '#dc3545';
     }
 };
 
-window.verifyItem = async function(id, subId) {
-    const inputElement = document.getElementById(`input-${id}`);
+window.verifyItem = async function (itemId, subId) {
+    const found = findItem(itemId);
+    if (!found) return;
+    const inputElement = document.getElementById(`input-${itemId}`);
+    const msgElement = document.getElementById(`msg-${itemId}`);
     const inputValue = parseFloat(inputElement.value);
-    const msgElement = document.getElementById(`msg-${id}`);
-    if (Number.isNaN(inputValue)) {
-        msgElement.textContent = 'Введите количество.';
-        msgElement.style.color = '#dc3545';
-        return;
-    }
+    if (Number.isNaN(inputValue)) return;
+
+    itemAttempts[itemId] = (itemAttempts[itemId] || 0) + 1;
 
     try {
         const response = await fetch('/verify', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                report_id: window.currentReportId,
-                target_id: id,
-                target_type: 'item',
-                quantity: inputValue
-            })
+                report_id: inventoryState.report_id,
+                target_id: itemId,
+                is_category: false,
+                quantity: inputValue,
+                attempt_number: itemAttempts[itemId],
+            }),
         });
         const result = await response.json();
-        const color = result.is_correct ? '#28a745' : '#dc3545';
-        setTransientMessage(id, result.message, color);
-        window.manualSubcategoryState[subId] = true;
-        await loadStructure(window.currentLocation);
+        msgElement.textContent = result.message;
+        msgElement.style.color = result.is_correct ? 'green' : 'red';
+
+        if (result.is_correct || result.attempts_left === 0) {
+            inputElement.disabled = true;
+        } else {
+            inputElement.value = '';
+        }
+
+        checkAllItemsCompleted(subId);
     } catch (error) {
+        console.error(error);
         msgElement.textContent = 'Ошибка сервера';
-        msgElement.style.color = '#dc3545';
     }
 };
 
-window.finishInventory = async function() {
-    if (!window.currentReportId) {
-        alert('Не найден активный отчет.');
-        return;
-    }
-
-    const finishBtn = document.getElementById('finish-btn');
-    if (finishBtn && finishBtn.disabled) {
-        alert('Нельзя завершить ревизию, пока не пройдены все категории.');
-        return;
-    }
-
-    const confirmed = confirm('Завершить ревизию на этой точке?');
-    if (!confirmed) return;
+window.finishInventory = async function () {
+    if (!inventoryState?.report_id) return;
+    if (!confirm('Завершить ревизию на этой точке?')) return;
 
     try {
         const response = await fetch('/finish-report', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ report_id: Number(window.currentReportId) })
+            body: JSON.stringify({ report_id: Number(inventoryState.report_id) }),
         });
-
         const data = await response.json();
-
         if (!response.ok || !data.success) {
             alert(data.message || 'Не удалось завершить ревизию.');
             return;
         }
-
-        localStorage.removeItem('inventoryLocation');
-        localStorage.removeItem('inventoryReportId');
-        resetToStartScreen();
+        location.reload();
     } catch (error) {
-        console.error(error);
+        console.error('finishInventory error:', error);
         alert('Ошибка при завершении ревизии.');
     }
 };
+
+async function loadInventory() {
+    const response = await fetch('/get-structure');
+    if (response.status === 401) {
+        location.href = '/login';
+        return;
+    }
+    const data = await response.json();
+    inventoryState = data;
+    renderCategories();
+}
+
+async function logout() {
+    await fetch('/api/logout', { method: 'POST' });
+    location.href = '/login';
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
+    document.getElementById('logout-btn').addEventListener('click', logout);
+    await loadInventory();
+});

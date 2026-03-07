@@ -1,563 +1,466 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import os
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from typing import Any
 
-from sqlalchemy import Select, select
+from fastapi import HTTPException, status
+from sqlalchemy import func, inspect, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import CheckResult, Report
+from app.config import settings
+from app.models import CheckResult, Report, User
 from app.schemas import (
     AdminReport,
     CategoryModel,
     CategoryResult,
+    DeleteResponse,
     DiscrepancyItem,
     InventoryStructureResponse,
     ItemModel,
+    MeResponse,
     ReportHistoryItem,
     ReportHistoryResponse,
+    RoleEnum,
     StatusEnum,
     SubcategoryModel,
+    UserCreateRequest,
+    UserInfo,
+    UserListResponse,
+    UserResponse,
+    UserUpdateRequest,
     VerifyRequest,
     VerifyResponse,
+    UserActionResponse,
 )
 
-
-MOCK_INVENTORY = {
-    "Дубна": {
-        "store_id": "store-dubna-mock",
-        "categories": [
+MOCK_INVENTORY: dict[str, dict[str, Any]] = {
+    'Дубна': {
+        'categories': [
             {
-                "id": "cat-drinks",
-                "name": "Напитки",
-                "subcategories": [
+                'id': 'cat-drinks',
+                'name': 'Напитки',
+                'subcategories': [
                     {
-                        "id": "sub-cola",
-                        "name": "Газировка",
-                        "items": [
-                            {"id": "item-cola-05", "name": "Кола 0.5", "uom": "шт", "expected_qty": 6},
-                            {"id": "item-fanta-05", "name": "Фанта 0.5", "uom": "шт", "expected_qty": 4},
+                        'id': 'sub-soda',
+                        'name': 'Газировка',
+                        'items': [
+                            {'id': 'dub-cola', 'name': 'Кола 0.5', 'expected_qty': 6},
+                            {'id': 'dub-fanta', 'name': 'Фанта 0.5', 'expected_qty': 4},
                         ],
                     },
                     {
-                        "id": "sub-juice",
-                        "name": "Соки",
-                        "items": [
-                            {"id": "item-apple-1", "name": "Сок яблочный 1л", "uom": "шт", "expected_qty": 5},
-                            {"id": "item-orange-1", "name": "Сок апельсиновый 1л", "uom": "шт", "expected_qty": 3},
+                        'id': 'sub-juice',
+                        'name': 'Соки',
+                        'items': [
+                            {'id': 'dub-apple', 'name': 'Сок яблочный 1л', 'expected_qty': 5},
+                            {'id': 'dub-orange', 'name': 'Сок апельсиновый 1л', 'expected_qty': 3},
                         ],
                     },
                 ],
             },
             {
-                "id": "cat-snacks",
-                "name": "Снеки",
-                "subcategories": [
+                'id': 'cat-snacks',
+                'name': 'Снеки',
+                'subcategories': [
                     {
-                        "id": "sub-chips",
-                        "name": "Чипсы",
-                        "items": [
-                            {"id": "item-lays-crab", "name": "Lays Краб", "uom": "шт", "expected_qty": 7},
-                            {"id": "item-lays-cheese", "name": "Lays Сыр", "uom": "шт", "expected_qty": 5},
+                        'id': 'sub-chips',
+                        'name': 'Чипсы',
+                        'items': [
+                            {'id': 'dub-chips-crab', 'name': 'Lays Краб', 'expected_qty': 7},
+                            {'id': 'dub-chips-cheese', 'name': 'Lays Сыр', 'expected_qty': 5},
                         ],
                     },
                     {
-                        "id": "sub-rusks",
-                        "name": "Сухарики",
-                        "items": [
-                            {"id": "item-rusks-cold", "name": "Сухарики Холодец", "uom": "шт", "expected_qty": 4},
-                            {"id": "item-rusks-bacon", "name": "Сухарики Бекон", "uom": "шт", "expected_qty": 6},
+                        'id': 'sub-croutons',
+                        'name': 'Сухарики',
+                        'items': [
+                            {'id': 'dub-croutons-jelly', 'name': 'Сухарики Холодец', 'expected_qty': 4},
+                            {'id': 'dub-croutons-bacon', 'name': 'Сухарики Бекон', 'expected_qty': 6},
                         ],
                     },
                 ],
             },
-        ],
+        ]
     },
-    "Дмитров": {
-        "store_id": "store-dmitrov-mock",
-        "categories": [
+    'Дмитров': {
+        'categories': [
             {
-                "id": "cat-coffee",
-                "name": "Кофе",
-                "subcategories": [
+                'id': 'cat-coffee',
+                'name': 'Кофе',
+                'subcategories': [
                     {
-                        "id": "sub-cold-coffee",
-                        "name": "Холодный кофе",
-                        "items": [
-                            {"id": "item-ice-latte", "name": "Айс латте", "uom": "шт", "expected_qty": 8},
-                            {"id": "item-ice-cappu", "name": "Айс капучино", "uom": "шт", "expected_qty": 5},
+                        'id': 'sub-ice-coffee',
+                        'name': 'Холодный кофе',
+                        'items': [
+                            {'id': 'dm-ice-latte', 'name': 'Айс латте', 'expected_qty': 8},
+                            {'id': 'dm-ice-capp', 'name': 'Айс капучино', 'expected_qty': 5},
                         ],
                     }
                 ],
             },
             {
-                "id": "cat-food",
-                "name": "Еда",
-                "subcategories": [
+                'id': 'cat-food',
+                'name': 'Еда',
+                'subcategories': [
                     {
-                        "id": "sub-shawarma",
-                        "name": "Шаурма",
-                        "items": [
-                            {"id": "item-chicken", "name": "Шаурма с курицей", "uom": "шт", "expected_qty": 9},
-                            {"id": "item-cheese", "name": "Шаурма сырная", "uom": "шт", "expected_qty": 3},
+                        'id': 'sub-shawarma',
+                        'name': 'Шаурма',
+                        'items': [
+                            {'id': 'dm-shawarma-chicken', 'name': 'Шаурма с курицей', 'expected_qty': 9},
+                            {'id': 'dm-shawarma-cheese', 'name': 'Шаурма сырная', 'expected_qty': 3},
                         ],
                     },
                     {
-                        "id": "sub-sandwich",
-                        "name": "Сэндвичи",
-                        "items": [
-                            {"id": "item-ham", "name": "Сэндвич с ветчиной", "uom": "шт", "expected_qty": 4},
-                            {"id": "item-tuna", "name": "Сэндвич с тунцом", "uom": "шт", "expected_qty": 2},
+                        'id': 'sub-sandwich',
+                        'name': 'Сэндвичи',
+                        'items': [
+                            {'id': 'dm-sandwich-ham', 'name': 'Сэндвич с ветчиной', 'expected_qty': 4},
+                            {'id': 'dm-sandwich-tuna', 'name': 'Сэндвич с тунцом', 'expected_qty': 2},
                         ],
                     },
                 ],
             },
-        ],
+        ]
     },
 }
 
-def _format_moscow_datetime(dt) -> str:
-    if dt is None:
-        return "-"
 
-    return (dt + timedelta(hours=3)).strftime("%d.%m.%Y %H:%M")
-
-def _normalize_location(location: str) -> str:
-    value = (location or "").strip().lower()
-    if value == "дмитров":
-        return "Дмитров"
-    return "Дубна"
+MSK_SHIFT = timedelta(hours=3)
 
 
-def _inventory_for(location: str) -> dict:
-    normalized = _normalize_location(location)
-    return MOCK_INVENTORY[normalized]
+def hash_password(password: str) -> str:
+    salt = os.urandom(16)
+    digest = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 200_000)
+    return f"{salt.hex()}${digest.hex()}"
 
 
-def _iter_subcategories(location: str):
-    data = _inventory_for(location)
-    for category in data["categories"]:
-        for subcategory in category["subcategories"]:
-            yield category, subcategory
-
-
-def _find_target(location: str, target_id: str, target_type: str) -> dict | None:
-    for category, subcategory in _iter_subcategories(location):
-        if target_type == "subcategory" and subcategory["id"] == target_id:
-            expected_qty = sum(item["expected_qty"] for item in subcategory["items"])
-            return {
-                "category": category,
-                "subcategory": subcategory,
-                "target_name": subcategory["name"],
-                "expected_qty": expected_qty,
-            }
-        if target_type == "item":
-            for item in subcategory["items"]:
-                if item["id"] == target_id:
-                    return {
-                        "category": category,
-                        "subcategory": subcategory,
-                        "item": item,
-                        "target_name": item["name"],
-                        "expected_qty": float(item["expected_qty"]),
-                    }
-    return None
-
-
-def _status_from_value(value: str | None) -> StatusEnum:
+def verify_password(password: str, stored_hash: str) -> bool:
     try:
-        return StatusEnum(value or StatusEnum.GREY.value)
+        salt_hex, digest_hex = stored_hash.split('$', 1)
     except ValueError:
-        return StatusEnum.GREY
+        return False
+    digest = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), bytes.fromhex(salt_hex), 200_000)
+    return hmac.compare_digest(digest.hex(), digest_hex)
 
 
-def _report_status_label(status: str) -> str:
-    if status == "completed":
-        return "завершена"
-    if status == "in_progress":
-        return "в процессе"
-    return status or "-"
+def bootstrap_schema_and_admin(sync_conn) -> None:
+    inspector = inspect(sync_conn)
+    tables = set(inspector.get_table_names())
+
+    if 'users' in tables:
+        columns = {column['name'] for column in inspector.get_columns('users')}
+        required = {'id', 'full_name', 'birth_date', 'username', 'password_hash', 'role', 'location', 'is_active', 'created_at'}
+        if not required.issubset(columns):
+            sync_conn.execute(text('DROP TABLE IF EXISTS users'))
+
+    legacy_tables = {'category_results', 'discrepancies'}
+    if 'reports' in tables:
+        report_columns = {column['name'] for column in inspector.get_columns('reports')}
+        required_report_columns = {'id', 'location', 'report_date', 'status', 'date_created'}
+        if not required_report_columns.issubset(report_columns):
+            sync_conn.execute(text('DROP TABLE IF EXISTS check_results'))
+            sync_conn.execute(text('DROP TABLE IF EXISTS discrepancies'))
+            sync_conn.execute(text('DROP TABLE IF EXISTS category_results'))
+            sync_conn.execute(text('DROP TABLE IF EXISTS reports'))
+    elif legacy_tables & tables:
+        sync_conn.execute(text('DROP TABLE IF EXISTS check_results'))
+        sync_conn.execute(text('DROP TABLE IF EXISTS discrepancies'))
+        sync_conn.execute(text('DROP TABLE IF EXISTS category_results'))
+
+    from app.database import Base
+    Base.metadata.create_all(sync_conn)
 
 
-async def _get_or_create_active_report(location: str, db: AsyncSession) -> Report:
-    normalized = _normalize_location(location)
-    stmt = (
-        select(Report)
-        .where(Report.location == normalized, Report.status == "in_progress")
-        .order_by(Report.id.desc())
-        .limit(1)
+async def ensure_default_admin(db: AsyncSession) -> None:
+    admin = await db.scalar(select(User).where(User.role == RoleEnum.ADMIN.value).limit(1))
+    if admin:
+        return
+
+    admin_user = User(
+        full_name=settings.default_admin_full_name,
+        birth_date=date.fromisoformat(settings.default_admin_birth_date),
+        username=settings.default_admin_username,
+        password_hash=hash_password(settings.default_admin_password),
+        role=RoleEnum.ADMIN.value,
+        location=None,
+        is_active=True,
     )
-    report = await db.scalar(stmt)
+    db.add(admin_user)
+    await db.commit()
+
+
+def user_to_schema(user: User) -> UserInfo:
+    return UserInfo(
+        id=user.id,
+        full_name=user.full_name,
+        birth_date=user.birth_date,
+        username=user.username,
+        role=RoleEnum(user.role),
+        location=user.location,
+        is_active=user.is_active,
+    )
+
+
+async def authenticate_user(username: str, password: str, db: AsyncSession) -> User | None:
+    user = await db.scalar(select(User).where(User.username == username).limit(1))
+    if not user or not user.is_active:
+        return None
+    if not verify_password(password, user.password_hash):
+        return None
+    return user
+
+
+async def list_users(db: AsyncSession) -> UserListResponse:
+    rows = await db.scalars(select(User).order_by(User.role.desc(), User.full_name.asc()))
+    return UserListResponse(users=[user_to_schema(user) for user in rows.all()])
+
+
+async def create_user(payload: UserCreateRequest, db: AsyncSession) -> UserActionResponse:
+    existing = await db.scalar(select(User).where(User.username == payload.username).limit(1))
+    if existing:
+        raise HTTPException(status_code=400, detail='Пользователь с таким логином уже существует.')
+
+    user = User(
+        full_name=payload.full_name.strip(),
+        birth_date=payload.birth_date,
+        username=payload.username.strip(),
+        password_hash=hash_password(payload.password),
+        role=payload.role.value,
+        location=(payload.location or None),
+        is_active=payload.is_active,
+    )
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    return UserActionResponse(success=True, message='Пользователь создан.', user=user_to_schema(user))
+
+
+async def update_user(user_id: int, payload: UserUpdateRequest, db: AsyncSession, current_admin_id: int | None = None) -> UserActionResponse:
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail='Пользователь не найден.')
+
+    duplicate = await db.scalar(
+        select(User).where(User.username == payload.username, User.id != user_id).limit(1)
+    )
+    if duplicate:
+        raise HTTPException(status_code=400, detail='Пользователь с таким логином уже существует.')
+
+
+    if user.id == current_admin_id and payload.role != RoleEnum.ADMIN:
+        raise HTTPException(status_code=400, detail='Нельзя снять роль admin у своего аккаунта.')
+
+    user.full_name = payload.full_name.strip()
+    user.birth_date = payload.birth_date
+    user.username = payload.username.strip()
+    user.role = payload.role.value
+    user.location = payload.location or None
+    user.is_active = payload.is_active
+    if payload.password:
+        user.password_hash = hash_password(payload.password)
+
+    await db.commit()
+    await db.refresh(user)
+    return UserActionResponse(success=True, message='Пользователь обновлён.', user=user_to_schema(user))
+
+
+async def delete_user(user_id: int, db: AsyncSession, current_admin_id: int | None = None) -> DeleteResponse:
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail='Пользователь не найден.')
+
+    if user.id == current_admin_id:
+        raise HTTPException(status_code=400, detail='Нельзя удалить собственный аккаунт.')
+
+    if user.role == RoleEnum.ADMIN.value:
+        admin_count = await db.scalar(select(func.count()).select_from(User).where(User.role == RoleEnum.ADMIN.value))
+        if (admin_count or 0) <= 1:
+            raise HTTPException(status_code=400, detail='Нельзя удалить последнего администратора.')
+
+    await db.delete(user)
+    await db.commit()
+    return DeleteResponse(success=True, message='Пользователь удалён.')
+
+
+async def get_or_create_daily_report(location: str, db: AsyncSession) -> Report:
+    today = date.today()
+    report = await db.scalar(
+        select(Report).where(Report.location == location, Report.report_date == today).limit(1)
+    )
     if report:
         return report
 
-    inventory = _inventory_for(normalized)
-    report = Report(location=normalized, store_id=inventory["store_id"], status="in_progress")
+    report = Report(location=location, report_date=today, status='in_progress')
     db.add(report)
     await db.commit()
     await db.refresh(report)
     return report
 
 
-async def _fetch_results_for_report(report_id: int, db: AsyncSession) -> list[CheckResult]:
-    stmt: Select[tuple[CheckResult]] = select(CheckResult).where(CheckResult.report_id == report_id)
-    result = await db.execute(stmt)
-    return list(result.scalars().all())
+async def get_inventory_data(location: str, db: AsyncSession) -> InventoryStructureResponse:
+    normalized = location.strip().title()
+    if normalized not in MOCK_INVENTORY:
+        raise HTTPException(status_code=404, detail='Неизвестная точка.')
 
-
-async def get_inventory_data(location_name: str, db: AsyncSession) -> InventoryStructureResponse:
-    normalized = _normalize_location(location_name)
-    inventory = _inventory_for(normalized)
-    report = await _get_or_create_active_report(normalized, db)
-    results = await _fetch_results_for_report(report.id, db)
-    result_by_target = {row.target_id: row for row in results}
-
-    completed_subcategory_ids = {
-        row.subcategory_id
-        for row in results
-        if row.target_type == "subcategory" and row.status in {StatusEnum.GREEN.value, StatusEnum.RED.value}
-    }
-
-    raw_categories = inventory["categories"]
-    active_category_index = next(
-        (
-            idx
-            for idx, category in enumerate(raw_categories)
-            if not all(sub["id"] in completed_subcategory_ids for sub in category["subcategories"])
-        ),
-        None,
-    )
+    report = await get_or_create_daily_report(normalized, db)
 
     categories: list[CategoryModel] = []
-
-    for idx, category in enumerate(raw_categories):
-        category_completed = all(
-            sub["id"] in completed_subcategory_ids for sub in category["subcategories"]
-        ) if category["subcategories"] else False
-        category_locked = active_category_index is not None and idx > active_category_index
-        category_expanded = active_category_index is not None and idx == active_category_index
-
-        local_first_open_subcategory_id = next(
-            (
-                sub["id"]
-                for sub in category["subcategories"]
-                if sub["id"] not in completed_subcategory_ids
-            ),
-            None,
-        )
-
+    for cat_index, raw_category in enumerate(MOCK_INVENTORY[normalized]['categories']):
         subcategories: list[SubcategoryModel] = []
-        category_statuses: list[StatusEnum] = []
-
-        for subcategory in category["subcategories"]:
-            sub_row = result_by_target.get(subcategory["id"])
-            sub_status = _status_from_value(sub_row.status if sub_row else None)
-            is_completed = sub_status in {StatusEnum.GREEN, StatusEnum.RED}
-
-            items: list[ItemModel] = []
-            for item in subcategory["items"]:
-                item_row = result_by_target.get(item["id"])
-                item_status = _status_from_value(item_row.status if item_row else None)
-                items.append(
-                    ItemModel(
-                        id=item["id"],
-                        name=item["name"],
-                        uom=item.get("uom", "шт"),
-                        status=item_status,
-                        entered_quantity=(item_row.actual_qty if item_row and item_status != StatusEnum.GREY else None),
-                    )
+        for sub_index, raw_sub in enumerate(raw_category['subcategories']):
+            items = [
+                ItemModel(
+                    id=item['id'],
+                    name=item['name'],
+                    expected_qty=float(item['expected_qty']),
                 )
-
-            if category_locked:
-                is_locked = True
-            elif category_completed:
-                is_locked = False
-            else:
-                is_locked = not is_completed and subcategory["id"] != local_first_open_subcategory_id
-
-            is_expanded = False
-            if not category_locked:
-                if sub_status == StatusEnum.ORANGE:
-                    is_expanded = True
-                elif not category_completed and subcategory["id"] == local_first_open_subcategory_id:
-                    is_expanded = True
-
+                for item in raw_sub['items']
+            ]
             subcategories.append(
                 SubcategoryModel(
-                    id=subcategory["id"],
-                    name=subcategory["name"],
-                    status=sub_status,
-                    is_locked=is_locked,
-                    is_completed=is_completed,
-                    is_expanded=is_expanded,
+                    id=raw_sub['id'],
+                    name=raw_sub['name'],
+                    expected_total=sum(item.expected_qty for item in items),
+                    is_locked=not (cat_index == 0 and sub_index == 0),
+                    is_expanded=cat_index == 0 and sub_index == 0,
                     items=items,
-                    entered_quantity=(sub_row.actual_qty if sub_row and sub_status != StatusEnum.GREY else None),
                 )
             )
-            category_statuses.append(sub_status)
-
-        category_status = StatusEnum.GREY
-        if category_statuses:
-            if all(status == StatusEnum.GREEN for status in category_statuses):
-                category_status = StatusEnum.GREEN
-            elif all(status in {StatusEnum.GREEN, StatusEnum.RED} for status in category_statuses) and any(
-                status == StatusEnum.RED for status in category_statuses
-            ):
-                category_status = StatusEnum.RED
-            elif any(status == StatusEnum.ORANGE for status in category_statuses):
-                category_status = StatusEnum.ORANGE
 
         categories.append(
             CategoryModel(
-                id=category["id"],
-                name=category["name"],
-                status=category_status,
-                is_locked=category_locked,
-                is_completed=category_completed,
-                is_expanded=category_expanded,
+                id=raw_category['id'],
+                name=raw_category['name'],
+                is_available=cat_index == 0,
+                is_open=cat_index == 0,
                 subcategories=subcategories,
             )
         )
 
-    return InventoryStructureResponse(
-        location=normalized,
-        store_id=inventory["store_id"],
-        report_id=report.id,
-        categories=categories,
-    )
+    return InventoryStructureResponse(report_id=report.id, location=normalized, categories=categories)
 
 
-async def _get_check_result(report_id: int, target_id: str, db: AsyncSession) -> CheckResult | None:
-    stmt = select(CheckResult).where(CheckResult.report_id == report_id, CheckResult.target_id == target_id)
-    return await db.scalar(stmt)
+def _find_target(target_id: str) -> tuple[str, str, str, float]:
+    for location_data in MOCK_INVENTORY.values():
+        for category in location_data['categories']:
+            for subcategory in category['subcategories']:
+                if subcategory['id'] == target_id:
+                    expected_total = sum(item['expected_qty'] for item in subcategory['items'])
+                    return category['name'], subcategory['name'], 'subcategory', float(expected_total)
+                for item in subcategory['items']:
+                    if item['id'] == target_id:
+                        return category['name'], subcategory['name'], 'item', float(item['expected_qty'])
+    raise HTTPException(status_code=404, detail='Цель проверки не найдена.')
 
 
-async def _ensure_check_result(report: Report, target_meta: dict, target_id: str, target_type: str, db: AsyncSession) -> CheckResult:
-    existing = await _get_check_result(report.id, target_id, db)
-    if existing:
-        return existing
+async def verify_item_or_category(data: VerifyRequest, db: AsyncSession, checked_by_user_id: int | None = None) -> VerifyResponse:
+    category_name, subcategory_name, target_type, expected_qty = _find_target(data.target_id)
+    is_correct = abs(data.quantity - expected_qty) < 1e-9
 
-    row = CheckResult(
-        report_id=report.id,
-        category_id=target_meta["category"]["id"],
-        category_name=target_meta["category"]["name"],
-        subcategory_id=target_meta["subcategory"]["id"],
-        subcategory_name=target_meta["subcategory"]["name"],
-        target_type=target_type,
-        target_id=target_id,
-        target_name=target_meta["target_name"],
-        expected_qty=float(target_meta["expected_qty"]),
-        status=StatusEnum.GREY.value,
-    )
-    db.add(row)
-    await db.flush()
-    return row
-
-
-async def _get_subcategory_item_rows(report_id: int, subcategory_id: str, db: AsyncSession) -> list[CheckResult]:
-    stmt = select(CheckResult).where(
-        CheckResult.report_id == report_id,
-        CheckResult.subcategory_id == subcategory_id,
-        CheckResult.target_type == "item",
-    )
-    result = await db.execute(stmt)
-    return list(result.scalars().all())
-
-
-async def _finalize_subcategory_by_items(report: Report, subcategory_id: str, db: AsyncSession) -> bool:
-    target_meta = _find_target(report.location, subcategory_id, "subcategory")
-    if not target_meta:
-        return False
-
-    item_rows = await _get_subcategory_item_rows(report.id, subcategory_id, db)
-    expected_item_ids = {item["id"] for item in target_meta["subcategory"]["items"]}
-    completed_item_ids = {
-        row.target_id
-        for row in item_rows
-        if row.status in {StatusEnum.GREEN.value, StatusEnum.RED.value}
-    }
-    if expected_item_ids != completed_item_ids:
-        return False
-
-    sub_row = await _ensure_check_result(report, target_meta, subcategory_id, "subcategory", db)
-    total_actual = sum((row.actual_qty or 0) for row in item_rows)
-    total_expected = sum((row.expected_qty or 0) for row in item_rows)
-    total_diff = total_actual - total_expected
-    all_green = all(row.status == StatusEnum.GREEN.value for row in item_rows)
-
-    sub_row.actual_qty = float(total_actual)
-    sub_row.expected_qty = float(total_expected)
-    sub_row.diff = float(total_diff)
-    sub_row.status = StatusEnum.GREEN.value if all_green else StatusEnum.RED.value
-    await db.flush()
-    return True
-
-
-async def verify_item_or_category(data: VerifyRequest, db: AsyncSession) -> VerifyResponse:
-    report = await db.get(Report, data.report_id)
-    if not report:
-        return VerifyResponse(
-            is_correct=False,
-            attempts_left=0,
-            message="Отчет не найден. Начните ревизию заново.",
-            expand_items=False,
-            subcategory_completed=False,
-            target_status=StatusEnum.RED,
+    if is_correct:
+        db.add(
+            CheckResult(
+                report_id=data.report_id,
+                category_name=category_name,
+                subcategory_name=subcategory_name,
+                target_type=target_type,
+                target_id=data.target_id,
+                target_name=subcategory_name if target_type == 'subcategory' else next(
+                    item['name']
+                    for loc in MOCK_INVENTORY.values()
+                    for cat in loc['categories']
+                    for sub in cat['subcategories']
+                    for item in sub['items']
+                    if item['id'] == data.target_id
+                ),
+                expected_qty=expected_qty,
+                actual_qty=data.quantity,
+                diff=0,
+                status='green',
+                attempts_used=data.attempt_number,
+                checked_by_user_id=checked_by_user_id,
+            )
         )
-
-    target_meta = _find_target(report.location, data.target_id, data.target_type)
-    if not target_meta:
-        return VerifyResponse(
-            is_correct=False,
-            attempts_left=0,
-            message="Цель проверки не найдена в структуре точки.",
-            expand_items=False,
-            subcategory_completed=False,
-            target_status=StatusEnum.RED,
-        )
-
-    row = await _ensure_check_result(report, target_meta, data.target_id, data.target_type, db)
-
-    if row.status in {StatusEnum.GREEN.value, StatusEnum.RED.value}:
-        return VerifyResponse(
-            is_correct=row.status == StatusEnum.GREEN.value,
-            attempts_left=0,
-            message="Этот пункт уже зафиксирован.",
-            expand_items=False,
-            subcategory_completed=data.target_type == "subcategory",
-            target_status=_status_from_value(row.status),
-        )
-
-    row.attempts_used += 1
-    row.actual_qty = float(data.quantity)
-    row.diff = float(data.quantity - row.expected_qty)
-
-    if float(data.quantity) == float(row.expected_qty):
-        row.status = StatusEnum.GREEN.value
-        subcategory_completed = False
-        if data.target_type == "item":
-            subcategory_completed = await _finalize_subcategory_by_items(report, row.subcategory_id, db)
         await db.commit()
-        return VerifyResponse(
-            is_correct=True,
-            attempts_left=max(0, 3 - row.attempts_used),
-            message="Верно. Значение зафиксировано.",
-            expand_items=False,
-            subcategory_completed=subcategory_completed or data.target_type == "subcategory",
-            target_status=StatusEnum.GREEN,
-        )
+        return VerifyResponse(is_correct=True, attempts_left=0, message='Верно!', expand_category=False)
 
-    attempts_left = max(0, 3 - row.attempts_used)
+    attempts_left = max(0, 3 - data.attempt_number)
     if attempts_left > 0:
-        row.status = StatusEnum.GREY.value
-        await db.commit()
         return VerifyResponse(
             is_correct=False,
             attempts_left=attempts_left,
-            message=f"Неверно. Осталось попыток: {attempts_left}.",
-            expand_items=False,
-            subcategory_completed=False,
-            target_status=StatusEnum.GREY,
+            message=f'Неверно. Осталось {attempts_left} попытк(и).',
+            expand_category=False,
         )
 
-    if data.target_type == "subcategory":
-        row.status = StatusEnum.ORANGE.value
-        await db.commit()
-        return VerifyResponse(
-            is_correct=False,
-            attempts_left=0,
-            message="Расхождение по подкатегории. Переходим к поштучной проверке.",
-            expand_items=True,
-            subcategory_completed=False,
-            target_status=StatusEnum.ORANGE,
+    status_value = 'orange' if data.is_category else 'red'
+    target_name = subcategory_name if target_type == 'subcategory' else next(
+        item['name']
+        for loc in MOCK_INVENTORY.values()
+        for cat in loc['categories']
+        for sub in cat['subcategories']
+        for item in sub['items']
+        if item['id'] == data.target_id
+    )
+    db.add(
+        CheckResult(
+            report_id=data.report_id,
+            category_name=category_name,
+            subcategory_name=subcategory_name,
+            target_type=target_type,
+            target_id=data.target_id,
+            target_name=target_name,
+            expected_qty=expected_qty,
+            actual_qty=data.quantity,
+            diff=float(data.quantity - expected_qty),
+            status=status_value,
+            attempts_used=data.attempt_number,
+            checked_by_user_id=checked_by_user_id,
         )
-
-    row.status = StatusEnum.RED.value
-    subcategory_completed = await _finalize_subcategory_by_items(report, row.subcategory_id, db)
+    )
     await db.commit()
     return VerifyResponse(
         is_correct=False,
         attempts_left=0,
-        message="Расхождение по товару зафиксировано.",
-        expand_items=False,
-        subcategory_completed=subcategory_completed,
-        target_status=StatusEnum.RED,
+        message='Расхождение! Переходим к поштучной проверке...' if data.is_category else 'Расхождение зафиксировано.',
+        expand_category=data.is_category,
     )
-
-
-async def _report_all_categories_completed(report: Report, db: AsyncSession) -> bool:
-    inventory = _inventory_for(report.location)
-    expected_subcategory_ids = {
-        sub["id"]
-        for category in inventory["categories"]
-        for sub in category["subcategories"]
-    }
-    if not expected_subcategory_ids:
-        return False
-
-    stmt = select(CheckResult).where(
-        CheckResult.report_id == report.id,
-        CheckResult.target_type == "subcategory",
-        CheckResult.status.in_([StatusEnum.GREEN.value, StatusEnum.RED.value]),
-    )
-    result = await db.execute(stmt)
-    completed_subcategory_ids = {row.target_id for row in result.scalars().all()}
-    return expected_subcategory_ids.issubset(completed_subcategory_ids)
 
 
 async def finish_report(report_id: int, db: AsyncSession) -> tuple[bool, str]:
     report = await db.get(Report, report_id)
     if not report:
-        return False, "Отчет не найден."
-
-    if report.status == "completed":
-        return True, "Ревизия уже была завершена."
-
-    if not await _report_all_categories_completed(report, db):
-        return False, "Нельзя завершить ревизию, пока не пройдены все категории."
-
-    report.status = "completed"
+        return False, 'Ревизия не найдена.'
+    report.status = 'completed'
     await db.commit()
-    return True, "Ревизия завершена."
-
-
-async def delete_report(report_id: int, location: str, db: AsyncSession) -> tuple[bool, str]:
-    normalized = _normalize_location(location)
-    report = await db.get(Report, report_id)
-    if not report:
-        return False, "Ревизия не найдена."
-
-    if report.location != normalized:
-        return False, "Эта ревизия относится к другой точке."
-
-    await db.delete(report)
-    await db.commit()
-    return True, "Ревизия удалена."
+    return True, 'Ревизия завершена.'
 
 
 async def get_reports_history(location: str, db: AsyncSession) -> ReportHistoryResponse:
-    normalized = _normalize_location(location)
-    stmt = select(Report).where(Report.location == normalized).order_by(Report.id.desc())
-    result = await db.execute(stmt)
-    reports = list(result.scalars().all())
-
-    return ReportHistoryResponse(
-        location=normalized,
-        reports=[
-            ReportHistoryItem(
-                report_id=report.id,
-                date=_format_moscow_datetime(report.date_created),
-                status=report.status,
-                label=f"{_format_moscow_datetime(report.date_created)} — {_report_status_label(report.status)}",
-            )
-            for report in reports
-        ],
-    )
+    normalized = location.strip().title()
+    reports = (
+        await db.scalars(
+            select(Report).where(Report.location == normalized).order_by(Report.report_date.desc(), Report.id.desc())
+        )
+    ).all()
+    history = [
+        ReportHistoryItem(
+            report_id=report.id,
+            date=_format_moscow_datetime(report.date_created),
+            status=report.status,
+            label=f"{_format_moscow_datetime(report.date_created)} — {_report_status_label(report.status)}",
+        )
+        for report in reports
+    ]
+    return ReportHistoryResponse(location=normalized, reports=history)
 
 
 async def get_admin_report(location: str, db: AsyncSession, report_id: int | None = None) -> AdminReport:
-    normalized = _normalize_location(location)
-
+    normalized = location.strip().title()
     report: Report | None = None
     if report_id is not None:
         report = await db.get(Report, report_id)
@@ -565,61 +468,64 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
             report = None
 
     if report is None:
-        stmt = select(Report).where(Report.location == normalized).order_by(Report.id.desc()).limit(1)
-        report = await db.scalar(stmt)
+        report = await db.scalar(
+            select(Report).where(Report.location == normalized).order_by(Report.report_date.desc(), Report.id.desc()).limit(1)
+        )
 
     if not report:
         return AdminReport(
             report_id=None,
-            date="-",
+            date='-',
             location=normalized,
-            status="-",
+            status='-',
             categories=[],
             total_plus=0.0,
             total_minus=0.0,
         )
 
-    results = await _fetch_results_for_report(report.id, db)
-    subcategory_rows = [
-        row for row in results if row.target_type == "subcategory" and row.status in {"green", "red", "orange"}
-    ]
-    item_rows = [row for row in results if row.target_type == "item" and row.status == "red"]
+    rows = (
+        await db.scalars(select(CheckResult).where(CheckResult.report_id == report.id).order_by(CheckResult.id.asc()))
+    ).all()
 
     grouped_problem_items: dict[str, list[DiscrepancyItem]] = defaultdict(list)
-    for row in item_rows:
-        grouped_problem_items[row.category_name].append(
-            DiscrepancyItem(
-                name=row.target_name,
-                expected=float(row.expected_qty),
-                actual=float(row.actual_qty or 0),
-                diff=float(row.diff or 0),
-            )
-        )
-
     category_status_map: dict[str, StatusEnum] = defaultdict(lambda: StatusEnum.GREY)
-    for row in subcategory_rows:
-        current = category_status_map[row.category_name]
+
+    for row in rows:
         row_status = _status_from_value(row.status)
         if row_status == StatusEnum.RED:
             category_status_map[row.category_name] = StatusEnum.RED
-        elif row_status == StatusEnum.ORANGE and current != StatusEnum.RED:
+        elif row_status == StatusEnum.ORANGE and category_status_map[row.category_name] != StatusEnum.RED:
             category_status_map[row.category_name] = StatusEnum.ORANGE
-        elif row_status == StatusEnum.GREEN and current == StatusEnum.GREY:
+        elif row_status == StatusEnum.GREEN and category_status_map[row.category_name] == StatusEnum.GREY:
             category_status_map[row.category_name] = StatusEnum.GREEN
 
+        if row.target_type == 'item' and row.status == 'red':
+            checked_by = None
+            if row.checked_by_user_id:
+                user = await db.get(User, row.checked_by_user_id)
+                checked_by = user.full_name if user else None
+            grouped_problem_items[row.category_name].append(
+                DiscrepancyItem(
+                    name=row.target_name,
+                    expected=float(row.expected_qty),
+                    actual=float(row.actual_qty or 0),
+                    diff=float(row.diff or 0),
+                    checked_by=checked_by,
+                )
+            )
+
     categories = []
-    ordered_category_names = [cat["name"] for cat in _inventory_for(report.location)["categories"]]
-    for category_name in ordered_category_names:
+    for raw_category in MOCK_INVENTORY.get(normalized, {}).get('categories', []):
         categories.append(
             CategoryResult(
-                name=category_name,
-                status=category_status_map[category_name],
-                problem_items=grouped_problem_items.get(category_name, []),
+                name=raw_category['name'],
+                status=category_status_map[raw_category['name']],
+                problem_items=grouped_problem_items.get(raw_category['name'], []),
             )
         )
 
-    total_plus = sum(max(float(row.diff or 0), 0.0) for row in item_rows)
-    total_minus = abs(sum(min(float(row.diff or 0), 0.0) for row in item_rows))
+    total_plus = sum(max(float(row.diff or 0), 0.0) for row in rows if row.status == 'red')
+    total_minus = abs(sum(min(float(row.diff or 0), 0.0) for row in rows if row.status == 'red'))
 
     return AdminReport(
         report_id=report.id,
@@ -627,6 +533,41 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         location=report.location,
         status=_report_status_label(report.status),
         categories=categories,
-        total_plus=float(total_plus),
-        total_minus=float(total_minus),
+        total_plus=total_plus,
+        total_minus=total_minus,
     )
+
+
+async def delete_report(report_id: int, db: AsyncSession) -> DeleteResponse:
+    report = await db.get(Report, report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail='Ревизия не найдена.')
+    await db.delete(report)
+    await db.commit()
+    return DeleteResponse(success=True, message='Ревизия удалена.')
+
+
+async def get_me_response(user: User | None) -> MeResponse:
+    if not user:
+        return MeResponse(authenticated=False, user=None)
+    return MeResponse(authenticated=True, user=user_to_schema(user))
+
+
+def _format_moscow_datetime(dt: datetime | None) -> str:
+    if dt is None:
+        return '-'
+    return (dt + MSK_SHIFT).strftime('%d.%m.%Y %H:%M')
+
+
+def _status_from_value(value: str) -> StatusEnum:
+    if value == 'green':
+        return StatusEnum.GREEN
+    if value == 'orange':
+        return StatusEnum.ORANGE
+    if value == 'red':
+        return StatusEnum.RED
+    return StatusEnum.GREY
+
+
+def _report_status_label(status_value: str) -> str:
+    return 'Завершена' if status_value == 'completed' else 'В процессе'

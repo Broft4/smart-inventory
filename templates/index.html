@@ -8,36 +8,44 @@
 </head>
 <body>
 <div class="container">
-    <header>
-        <h1>Умная ревизия</h1>
+    <header class="page-header">
+        <div>
+            <h1>Умная ревизия</h1>
+            {% if no_location_assigned %}
+                <p id="employee-info" class="muted-text">{{ user.full_name }}</p>
+            {% else %}
+                <p id="employee-info" class="muted-text">{{ user.full_name }} · точка {{ user.location }}</p>
+            {% endif %}
+        </div>
+        <button id="logout-btn" class="btn secondary btn-inline" type="button">Выйти</button>
     </header>
 
-    <div id="start-screen" class="screen active">
-        <h2>Выберите точку</h2>
-        <select id="location-select">
-            <option value="Дмитров">Дмитров</option>
-            <option value="Дубна">Дубна</option>
-        </select>
-        <button id="start-btn" class="btn primary">Начать ревизию</button>
-    </div>
-
-    <div id="inventory-screen" class="screen" style="display: none;">
-        <div class="top-bar">
-            <h2 id="current-location-title" style="margin: 0;"></h2>
-
-            <div class="finish-block">
-                <button id="finish-btn" onclick="finishInventory()" class="finish-btn" disabled>
-                    Завершить
-                </button>
-                <div id="finish-hint" class="finish-hint">
-                    Кнопка станет доступна после прохождения всех категорий.
+    {% if no_location_assigned %}
+        <div class="warning-card">
+            <h2>Точка вам ещё не выдана</h2>
+            <p>Обратитесь к администратору, чтобы вам назначили точку для работы.</p>
+        </div>
+    {% else %}
+        <div id="inventory-screen" class="screen active">
+            <div class="top-bar">
+                <h2 id="current-location-title">Точка: {{ user.location }}</h2>
+                <div class="finish-block">
+                    <button id="finish-btn" onclick="finishInventory()" class="finish-btn" disabled>Завершить</button>
+                    <div id="finish-hint" class="finish-hint">Кнопка станет доступна после прохождения всех категорий.</div>
                 </div>
             </div>
+            <div id="categories-container"></div>
         </div>
-        <div id="categories-container"></div>
-    </div>
-</div>
 
-<script src="/static/js/main.js"></script>
+        <script>
+            window.currentUser = {{ {
+                'id': user.id,
+                'full_name': user.full_name,
+                'location': user.location
+            } | tojson }};
+        </script>
+        <script src="/static/js/main.js"></script>
+    {% endif %}
+</div>
 </body>
 </html>

@@ -3,51 +3,126 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Панель администратора</title>
+    <title>Админка — Умная ревизия</title>
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
-    <div class="container admin-container">
-        <header>
-            <h1>Итоги ревизии</h1>
-            <div class="admin-controls stacked-controls">
-                <div class="control-block">
-                    <label for="admin-location-select">Точка:</label>
-                    <select id="admin-location-select">
-                        <option value="Дубна">Дубна</option>
-                        <option value="Дмитров">Дмитров</option>
-                    </select>
-                </div>
-                <div class="control-block">
-                    <label for="admin-report-select">Ревизия:</label>
-                    <select id="admin-report-select"></select>
-                </div>
-                <div class="admin-actions-row">
-                    <button id="delete-report-btn" type="button" class="danger-btn" disabled>Удалить ревизию</button>
-                </div>
-            </div>
-        </header>
+<div class="container admin-container">
+    <header class="page-header admin-header">
+        <div>
+            <h1>Панель администратора</h1>
+            <p class="muted-text">{{ user.full_name }}</p>
+        </div>
+        <div class="header-actions">
+            <button id="open-users-btn" class="btn secondary btn-inline" type="button">Сотрудники</button>
+            <button id="logout-btn" class="btn secondary btn-inline" type="button">Выйти</button>
+        </div>
+    </header>
 
-        <div class="report-summary category-card">
-            <h2>Сводка по ревизии</h2>
-            <div class="report-meta-grid">
-                <p><strong>Точка:</strong> <span id="report-location">-</span></p>
-                <p><strong>Дата:</strong> <span id="report-date">-</span></p>
-                <p><strong>Статус:</strong> <span id="report-status">-</span></p>
-                <p><strong>ID:</strong> <span id="report-id">-</span></p>
+    <section class="category-card">
+        <div class="admin-top-row">
+            <div>
+                <label for="admin-location-select">Точка</label>
+                <select id="admin-location-select">
+                    <option value="Дубна">Дубна</option>
+                    <option value="Дмитров">Дмитров</option>
+                </select>
             </div>
-            <div class="totals">
-                <p class="total-plus">Излишки: <span id="total-plus">0</span> шт.</p>
-                <p class="total-minus">Недостача: <span id="total-minus">0</span> шт.</p>
+            <div>
+                <label for="admin-report-select">Ревизия</label>
+                <select id="admin-report-select"></select>
+            </div>
+            <div class="admin-delete-wrap">
+                <button id="delete-report-btn" type="button" class="btn danger btn-inline">Удалить ревизию</button>
             </div>
         </div>
+    </section>
 
-        <h2 style="margin-top: 30px;">Детализация</h2>
-        <div id="report-categories">
-            <p style="text-align: center;">Загрузка данных...</p>
+    <section class="report-summary category-card">
+        <h2>Сводка по точке: <span id="report-location">-</span></h2>
+        <p><strong>Дата:</strong> <span id="report-date">-</span></p>
+        <p><strong>Статус:</strong> <span id="report-status">-</span></p>
+        <p><strong>ID ревизии:</strong> <span id="report-id">-</span></p>
+        <div class="totals">
+            <p class="total-plus">Излишки: <span id="total-plus">0</span> шт.</p>
+            <p class="total-minus">Недостача: <span id="total-minus">0</span> шт.</p>
+        </div>
+    </section>
+
+    <h2 class="section-title">Детализация ревизии</h2>
+    <div id="report-categories">
+        <p style="text-align:center;">Загрузка данных...</p>
+    </div>
+</div>
+
+<div id="users-modal" class="modal-overlay hidden">
+    <div class="modal-card users-modal-card">
+        <div class="modal-header">
+            <div>
+                <h2>Сотрудники</h2>
+                <p class="muted-text">Создание, редактирование и удаление учетных записей.</p>
+            </div>
+            <div class="modal-header-actions">
+                <button id="open-create-user-btn" class="btn primary btn-inline" type="button">Добавить сотрудника</button>
+                <button id="close-users-modal-btn" class="btn secondary btn-inline" type="button">Закрыть</button>
+            </div>
+        </div>
+        <div id="users-list" class="users-list modal-users-list">
+            <p>Загрузка пользователей...</p>
         </div>
     </div>
+</div>
 
-    <script src="/static/js/admin.js"></script>
+<div id="user-form-modal" class="modal-overlay hidden">
+    <div class="modal-card form-modal-card">
+        <div class="modal-header">
+            <div>
+                <h2 id="user-form-title">Создать сотрудника</h2>
+                <p class="muted-text">Заполните данные учетной записи сотрудника.</p>
+            </div>
+            <button id="close-user-form-modal-btn" class="btn secondary btn-inline" type="button">Закрыть</button>
+        </div>
+
+        <form id="user-form" class="user-form" novalidate>
+            <input type="hidden" id="user-id">
+            <label>ФИО
+                <input type="text" id="user-full-name" required>
+            </label>
+            <label>Дата рождения
+                <input type="date" id="user-birth-date" required>
+            </label>
+            <label>Логин
+                <input type="text" id="user-username" required>
+            </label>
+            <label>Пароль
+                <input type="password" id="user-password" placeholder="Укажите пароль для нового входа">
+            </label>
+            <label>Роль
+                <select id="user-role">
+                    <option value="employee">employee</option>
+                    <option value="admin">admin</option>
+                </select>
+            </label>
+            <label>Точка
+                <select id="user-location">
+                    <option value="">— не выбрано —</option>
+                    <option value="Дубна">Дубна</option>
+                    <option value="Дмитров">Дмитров</option>
+                </select>
+            </label>
+            <label class="checkbox-row">
+                <input type="checkbox" id="user-active" checked>
+                Аккаунт активен
+            </label>
+            <div class="form-actions">
+                <button type="submit" class="btn primary">Сохранить</button>
+                <button type="button" id="user-form-reset" class="btn secondary">Очистить</button>
+            </div>
+            <div id="user-form-message" class="message"></div>
+        </form>
+    </div>
+</div>
+
+<script src="/static/js/admin.js"></script>
 </body>
 </html>
