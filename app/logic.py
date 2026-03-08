@@ -8,14 +8,14 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import func, inspect, select, text, update
+from sqlalchemy import delete, func, inspect, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models import CategoryAssignment, CheckResult, Report, User
+from app.models import CategoryAssignment, CheckResult, Report, SelectionCycle, User
 from app.schemas import (
     AdminReport,
-    AssignCategoryResponse,
+    AssignSelectionResponse,
     CategoryModel,
     CategoryResult,
     DeleteResponse,
@@ -26,6 +26,7 @@ from app.schemas import (
     MeResponse,
     ReportHistoryItem,
     ReportHistoryResponse,
+    ResetSelectionCycleResponse,
     RoleEnum,
     StatusEnum,
     SubcategoryModel,
@@ -130,8 +131,8 @@ MOCK_INVENTORY: dict[str, dict[str, Any]] = {
     },
 }
 
-
 MSK_SHIFT = timedelta(hours=3)
+SELECTION_CYCLE_DAYS = 15
 
 
 def hash_password(password: str) -> str:
@@ -149,46 +150,64 @@ def verify_password(password: str, stored_hash: str) -> bool:
     return hmac.compare_digest(digest.hex(), digest_hex)
 
 
+def _normalize_location(location: str) -> str:
+    return location.strip().title()
+
+
+def _format_moscow_datetime(dt: datetime | None) -> str:
+    if not dt:
+        return '-'
+    return (dt + MSK_SHIFT).strftime('%d.%m.%Y %H:%M')
+
+
+def _report_status_label(status: str) -> str:
+    return 'Завершена' if status == 'completed' else 'В процессе'
+
+
 def bootstrap_schema_and_admin(sync_conn) -> None:
     inspector = inspect(sync_conn)
     tables = set(inspector.get_table_names())
 
     if 'users' in tables:
-        columns = {column['name'] for column in inspector.get_columns('users')}
+        columns = {c['name'] for c in inspector.get_columns('users')}
         required = {'id', 'full_name', 'birth_date', 'username', 'password_hash', 'role', 'location', 'is_active', 'created_at'}
         if not required.issubset(columns):
             sync_conn.execute(text('DROP TABLE IF EXISTS users'))
 
     reset_reports = False
     if 'reports' in tables:
-        report_columns = {column['name'] for column in inspector.get_columns('reports')}
-        required_report_columns = {'id', 'location', 'report_date', 'status', 'date_created'}
-        if not required_report_columns.issubset(report_columns):
+        cols = {c['name'] for c in inspector.get_columns('reports')}
+        if not {'id', 'location', 'report_date', 'cycle_version', 'status', 'date_created'}.issubset(cols):
             reset_reports = True
 
     if 'check_results' in tables:
-        result_columns = {column['name'] for column in inspector.get_columns('check_results')}
-        required_result_columns = {
-            'id', 'report_id', 'category_id', 'category_name', 'subcategory_id', 'subcategory_name',
-            'target_type', 'target_id', 'target_name', 'expected_qty', 'actual_qty', 'diff',
-            'status', 'attempts_used', 'checked_by_user_id', 'checked_by_name_snapshot', 'created_at'
-        }
-        if not required_result_columns.issubset(result_columns):
+        cols = {c['name'] for c in inspector.get_columns('check_results')}
+        required = {'id', 'report_id', 'category_id', 'category_name', 'subcategory_id', 'subcategory_name', 'target_type', 'target_id', 'target_name', 'expected_qty', 'actual_qty', 'diff', 'status', 'attempts_used', 'checked_by_user_id', 'checked_by_name_snapshot', 'created_at'}
+        if not required.issubset(cols):
             reset_reports = True
 
+    reset_assignments = False
     if 'category_assignments' in tables:
-        assignment_columns = {column['name'] for column in inspector.get_columns('category_assignments')}
-        required_assignment_columns = {
-            'id', 'report_id', 'category_id', 'category_name', 'user_id', 'user_full_name_snapshot',
-            'is_completed', 'assigned_at', 'completed_at'
-        }
-        if not required_assignment_columns.issubset(assignment_columns):
-            reset_reports = True
+        cols = {c['name'] for c in inspector.get_columns('category_assignments')}
+        required = {'id', 'location', 'cycle_version', 'category_id', 'category_name', 'subcategory_id', 'subcategory_name', 'target_type', 'target_id', 'target_name', 'user_id', 'user_full_name_snapshot', 'assigned_at'}
+        if not required.issubset(cols):
+            reset_assignments = True
+
+    if 'selection_cycles' in tables:
+        cols = {c['name'] for c in inspector.get_columns('selection_cycles')}
+        required = {'id', 'location', 'cycle_version', 'started_at', 'updated_at'}
+        if not required.issubset(cols):
+            reset_assignments = True
+    elif 'selection_cycles' not in tables:
+        reset_assignments = True if 'category_assignments' in tables else reset_assignments
 
     if reset_reports:
-        sync_conn.execute(text('DROP TABLE IF EXISTS category_assignments'))
         sync_conn.execute(text('DROP TABLE IF EXISTS check_results'))
         sync_conn.execute(text('DROP TABLE IF EXISTS reports'))
+
+    if reset_assignments:
+        sync_conn.execute(text('DROP TABLE IF EXISTS category_assignments'))
+        sync_conn.execute(text('DROP TABLE IF EXISTS selection_cycles'))
 
     from app.database import Base
     Base.metadata.create_all(sync_conn)
@@ -233,9 +252,13 @@ async def authenticate_user(username: str, password: str, db: AsyncSession) -> U
     return user
 
 
+async def get_me_response(user: User | None) -> MeResponse:
+    return MeResponse(authenticated=bool(user), user=user_to_schema(user) if user else None)
+
+
 async def list_users(db: AsyncSession) -> UserListResponse:
     rows = await db.scalars(select(User).order_by(User.role.desc(), User.full_name.asc()))
-    return UserListResponse(users=[user_to_schema(user) for user in rows.all()])
+    return UserListResponse(users=[UserResponse.model_validate(user) for user in rows.all()])
 
 
 async def create_user(payload: UserCreateRequest, db: AsyncSession) -> UserActionResponse:
@@ -249,13 +272,13 @@ async def create_user(payload: UserCreateRequest, db: AsyncSession) -> UserActio
         username=payload.username.strip(),
         password_hash=hash_password(payload.password),
         role=payload.role.value,
-        location=(payload.location or None),
+        location=payload.location or None,
         is_active=payload.is_active,
     )
     db.add(user)
     await db.commit()
     await db.refresh(user)
-    return UserActionResponse(success=True, message='Пользователь создан.', user=user_to_schema(user))
+    return UserActionResponse(success=True, message='Пользователь создан.', user=UserResponse.model_validate(user))
 
 
 async def update_user(user_id: int, payload: UserUpdateRequest, db: AsyncSession, current_admin_id: int | None = None) -> UserActionResponse:
@@ -281,20 +304,12 @@ async def update_user(user_id: int, payload: UserUpdateRequest, db: AsyncSession
         user.password_hash = hash_password(payload.password)
 
     if old_name != user.full_name:
-        await db.execute(
-            update(CategoryAssignment)
-            .where(CategoryAssignment.user_id == user.id)
-            .values(user_full_name_snapshot=user.full_name)
-        )
-        await db.execute(
-            update(CheckResult)
-            .where(CheckResult.checked_by_user_id == user.id)
-            .values(checked_by_name_snapshot=user.full_name)
-        )
+        await db.execute(update(CategoryAssignment).where(CategoryAssignment.user_id == user.id).values(user_full_name_snapshot=user.full_name))
+        await db.execute(update(CheckResult).where(CheckResult.checked_by_user_id == user.id).values(checked_by_name_snapshot=user.full_name))
 
     await db.commit()
     await db.refresh(user)
-    return UserActionResponse(success=True, message='Пользователь обновлён.', user=user_to_schema(user))
+    return UserActionResponse(success=True, message='Пользователь обновлён.', user=UserResponse.model_validate(user))
 
 
 async def delete_user(user_id: int, db: AsyncSession, current_admin_id: int | None = None) -> DeleteResponse:
@@ -312,14 +327,9 @@ async def delete_user(user_id: int, db: AsyncSession, current_admin_id: int | No
 
     await db.execute(update(CategoryAssignment).where(CategoryAssignment.user_id == user.id).values(user_id=None))
     await db.execute(update(CheckResult).where(CheckResult.checked_by_user_id == user.id).values(checked_by_user_id=None))
-
     await db.delete(user)
     await db.commit()
     return DeleteResponse(success=True, message='Пользователь удалён.')
-
-
-def _normalize_location(location: str) -> str:
-    return location.strip().title()
 
 
 def _get_inventory_for(location: str) -> dict[str, Any]:
@@ -330,11 +340,18 @@ def _get_inventory_for(location: str) -> dict[str, Any]:
 
 
 def _find_category(location: str, category_id: str) -> dict[str, Any]:
-    inventory = _get_inventory_for(location)
-    for category in inventory['categories']:
+    for category in _get_inventory_for(location)['categories']:
         if category['id'] == category_id:
             return category
     raise HTTPException(status_code=404, detail='Категория не найдена.')
+
+
+def _find_subcategory(location: str, category_id: str, subcategory_id: str) -> dict[str, Any]:
+    category = _find_category(location, category_id)
+    for sub in category['subcategories']:
+        if sub['id'] == subcategory_id:
+            return sub
+    raise HTTPException(status_code=404, detail='Подкатегория не найдена.')
 
 
 def _find_target(location: str, target_id: str) -> tuple[str, str, str | None, str | None, str, str, float]:
@@ -343,26 +360,10 @@ def _find_target(location: str, target_id: str) -> tuple[str, str, str | None, s
         for subcategory in category['subcategories']:
             if subcategory['id'] == target_id:
                 expected_total = float(sum(item['expected_qty'] for item in subcategory['items']))
-                return (
-                    category['id'],
-                    category['name'],
-                    subcategory['id'],
-                    subcategory['name'],
-                    'subcategory',
-                    subcategory['name'],
-                    expected_total,
-                )
+                return category['id'], category['name'], subcategory['id'], subcategory['name'], 'subcategory', subcategory['name'], expected_total
             for item in subcategory['items']:
                 if item['id'] == target_id:
-                    return (
-                        category['id'],
-                        category['name'],
-                        subcategory['id'],
-                        subcategory['name'],
-                        'item',
-                        item['name'],
-                        float(item['expected_qty']),
-                    )
+                    return category['id'], category['name'], subcategory['id'], subcategory['name'], 'item', item['name'], float(item['expected_qty'])
     raise HTTPException(status_code=404, detail='Цель проверки не найдена.')
 
 
@@ -384,98 +385,165 @@ def _subcategory_is_complete(raw_subcategory: dict[str, Any], results_by_target:
 
 
 def _category_is_complete(raw_category: dict[str, Any], results_by_target: dict[str, CheckResult]) -> bool:
-    if not raw_category['subcategories']:
-        return False
-    return all(_subcategory_is_complete(sub, results_by_target)[0] for sub in raw_category['subcategories'])
+    return bool(raw_category['subcategories']) and all(_subcategory_is_complete(sub, results_by_target)[0] for sub in raw_category['subcategories'])
+
+
+async def _get_or_create_selection_cycle(location: str, db: AsyncSession) -> SelectionCycle:
+    normalized = _normalize_location(location)
+    cycle = await db.scalar(select(SelectionCycle).where(SelectionCycle.location == normalized).limit(1))
+    today = date.today()
+
+    if not cycle:
+        cycle = SelectionCycle(location=normalized, cycle_version=1, started_at=today)
+        db.add(cycle)
+        await db.commit()
+        await db.refresh(cycle)
+        return cycle
+
+    if (today - cycle.started_at).days >= SELECTION_CYCLE_DAYS:
+        old_version = cycle.cycle_version
+        cycle.cycle_version += 1
+        cycle.started_at = today
+        cycle.updated_at = datetime.utcnow()
+        await db.execute(delete(CategoryAssignment).where(CategoryAssignment.location == normalized, CategoryAssignment.cycle_version == old_version))
+        await db.commit()
+        await db.refresh(cycle)
+
+    return cycle
+
+
+async def reset_selection_cycle(location: str, db: AsyncSession) -> ResetSelectionCycleResponse:
+    cycle = await _get_or_create_selection_cycle(location, db)
+    old_version = cycle.cycle_version
+    cycle.cycle_version += 1
+    cycle.started_at = date.today()
+    cycle.updated_at = datetime.utcnow()
+    await db.execute(delete(CategoryAssignment).where(CategoryAssignment.location == _normalize_location(location), CategoryAssignment.cycle_version == old_version))
+    await db.commit()
+    await db.refresh(cycle)
+    return ResetSelectionCycleResponse(
+        success=True,
+        message='Выбор категорий и подкатегорий обновлён. Начался новый 15-дневный цикл.',
+        cycle_version=cycle.cycle_version,
+        cycle_started_at=cycle.started_at.strftime('%d.%m.%Y'),
+    )
 
 
 async def get_or_create_daily_report(location: str, db: AsyncSession) -> Report:
-    today = date.today()
     normalized = _normalize_location(location)
+    cycle = await _get_or_create_selection_cycle(normalized, db)
+    today = date.today()
     report = await db.scalar(select(Report).where(Report.location == normalized, Report.report_date == today).limit(1))
     if report:
+        if report.cycle_version != cycle.cycle_version:
+            report.cycle_version = cycle.cycle_version
+            await db.commit()
+            await db.refresh(report)
         return report
 
-    report = Report(location=normalized, report_date=today, status='in_progress')
+    report = Report(location=normalized, report_date=today, cycle_version=cycle.cycle_version, status='in_progress')
     db.add(report)
     await db.commit()
     await db.refresh(report)
     return report
 
 
-async def _load_assignments(report_id: int, db: AsyncSession) -> list[CategoryAssignment]:
-    return (await db.scalars(select(CategoryAssignment).where(CategoryAssignment.report_id == report_id))).all()
+async def _load_assignments(location: str, cycle_version: int, db: AsyncSession) -> list[CategoryAssignment]:
+    return (await db.scalars(select(CategoryAssignment).where(CategoryAssignment.location == location, CategoryAssignment.cycle_version == cycle_version))).all()
 
 
 async def _load_results(report_id: int, db: AsyncSession) -> list[CheckResult]:
     return (await db.scalars(select(CheckResult).where(CheckResult.report_id == report_id).order_by(CheckResult.id.asc()))).all()
 
 
-async def _recalculate_assignment_status(report: Report, category_id: str, db: AsyncSession) -> None:
-    assignment = await db.scalar(
-        select(CategoryAssignment).where(CategoryAssignment.report_id == report.id, CategoryAssignment.category_id == category_id).limit(1)
-    )
-    if not assignment:
-        return
+def _category_assignments_map(assignments: list[CategoryAssignment]) -> tuple[dict[str, CategoryAssignment], dict[str, dict[str, CategoryAssignment]]]:
+    category_map: dict[str, CategoryAssignment] = {}
+    subcategory_map: dict[str, dict[str, CategoryAssignment]] = defaultdict(dict)
+    for assignment in assignments:
+        if assignment.target_type == 'category':
+            category_map[assignment.category_id] = assignment
+        elif assignment.target_type == 'subcategory' and assignment.subcategory_id:
+            subcategory_map[assignment.category_id][assignment.subcategory_id] = assignment
+    return category_map, subcategory_map
 
-    raw_category = _find_category(report.location, category_id)
-    category_rows = (
-        await db.scalars(select(CheckResult).where(CheckResult.report_id == report.id, CheckResult.category_id == category_id))
-    ).all()
-    results_by_target = {row.target_id: row for row in category_rows}
-    is_completed = _category_is_complete(raw_category, results_by_target)
-    assignment.is_completed = is_completed
-    assignment.completed_at = datetime.utcnow() if is_completed else None
-    await db.commit()
+
+def _subcategories_user_can_work(raw_category: dict[str, Any], category_assignment: CategoryAssignment | None, sub_assignments: dict[str, CategoryAssignment], user_id: int) -> list[str]:
+    if category_assignment and category_assignment.user_id == user_id:
+        return [sub['id'] for sub in raw_category['subcategories']]
+    return [sub['id'] for sub in raw_category['subcategories'] if sub_assignments.get(sub['id']) and sub_assignments[sub['id']].user_id == user_id]
 
 
 async def _refresh_report_status(report: Report, db: AsyncSession) -> None:
-    inventory = _get_inventory_for(report.location)
-    assignments = await _load_assignments(report.id, db)
-    total_categories = len(inventory['categories'])
+    results = await _load_results(report.id, db)
+    rows_by_category_target: dict[str, dict[str, CheckResult]] = defaultdict(dict)
+    for row in results:
+        rows_by_category_target[row.category_id][row.target_id] = row
 
-    report.status = 'completed' if assignments and len(assignments) == total_categories and all(item.is_completed for item in assignments) else 'in_progress'
+    inventory = _get_inventory_for(report.location)
+    all_complete = True
+    for raw_category in inventory['categories']:
+        if not _category_is_complete(raw_category, rows_by_category_target.get(raw_category['id'], {})):
+            all_complete = False
+            break
+
+    report.status = 'completed' if all_complete else 'in_progress'
     await db.commit()
 
 
 async def get_inventory_data(location: str, db: AsyncSession, user: User) -> InventoryStructureResponse:
     normalized = _normalize_location(location)
+    cycle = await _get_or_create_selection_cycle(normalized, db)
     report = await get_or_create_daily_report(normalized, db)
-    assignments = await _load_assignments(report.id, db)
+    assignments = await _load_assignments(normalized, cycle.cycle_version, db)
     results = await _load_results(report.id, db)
 
-    assignment_by_category = {assignment.category_id: assignment for assignment in assignments}
+    category_assignments, subcategory_assignments = _category_assignments_map(assignments)
     rows_by_category_target: dict[str, dict[str, CheckResult]] = defaultdict(dict)
     for row in results:
         rows_by_category_target[row.category_id][row.target_id] = row
 
     categories: list[CategoryModel] = []
     for raw_category in _get_inventory_for(normalized)['categories']:
-        assignment = assignment_by_category.get(raw_category['id'])
-        assigned_to_current_user = bool(assignment and assignment.user_id == user.id)
-        assigned_to_other = bool(assignment and assignment.user_id != user.id)
-        assigned_to = assignment.user_full_name_snapshot if assignment else None
-        can_take = assignment is None
+        category_assignment = category_assignments.get(raw_category['id'])
+        sub_assignments = subcategory_assignments.get(raw_category['id'], {})
+
+        assigned_to_current_user = bool(category_assignment and category_assignment.user_id == user.id)
+        assigned_to_other = bool(category_assignment and category_assignment.user_id != user.id)
+        can_take_category = category_assignment is None and not sub_assignments
+        has_my_subcategories = any(a.user_id == user.id for a in sub_assignments.values())
+        has_other_subcategories = any(a.user_id != user.id for a in sub_assignments.values())
+
+        owner_names = {a.user_full_name_snapshot for a in sub_assignments.values() if a.user_full_name_snapshot}
+        assigned_to = None
+        mixed_assignment = False
+        if category_assignment:
+            assigned_to = category_assignment.user_full_name_snapshot
+        elif owner_names:
+            if len(owner_names) == 1:
+                assigned_to = next(iter(owner_names))
+            else:
+                assigned_to = 'Несколько сотрудников'
+                mixed_assignment = True
 
         category_results = rows_by_category_target.get(raw_category['id'], {})
         subcategories: list[SubcategoryModel] = []
 
-        first_incomplete_index: int | None = None
-        tmp_states: list[tuple[bool, StatusEnum]] = []
-        for idx, raw_sub in enumerate(raw_category['subcategories']):
+        selected_sub_ids = _subcategories_user_can_work(raw_category, category_assignment, sub_assignments, user.id)
+        first_incomplete_selected: str | None = None
+        sub_states: dict[str, tuple[bool, StatusEnum]] = {}
+        for raw_sub in raw_category['subcategories']:
             is_completed, status = _subcategory_is_complete(raw_sub, category_results)
-            tmp_states.append((is_completed, status))
-            if assigned_to_current_user and not is_completed and first_incomplete_index is None:
-                first_incomplete_index = idx
+            sub_states[raw_sub['id']] = (is_completed, status)
+            if raw_sub['id'] in selected_sub_ids and not is_completed and first_incomplete_selected is None:
+                first_incomplete_selected = raw_sub['id']
 
-        for idx, raw_sub in enumerate(raw_category['subcategories']):
-            is_completed, status = tmp_states[idx]
-            items = []
+        for raw_sub in raw_category['subcategories']:
+            is_completed, status = sub_states[raw_sub['id']]
+            item_rows = []
             for item in raw_sub['items']:
                 item_row = category_results.get(item['id'])
                 item_status = StatusEnum.GREY
                 is_final = False
-
                 if item_row:
                     if item_row.status == 'green':
                         item_status = StatusEnum.GREEN
@@ -485,26 +553,24 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
                         is_final = True
                     elif item_row.status == 'orange':
                         item_status = StatusEnum.ORANGE
+                item_rows.append(ItemModel(id=item['id'], name=item['name'], status=item_status, is_final=is_final))
 
-                items.append(
-                    ItemModel(
-                        id=item['id'],
-                        name=item['name'],
-                        status=item_status,
-                        is_final=is_final,
-                    )
-                )
+            sub_assignment = sub_assignments.get(raw_sub['id'])
+            sub_assigned_to_current_user = bool(sub_assignment and sub_assignment.user_id == user.id)
+            sub_assigned_to_other = bool(sub_assignment and sub_assignment.user_id != user.id)
+            can_take_sub = category_assignment is None and sub_assignment is None
+
             is_locked = True
             is_expanded = False
-            if assigned_to_current_user:
-                if first_incomplete_index is None:
+            if raw_sub['id'] in selected_sub_ids:
+                if first_incomplete_selected is None:
                     is_locked = False
-                    is_expanded = False
                 else:
-                    is_locked = idx > first_incomplete_index
-                    is_expanded = idx == first_incomplete_index and not is_completed
+                    is_locked = raw_sub['id'] != first_incomplete_selected and not is_completed
+                    is_expanded = raw_sub['id'] == first_incomplete_selected and not is_completed
                 if status == StatusEnum.ORANGE:
                     is_expanded = True
+                    is_locked = False
 
             subcategories.append(
                 SubcategoryModel(
@@ -514,35 +580,47 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
                     is_completed=is_completed,
                     is_expanded=is_expanded,
                     status=status,
-                    items=items,
+                    items=item_rows,
+                    assigned_to=sub_assignment.user_full_name_snapshot if sub_assignment else (category_assignment.user_full_name_snapshot if category_assignment else None),
+                    assigned_to_current_user=sub_assigned_to_current_user,
+                    can_take=can_take_sub,
+                    is_blocked_by_other=sub_assigned_to_other or assigned_to_other,
+                    taken_as_part_of_category=assigned_to_current_user,
                 )
             )
 
-        is_completed = bool(assignment and assignment.is_completed)
+        category_is_completed = _category_is_complete(raw_category, category_results)
         categories.append(
             CategoryModel(
                 id=raw_category['id'],
                 name=raw_category['name'],
-                is_available=assigned_to_current_user or can_take,
-                is_completed=is_completed,
-                is_open=assigned_to_current_user and not is_completed,
+                is_available=assigned_to_current_user or has_my_subcategories or can_take_category,
+                is_completed=category_is_completed,
+                is_open=(assigned_to_current_user or has_my_subcategories) and not category_is_completed,
                 subcategories=subcategories,
                 assigned_to=assigned_to,
                 assigned_to_current_user=assigned_to_current_user,
-                can_take=can_take,
+                can_take=can_take_category,
                 is_blocked_by_other=assigned_to_other,
+                has_my_subcategories=has_my_subcategories,
+                has_other_subcategories=has_other_subcategories,
+                mixed_assignment=mixed_assignment,
             )
         )
 
+    days_left = max(0, SELECTION_CYCLE_DAYS - (date.today() - cycle.started_at).days)
     return InventoryStructureResponse(
         report_id=report.id,
         location=normalized,
         report_date=report.report_date.strftime('%d.%m.%Y'),
         categories=categories,
+        cycle_version=cycle.cycle_version,
+        cycle_started_at=cycle.started_at.strftime('%d.%m.%Y'),
+        cycle_days_left=days_left,
     )
 
 
-async def assign_category_to_user(report_id: int, category_id: str, db: AsyncSession, user: User) -> AssignCategoryResponse:
+async def assign_selection_to_user(report_id: int, category_id: str, target_type: str, subcategory_id: str | None, db: AsyncSession, user: User) -> AssignSelectionResponse:
     if not user.location:
         raise HTTPException(status_code=403, detail='Сотруднику не назначена точка.')
 
@@ -550,27 +628,78 @@ async def assign_category_to_user(report_id: int, category_id: str, db: AsyncSes
     if not report or report.location != user.location:
         raise HTTPException(status_code=404, detail='Ревизия не найдена.')
 
+    cycle = await _get_or_create_selection_cycle(report.location, db)
+    assignments = await _load_assignments(report.location, cycle.cycle_version, db)
+    category_map, sub_map = _category_assignments_map(assignments)
+
     category = _find_category(report.location, category_id)
-    existing = await db.scalar(
-        select(CategoryAssignment).where(CategoryAssignment.report_id == report_id, CategoryAssignment.category_id == category_id).limit(1)
-    )
+    category_assignment = category_map.get(category_id)
+    sub_assignments = sub_map.get(category_id, {})
+
+    if target_type == 'category':
+        if category_assignment:
+            if category_assignment.user_id == user.id:
+                return AssignSelectionResponse(success=True, message='Категория уже закреплена за вами.')
+            raise HTTPException(status_code=400, detail=f'Категория уже закреплена за сотрудником {category_assignment.user_full_name_snapshot}.')
+        if sub_assignments:
+            raise HTTPException(status_code=400, detail='Внутри этой категории уже есть закреплённые подкатегории. Возьмите свободную подкатегорию отдельно.')
+
+        db.add(CategoryAssignment(
+            location=report.location,
+            cycle_version=cycle.cycle_version,
+            category_id=category_id,
+            category_name=category['name'],
+            subcategory_id=None,
+            subcategory_name=None,
+            target_type='category',
+            target_id=category_id,
+            target_name=category['name'],
+            user_id=user.id,
+            user_full_name_snapshot=user.full_name,
+        ))
+        await db.commit()
+        return AssignSelectionResponse(success=True, message='Категория закреплена за вами на текущий 15-дневный цикл.')
+
+    if target_type != 'subcategory' or not subcategory_id:
+        raise HTTPException(status_code=400, detail='Некорректный тип выбора.')
+
+    if category_assignment:
+        if category_assignment.user_id == user.id:
+            return AssignSelectionResponse(success=True, message='Вся категория уже закреплена за вами.')
+        raise HTTPException(status_code=400, detail=f'Вся категория уже закреплена за сотрудником {category_assignment.user_full_name_snapshot}.')
+
+    subcategory = _find_subcategory(report.location, category_id, subcategory_id)
+    existing = sub_assignments.get(subcategory_id)
     if existing:
         if existing.user_id == user.id:
-            return AssignCategoryResponse(success=True, message='Категория уже закреплена за вами.')
-        raise HTTPException(status_code=400, detail=f'Категория уже закреплена за сотрудником {existing.user_full_name_snapshot}.')
+            return AssignSelectionResponse(success=True, message='Подкатегория уже закреплена за вами.')
+        raise HTTPException(status_code=400, detail=f'Подкатегория уже закреплена за сотрудником {existing.user_full_name_snapshot}.')
 
-    assignment = CategoryAssignment(
-        report_id=report_id,
+    db.add(CategoryAssignment(
+        location=report.location,
+        cycle_version=cycle.cycle_version,
         category_id=category_id,
         category_name=category['name'],
+        subcategory_id=subcategory_id,
+        subcategory_name=subcategory['name'],
+        target_type='subcategory',
+        target_id=subcategory_id,
+        target_name=subcategory['name'],
         user_id=user.id,
         user_full_name_snapshot=user.full_name,
-        is_completed=False,
-    )
-    db.add(assignment)
+    ))
     await db.commit()
-    await _refresh_report_status(report, db)
-    return AssignCategoryResponse(success=True, message='Категория закреплена за вами.')
+    return AssignSelectionResponse(success=True, message='Подкатегория закреплена за вами на текущий 15-дневный цикл.')
+
+
+def _user_can_verify_target(user: User, report: Report, category_id: str, subcategory_id: str | None, assignments: list[CategoryAssignment]) -> bool:
+    category_map, sub_map = _category_assignments_map(assignments)
+    cat_assignment = category_map.get(category_id)
+    if cat_assignment and cat_assignment.user_id == user.id:
+        return True
+    if subcategory_id and sub_map.get(category_id, {}).get(subcategory_id) and sub_map[category_id][subcategory_id].user_id == user.id:
+        return True
+    return False
 
 
 async def _upsert_check_result(
@@ -592,9 +721,7 @@ async def _upsert_check_result(
     checked_by_name_snapshot: str | None,
     db: AsyncSession,
 ) -> None:
-    existing = await db.scalar(
-        select(CheckResult).where(CheckResult.report_id == report_id, CheckResult.target_id == target_id).limit(1)
-    )
+    existing = await db.scalar(select(CheckResult).where(CheckResult.report_id == report_id, CheckResult.target_id == target_id).limit(1))
     if existing:
         existing.category_id = category_id
         existing.category_name = category_name
@@ -610,25 +737,23 @@ async def _upsert_check_result(
         existing.checked_by_user_id = checked_by_user_id
         existing.checked_by_name_snapshot = checked_by_name_snapshot
     else:
-        db.add(
-            CheckResult(
-                report_id=report_id,
-                category_id=category_id,
-                category_name=category_name,
-                subcategory_id=subcategory_id,
-                subcategory_name=subcategory_name,
-                target_type=target_type,
-                target_id=target_id,
-                target_name=target_name,
-                expected_qty=expected_qty,
-                actual_qty=actual_qty,
-                diff=diff,
-                status=status_value,
-                attempts_used=attempts_used,
-                checked_by_user_id=checked_by_user_id,
-                checked_by_name_snapshot=checked_by_name_snapshot,
-            )
-        )
+        db.add(CheckResult(
+            report_id=report_id,
+            category_id=category_id,
+            category_name=category_name,
+            subcategory_id=subcategory_id,
+            subcategory_name=subcategory_name,
+            target_type=target_type,
+            target_id=target_id,
+            target_name=target_name,
+            expected_qty=expected_qty,
+            actual_qty=actual_qty,
+            diff=diff,
+            status=status_value,
+            attempts_used=attempts_used,
+            checked_by_user_id=checked_by_user_id,
+            checked_by_name_snapshot=checked_by_name_snapshot,
+        ))
 
 
 async def verify_item_or_category(data: VerifyRequest, db: AsyncSession, checked_by_user: User) -> VerifyResponse:
@@ -639,11 +764,9 @@ async def verify_item_or_category(data: VerifyRequest, db: AsyncSession, checked
         raise HTTPException(status_code=403, detail='Ревизия относится к другой точке.')
 
     category_id, category_name, subcategory_id, subcategory_name, target_type, target_name, expected_qty = _find_target(report.location, data.target_id)
-    assignment = await db.scalar(
-        select(CategoryAssignment).where(CategoryAssignment.report_id == report.id, CategoryAssignment.category_id == category_id).limit(1)
-    )
-    if not assignment or assignment.user_id != checked_by_user.id:
-        raise HTTPException(status_code=403, detail='Эта категория закреплена не за вами.')
+    assignments = await _load_assignments(report.location, report.cycle_version, db)
+    if not _user_can_verify_target(checked_by_user, report, category_id, subcategory_id, assignments):
+        raise HTTPException(status_code=403, detail='Эта категория или подкатегория не закреплена за вами.')
 
     is_correct = abs(data.quantity - expected_qty) < 1e-9
     if is_correct:
@@ -666,18 +789,12 @@ async def verify_item_or_category(data: VerifyRequest, db: AsyncSession, checked
             db=db,
         )
         await db.commit()
-        await _recalculate_assignment_status(report, category_id, db)
         await _refresh_report_status(report, db)
         return VerifyResponse(is_correct=True, attempts_left=0, message='Верно!', expand_category=False)
 
     attempts_left = max(0, 3 - data.attempt_number)
     if attempts_left > 0:
-        return VerifyResponse(
-            is_correct=False,
-            attempts_left=attempts_left,
-            message=f'Неверно. Осталось {attempts_left} попытк(и).',
-            expand_category=False,
-        )
+        return VerifyResponse(is_correct=False, attempts_left=attempts_left, message=f'Неверно. Осталось {attempts_left} попытк(и).', expand_category=False)
 
     status_value = 'orange' if data.is_category else 'red'
     await _upsert_check_result(
@@ -699,7 +816,6 @@ async def verify_item_or_category(data: VerifyRequest, db: AsyncSession, checked
         db=db,
     )
     await db.commit()
-    await _recalculate_assignment_status(report, category_id, db)
     await _refresh_report_status(report, db)
     return VerifyResponse(
         is_correct=False,
@@ -713,30 +829,39 @@ async def finish_report(report_id: int, db: AsyncSession) -> tuple[bool, str]:
     report = await db.get(Report, report_id)
     if not report:
         return False, 'Ревизия не найдена.'
-
     await _refresh_report_status(report, db)
     if report.status != 'completed':
-        return False, 'Общая ревизия завершится автоматически, когда все категории точки будут проверены.'
+        return False, 'Общая ревизия завершится автоматически, когда все выбранные категории и подкатегории будут проверены.'
     return True, 'Ревизия завершена.'
 
 
 async def get_reports_history(location: str, db: AsyncSession) -> ReportHistoryResponse:
     normalized = _normalize_location(location)
-    reports = (
-        await db.scalars(
-            select(Report).where(Report.location == normalized).order_by(Report.report_date.desc(), Report.id.desc())
-        )
-    ).all()
-    history = [
-        ReportHistoryItem(
-            report_id=report.id,
-            date=_format_moscow_datetime(report.date_created),
-            status=report.status,
-            label=f"{_format_moscow_datetime(report.date_created)} — {_report_status_label(report.status)}",
-        )
-        for report in reports
-    ]
-    return ReportHistoryResponse(location=normalized, reports=history)
+    reports = (await db.scalars(select(Report).where(Report.location == normalized).order_by(Report.report_date.desc(), Report.id.desc()))).all()
+    return ReportHistoryResponse(
+        location=normalized,
+        reports=[
+            ReportHistoryItem(
+                report_id=report.id,
+                date=_format_moscow_datetime(report.date_created),
+                status=report.status,
+                label=f"{_format_moscow_datetime(report.date_created)} — {_report_status_label(report.status)}",
+            )
+            for report in reports
+        ],
+    )
+
+
+def _category_assignment_label(category_id: str, report_assignments: list[CategoryAssignment]) -> str | None:
+    category_level = [a for a in report_assignments if a.category_id == category_id and a.target_type == 'category']
+    if category_level:
+        return category_level[0].user_full_name_snapshot
+    owners = sorted({a.user_full_name_snapshot for a in report_assignments if a.category_id == category_id and a.user_full_name_snapshot})
+    if not owners:
+        return None
+    if len(owners) == 1:
+        return owners[0]
+    return 'Несколько сотрудников'
 
 
 async def get_admin_report(location: str, db: AsyncSession, report_id: int | None = None) -> AdminReport:
@@ -746,26 +871,33 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         report = await db.get(Report, report_id)
         if report and report.location != normalized:
             report = None
-
     if report is None:
-        report = await db.scalar(
-            select(Report).where(Report.location == normalized).order_by(Report.report_date.desc(), Report.id.desc()).limit(1)
-        )
+        report = await db.scalar(select(Report).where(Report.location == normalized).order_by(Report.report_date.desc(), Report.id.desc()).limit(1))
 
     if not report:
         return AdminReport(report_id=None, date='-', location=normalized, status='-', categories=[], total_plus=0.0, total_minus=0.0, employees=[])
 
-    assignments = await _load_assignments(report.id, db)
+    assignments = await _load_assignments(report.location, report.cycle_version, db)
     results = await _load_results(report.id, db)
-    assignment_by_category = {assignment.category_id: assignment for assignment in assignments}
+
     rows_by_category_target: dict[str, dict[str, CheckResult]] = defaultdict(dict)
     for row in results:
         rows_by_category_target[row.category_id][row.target_id] = row
 
-    categories: list[CategoryResult] = []
     grouped_problem_items: dict[str, list[DiscrepancyItem]] = defaultdict(list)
+    employee_bucket: dict[str, EmployeeReportSummary] = {}
 
     for row in results:
+        if row.checked_by_name_snapshot:
+            bucket = employee_bucket.setdefault(
+                row.checked_by_name_snapshot,
+                EmployeeReportSummary(full_name=row.checked_by_name_snapshot, categories=[], completed_categories=0, discrepancy_items=0),
+            )
+            if row.category_name not in bucket.categories:
+                bucket.categories.append(row.category_name)
+            if row.target_type == 'item' and row.status == 'red':
+                bucket.discrepancy_items += 1
+
         if row.target_type == 'item' and row.status == 'red':
             grouped_problem_items[row.category_name].append(
                 DiscrepancyItem(
@@ -777,46 +909,44 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
                 )
             )
 
+    categories: list[CategoryResult] = []
     for raw_category in _get_inventory_for(normalized)['categories']:
-        assignment = assignment_by_category.get(raw_category['id'])
-        category_rows = rows_by_category_target.get(raw_category['id'], {})
-        if grouped_problem_items.get(raw_category['name']):
-            status_value = StatusEnum.RED
-        elif assignment and assignment.is_completed:
-            status_value = StatusEnum.GREEN
-        elif assignment:
-            status_value = StatusEnum.ORANGE
-        else:
-            status_value = StatusEnum.GREY
+        result_map = rows_by_category_target.get(raw_category['id'], {})
+        is_completed, status = (True, StatusEnum.GREEN) if _category_is_complete(raw_category, result_map) else (False, StatusEnum.GREY)
+        if not is_completed:
+            # If any subcategory has progress/problem reflect it
+            statuses = [_subcategory_is_complete(sub, result_map)[1] for sub in raw_category['subcategories']]
+            if any(s == StatusEnum.RED for s in statuses):
+                status = StatusEnum.RED
+            elif any(s == StatusEnum.ORANGE for s in statuses):
+                status = StatusEnum.ORANGE
+            elif any(s == StatusEnum.GREEN for s in statuses):
+                status = StatusEnum.ORANGE
+            else:
+                status = StatusEnum.GREY
+        elif grouped_problem_items.get(raw_category['name']):
+            status = StatusEnum.RED
 
-        categories.append(
-            CategoryResult(
-                name=raw_category['name'],
-                status=status_value,
-                assigned_to=assignment.user_full_name_snapshot if assignment else None,
-                problem_items=grouped_problem_items.get(raw_category['name'], []),
-            )
-        )
+        categories.append(CategoryResult(
+            name=raw_category['name'],
+            status=status,
+            assigned_to=_category_assignment_label(raw_category['id'], assignments),
+            problem_items=grouped_problem_items.get(raw_category['name'], []),
+        ))
 
-    employee_map: dict[str, EmployeeReportSummary] = {}
-    discrepancy_count_by_employee: dict[str, int] = defaultdict(int)
-    for row in results:
-        if row.target_type == 'item' and row.status == 'red' and row.checked_by_name_snapshot:
-            discrepancy_count_by_employee[row.checked_by_name_snapshot] += 1
+    for category in categories:
+        owners = {item.checked_by for item in category.problem_items if item.checked_by}
+        if len(owners) == 1:
+            owner = next(iter(owners))
+            employee_bucket.setdefault(owner, EmployeeReportSummary(full_name=owner, categories=[], completed_categories=0, discrepancy_items=0))
+            if category.name not in employee_bucket[owner].categories:
+                employee_bucket[owner].categories.append(category.name)
 
-    for assignment in assignments:
-        key = assignment.user_full_name_snapshot
-        employee_map.setdefault(key, EmployeeReportSummary(full_name=key))
-        employee_map[key].categories.append(assignment.category_name)
-        if assignment.is_completed:
-            employee_map[key].completed_categories += 1
+    for summary in employee_bucket.values():
+        summary.completed_categories = sum(1 for category in categories if category.assigned_to == summary.full_name and category.status in {StatusEnum.GREEN, StatusEnum.RED})
 
-    for key, count in discrepancy_count_by_employee.items():
-        employee_map.setdefault(key, EmployeeReportSummary(full_name=key))
-        employee_map[key].discrepancy_items = count
-
-    total_plus = sum(max(float(row.diff or 0), 0.0) for row in results if row.target_type == 'item' and row.status == 'red')
-    total_minus = abs(sum(min(float(row.diff or 0), 0.0) for row in results if row.target_type == 'item' and row.status == 'red'))
+    total_plus = sum(max(float(item.diff), 0.0) for items in grouped_problem_items.values() for item in items)
+    total_minus = abs(sum(min(float(item.diff), 0.0) for items in grouped_problem_items.values() for item in items))
 
     return AdminReport(
         report_id=report.id,
@@ -824,9 +954,9 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         location=report.location,
         status=_report_status_label(report.status),
         categories=categories,
-        total_plus=total_plus,
-        total_minus=total_minus,
-        employees=sorted(employee_map.values(), key=lambda item: item.full_name.lower()),
+        total_plus=float(total_plus),
+        total_minus=float(total_minus),
+        employees=sorted(employee_bucket.values(), key=lambda item: item.full_name.lower()),
     )
 
 
@@ -837,19 +967,3 @@ async def delete_report(report_id: int, db: AsyncSession) -> DeleteResponse:
     await db.delete(report)
     await db.commit()
     return DeleteResponse(success=True, message='Ревизия удалена.')
-
-
-async def get_me_response(user: User | None) -> MeResponse:
-    if not user:
-        return MeResponse(authenticated=False, user=None)
-    return MeResponse(authenticated=True, user=user_to_schema(user))
-
-
-def _format_moscow_datetime(dt: datetime | None) -> str:
-    if dt is None:
-        return '-'
-    return (dt + MSK_SHIFT).strftime('%d.%m.%Y %H:%M')
-
-
-def _report_status_label(status_value: str) -> str:
-    return 'Завершена' if status_value == 'completed' else 'В процессе'

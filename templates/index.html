@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
-<div class="container">
+<div class="container employee-container">
     <header class="page-header">
         <div>
             <h1>Умная ревизия</h1>
@@ -31,12 +31,14 @@
                 <div>
                     <h2 id="current-location-title">Точка: {{ user.location }}</h2>
                     <p id="report-date-line" class="muted-text"></p>
+                    <p id="cycle-line" class="muted-text"></p>
                 </div>
-                <div class="finish-block">
-                    <button id="finish-btn" class="finish-btn" type="button">Обновить</button>
-                    <div id="finish-hint" class="finish-hint">
-                        Общая ревизия по точке завершится автоматически, когда все категории будут проверены.
+                <div class="finish-block employee-action-block">
+                    <div class="employee-action-row">
+                        <button id="simulate-15-days-btn" class="btn secondary btn-inline" type="button">Прошло 15 дней</button>
+                        <button id="finish-btn" class="finish-btn" type="button">Обновить</button>
                     </div>
+                    <div id="finish-hint" class="finish-hint">Выбор категорий и подкатегорий действует 15 дней, потом обновляется.</div>
                 </div>
             </div>
 

@@ -14,7 +14,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.config import settings
 from app.database import engine, get_db
 from app.logic import (
-    assign_category_to_user,
+    assign_selection_to_user,
     authenticate_user,
     bootstrap_schema_and_admin,
     create_user,
@@ -27,6 +27,7 @@ from app.logic import (
     get_me_response,
     get_reports_history,
     list_users,
+    reset_selection_cycle,
     update_user,
     user_to_schema,
     verify_item_or_category,
@@ -34,8 +35,8 @@ from app.logic import (
 from app.models import User
 from app.schemas import (
     AdminReport,
-    AssignCategoryRequest,
-    AssignCategoryResponse,
+    AssignSelectionRequest,
+    AssignSelectionResponse,
     DeleteResponse,
     FinishReportRequest,
     FinishReportResponse,
@@ -45,6 +46,7 @@ from app.schemas import (
     LogoutResponse,
     MeResponse,
     ReportHistoryResponse,
+    ResetSelectionCycleResponse,
     UserActionResponse,
     UserCreateRequest,
     UserListResponse,
@@ -157,30 +159,17 @@ async def api_list_users(admin: User = Depends(require_admin), db: AsyncSession 
 
 
 @app.post('/api/users', response_model=UserActionResponse)
-async def api_create_user(
-    payload: UserCreateRequest,
-    admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
+async def api_create_user(payload: UserCreateRequest, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     return await create_user(payload, db)
 
 
 @app.put('/api/users/{user_id}', response_model=UserActionResponse)
-async def api_update_user(
-    user_id: int,
-    payload: UserUpdateRequest,
-    admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
+async def api_update_user(user_id: int, payload: UserUpdateRequest, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     return await update_user(user_id, payload, db, current_admin_id=admin.id)
 
 
 @app.delete('/api/users/{user_id}', response_model=DeleteResponse)
-async def api_delete_user(
-    user_id: int,
-    admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
+async def api_delete_user(user_id: int, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     return await delete_user(user_id, db, current_admin_id=admin.id)
 
 
@@ -191,42 +180,33 @@ async def get_inventory_structure(user: User = Depends(require_user), db: AsyncS
     return await get_inventory_data(user.location, db, user)
 
 
-@app.post('/assign-category', response_model=AssignCategoryResponse)
-async def api_assign_category(
-    payload: AssignCategoryRequest,
-    user: User = Depends(require_user),
-    db: AsyncSession = Depends(get_db),
-):
+@app.post('/assign-selection', response_model=AssignSelectionResponse)
+async def api_assign_selection(payload: AssignSelectionRequest, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
     if user.role != 'employee':
-        raise HTTPException(status_code=403, detail='Категории может брать только сотрудник.')
-    return await assign_category_to_user(payload.report_id, payload.category_id, db, user)
+        raise HTTPException(status_code=403, detail='Выбор доступен только сотруднику.')
+    return await assign_selection_to_user(payload.report_id, payload.category_id, payload.target_type, payload.subcategory_id, db, user)
+
+
+@app.post('/simulate-15-days', response_model=ResetSelectionCycleResponse)
+async def api_simulate_15_days(user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
+    if user.role != 'employee' or not user.location:
+        raise HTTPException(status_code=403, detail='Сотруднику не назначена точка.')
+    return await reset_selection_cycle(user.location, db)
 
 
 @app.post('/verify', response_model=VerifyResponse)
-async def verify_count(
-    req: VerifyRequest,
-    user: User = Depends(require_user),
-    db: AsyncSession = Depends(get_db),
-):
+async def verify_count(req: VerifyRequest, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
     return await verify_item_or_category(req, db, checked_by_user=user)
 
 
 @app.post('/finish-report', response_model=FinishReportResponse)
-async def complete_report(
-    req: FinishReportRequest,
-    user: User = Depends(require_user),
-    db: AsyncSession = Depends(get_db),
-):
+async def complete_report(req: FinishReportRequest, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
     success, message = await finish_report(req.report_id, db)
     return FinishReportResponse(success=success, message=message)
 
 
 @app.get('/api/reports', response_model=ReportHistoryResponse)
-async def api_get_reports(
-    location: str | None = None,
-    user: User = Depends(require_user),
-    db: AsyncSession = Depends(get_db),
-):
+async def api_get_reports(location: str | None = None, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
     target_location = location or user.location
     if user.role != 'admin' and target_location != user.location:
         raise HTTPException(status_code=403, detail='Нельзя смотреть чужую точку.')
@@ -236,21 +216,12 @@ async def api_get_reports(
 
 
 @app.get('/api/report', response_model=AdminReport)
-async def api_get_report(
-    location: str | None = None,
-    report_id: int | None = None,
-    admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
+async def api_get_report(location: str | None = None, report_id: int | None = None, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     if not location:
         raise HTTPException(status_code=400, detail='Нужно указать точку.')
     return await get_admin_report(location, db, report_id)
 
 
 @app.delete('/api/report/{report_id}', response_model=DeleteResponse)
-async def api_delete_report(
-    report_id: int,
-    admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
+async def api_delete_report(report_id: int, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     return await delete_report(report_id, db)

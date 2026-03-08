@@ -80,9 +80,7 @@ class UserResponse(BaseModel):
     location: Optional[str] = None
     is_active: bool
 
-    model_config = {
-        'from_attributes': True
-    }
+    model_config = {'from_attributes': True}
 
 
 class UserListResponse(BaseModel):
@@ -116,6 +114,11 @@ class SubcategoryModel(BaseModel):
     is_expanded: bool = False
     status: StatusEnum = StatusEnum.GREY
     items: list[ItemModel] = Field(default_factory=list)
+    assigned_to: Optional[str] = None
+    assigned_to_current_user: bool = False
+    can_take: bool = False
+    is_blocked_by_other: bool = False
+    taken_as_part_of_category: bool = False
 
 
 class CategoryModel(BaseModel):
@@ -129,6 +132,9 @@ class CategoryModel(BaseModel):
     assigned_to_current_user: bool = False
     can_take: bool = False
     is_blocked_by_other: bool = False
+    has_my_subcategories: bool = False
+    has_other_subcategories: bool = False
+    mixed_assignment: bool = False
 
 
 class InventoryStructureResponse(BaseModel):
@@ -136,16 +142,28 @@ class InventoryStructureResponse(BaseModel):
     location: str
     report_date: str
     categories: list[CategoryModel]
+    cycle_version: int
+    cycle_started_at: str
+    cycle_days_left: int
 
 
-class AssignCategoryRequest(BaseModel):
+class AssignSelectionRequest(BaseModel):
     report_id: int
     category_id: str
+    target_type: str = 'category'
+    subcategory_id: Optional[str] = None
 
 
-class AssignCategoryResponse(BaseModel):
+class AssignSelectionResponse(BaseModel):
     success: bool
     message: str
+
+
+class ResetSelectionCycleResponse(BaseModel):
+    success: bool
+    message: str
+    cycle_version: int
+    cycle_started_at: str
 
 
 class VerifyRequest(BaseModel):
