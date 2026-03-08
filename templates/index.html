@@ -28,12 +28,16 @@
     {% else %}
         <div id="inventory-screen" class="screen active">
             <div class="top-bar">
-                <h2 id="current-location-title">Точка: {{ user.location }}</h2>
+                <div>
+                    <h2 id="current-location-title">Точка: {{ user.location }}</h2>
+                    <p id="report-date-line" class="muted-text"></p>
+                </div>
                 <div class="finish-block">
-                    <button id="finish-btn" onclick="finishInventory()" class="finish-btn" disabled>Завершить</button>
-                    <div id="finish-hint" class="finish-hint">Кнопка станет доступна после прохождения всех категорий.</div>
+                    <button id="finish-btn" class="finish-btn" type="button">Обновить</button>
+                    <div id="finish-hint" class="finish-hint">Общая ревизия по точке завершится автоматически, когда все категории будут проверены.</div>
                 </div>
             </div>
+            <div id="inventory-summary" class="hint-box"></div>
             <div id="categories-container"></div>
         </div>
 

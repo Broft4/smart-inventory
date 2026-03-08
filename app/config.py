@@ -1,15 +1,25 @@
+from __future__ import annotations
+
+from typing import Optional
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
+    database_url: str = "sqlite+aiosqlite:///./inventory.db"
+    session_secret_key: str = "smart-inventory-secret-key"
 
-    database_url: str = 'sqlite+aiosqlite:///./inventory.db'
-    session_secret_key: str = 'change-me-in-production'
-    default_admin_username: str = 'admin'
-    default_admin_password: str = 'admin123'
-    default_admin_full_name: str = 'Главный администратор'
-    default_admin_birth_date: str = '1990-01-01'
+    default_admin_full_name: str = "Главный администратор"
+    default_admin_birth_date: str = "1990-01-01"
+    default_admin_username: str = "admin"
+    default_admin_password: str = "admin123"
+
+    moysklad_token: Optional[str] = None
+    store_dmitrov: str = "Дмитров"
+    store_dubna: str = "Дубна"
+    ms_api_base_url: str = "https://api.moysklad.ru/api/remap/1.2"
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
 settings = Settings()

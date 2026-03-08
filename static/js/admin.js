@@ -64,7 +64,8 @@ function resetUserForm() {
     document.getElementById('user-active').checked = true;
     document.getElementById('user-form-message').textContent = '';
     document.getElementById('user-form-message').style.color = '#dc3545';
-    document.getElementById('user-location').required = true;
+    document.getElementById('user-location').value = '';
+    document.getElementById('user-location').required = false;
 }
 
 function openCreateUserModal() {
@@ -110,9 +111,7 @@ async function submitUserForm(event) {
     message.textContent = '';
     message.style.color = '#dc3545';
 
-    const locationValue = document.getElementById('user-location').value || null;
     const password = document.getElementById('user-password').value;
-
     const payload = {
         full_name: document.getElementById('user-full-name').value.trim(),
         birth_date: document.getElementById('user-birth-date').value,
@@ -172,6 +171,27 @@ window.deleteUser = async function (userId) {
     await loadUsers();
 };
 
+function renderEmployees(report) {
+    const container = document.getElementById('report-employees');
+    if (!report.employees || !report.employees.length) {
+        container.innerHTML = '<p style="text-align:center;">В этой ревизии пока нет закреплённых категорий за сотрудниками.</p>';
+        return;
+    }
+
+    container.innerHTML = `
+        <div class="employee-summary-grid">
+            ${report.employees.map(employee => `
+                <div class="employee-summary-card">
+                    <h3>${employee.full_name}</h3>
+                    <p><strong>Категории:</strong> ${employee.categories.length ? employee.categories.join(', ') : '—'}</p>
+                    <p><strong>Завершено категорий:</strong> ${employee.completed_categories}</p>
+                    <p><strong>Расхождений по товарам:</strong> ${employee.discrepancy_items}</p>
+                </div>
+            `).join('')}
+        </div>
+    `;
+}
+
 async function loadReportsList(location) {
     const select = document.getElementById('admin-report-select');
     select.disabled = true;
@@ -216,6 +236,7 @@ async function loadAdminReport(location, reportId) {
         totalPlusSpan.textContent = `+${report.total_plus}`;
         totalMinusSpan.textContent = report.total_minus;
         categoriesContainer.innerHTML = '';
+        renderEmployees(report);
 
         if (!report.categories.length) {
             categoriesContainer.innerHTML = '<p style="text-align:center;">По этой ревизии пока нет данных.</p>';
@@ -226,11 +247,12 @@ async function loadAdminReport(location, reportId) {
             const card = document.createElement('div');
             card.className = `category-card status-${cat.status}`;
             let html = `<h3>${cat.name}</h3>`;
+            html += `<p class="muted-text"><strong>Закреплена за:</strong> ${cat.assigned_to || 'пока не закреплена'}</p>`;
 
             if (cat.status === 'green') {
-                html += '<p style="color:#28a745; font-weight:bold;">✅ Расхождений нет</p>';
+                html += '<p style="color:#28a745; font-weight:bold;">✅ Категория завершена без расхождений</p>';
             } else if (cat.status === 'orange') {
-                html += '<p style="color:#fd7e14; font-weight:bold;">⏳ Категория еще проверяется поштучно</p>';
+                html += '<p style="color:#fd7e14; font-weight:bold;">⏳ Категория закреплена и находится в работе</p>';
             } else if (cat.problem_items.length > 0) {
                 html += '<p style="color:#dc3545; font-weight:bold;">⚠️ Зафиксированы расхождения</p>';
                 html += `
@@ -258,7 +280,7 @@ async function loadAdminReport(location, reportId) {
                 });
                 html += '</table>';
             } else {
-                html += '<p>По этой категории пока нет завершенных проверок.</p>';
+                html += '<p>Категория ещё не взята в работу.</p>';
             }
 
             card.innerHTML = html;
@@ -266,6 +288,7 @@ async function loadAdminReport(location, reportId) {
         });
     } catch (error) {
         console.error(error);
+        document.getElementById('report-employees').innerHTML = '<p style="color:red; text-align:center;">Ошибка загрузки данных о сотрудниках</p>';
         categoriesContainer.innerHTML = '<p style="color:red; text-align:center;">Ошибка загрузки данных</p>';
     }
 }
@@ -330,10 +353,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('user-form').addEventListener('submit', submitUserForm);
     document.getElementById('user-form-reset').addEventListener('click', resetUserForm);
     document.getElementById('delete-report-btn').addEventListener('click', deleteSelectedReport);
-    document.getElementById('user-role').addEventListener('change', (e) => {
-        const isEmployee = e.target.value === 'employee';
-        document.getElementById('user-location').required = isEmployee;
-    });
     locationSelect.addEventListener('change', async () => {
         await reloadReportsSection(locationSelect.value);
     });
@@ -341,25 +360,3 @@ document.addEventListener('DOMContentLoaded', async () => {
     initModalCloseBehavior();
     await reloadReportsSection(locationSelect.value);
 });
-
-async function extractErrorMessage(response) {
-    try {
-        const data = await response.json();
-
-        if (Array.isArray(data.detail)) {
-            return data.detail.map(item => item.msg).join(', ');
-        }
-
-        if (typeof data.detail === 'string') {
-            return data.detail;
-        }
-
-        if (typeof data.message === 'string') {
-            return data.message;
-        }
-
-        return 'Ошибка сохранения пользователя.';
-    } catch {
-        return 'Ошибка сохранения пользователя.';
-    }
-}

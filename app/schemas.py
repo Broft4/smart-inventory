@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from enum import Enum
-from typing import Optional, List
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -81,17 +81,19 @@ class UserResponse(BaseModel):
     is_active: bool
 
     model_config = {
-        "from_attributes": True
+        'from_attributes': True
     }
 
 
 class UserListResponse(BaseModel):
     users: list[UserResponse]
 
+
 class UserActionResponse(BaseModel):
     success: bool
     message: str
     user: Optional[UserResponse] = None
+
 
 class DeleteResponse(BaseModel):
     success: bool
@@ -103,6 +105,8 @@ class ItemModel(BaseModel):
     name: str
     uom: str = 'шт'
     expected_qty: float = 0
+    status: StatusEnum = StatusEnum.GREY
+    is_final: bool = False
 
 
 class SubcategoryModel(BaseModel):
@@ -123,12 +127,27 @@ class CategoryModel(BaseModel):
     is_completed: bool = False
     is_open: bool = False
     subcategories: list[SubcategoryModel] = Field(default_factory=list)
+    assigned_to: Optional[str] = None
+    assigned_to_current_user: bool = False
+    can_take: bool = False
+    is_blocked_by_other: bool = False
 
 
 class InventoryStructureResponse(BaseModel):
     report_id: int
     location: str
+    report_date: str
     categories: list[CategoryModel]
+
+
+class AssignCategoryRequest(BaseModel):
+    report_id: int
+    category_id: str
+
+
+class AssignCategoryResponse(BaseModel):
+    success: bool
+    message: str
 
 
 class VerifyRequest(BaseModel):
@@ -166,7 +185,15 @@ class DiscrepancyItem(BaseModel):
 class CategoryResult(BaseModel):
     name: str
     status: StatusEnum
+    assigned_to: Optional[str] = None
     problem_items: list[DiscrepancyItem] = Field(default_factory=list)
+
+
+class EmployeeReportSummary(BaseModel):
+    full_name: str
+    categories: list[str] = Field(default_factory=list)
+    completed_categories: int = 0
+    discrepancy_items: int = 0
 
 
 class AdminReport(BaseModel):
@@ -177,6 +204,7 @@ class AdminReport(BaseModel):
     categories: list[CategoryResult]
     total_plus: float
     total_minus: float
+    employees: list[EmployeeReportSummary] = Field(default_factory=list)
 
 
 class ReportHistoryItem(BaseModel):

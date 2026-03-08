@@ -14,6 +14,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.config import settings
 from app.database import engine, get_db
 from app.logic import (
+    assign_category_to_user,
     authenticate_user,
     bootstrap_schema_and_admin,
     create_user,
@@ -33,6 +34,8 @@ from app.logic import (
 from app.models import User
 from app.schemas import (
     AdminReport,
+    AssignCategoryRequest,
+    AssignCategoryResponse,
     DeleteResponse,
     FinishReportRequest,
     FinishReportResponse,
@@ -42,20 +45,13 @@ from app.schemas import (
     LogoutResponse,
     MeResponse,
     ReportHistoryResponse,
+    UserActionResponse,
     UserCreateRequest,
     UserListResponse,
-    UserResponse,
     UserUpdateRequest,
-    UserActionResponse,
     VerifyRequest,
     VerifyResponse,
-
-
-
-
-
 )
-
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 
@@ -119,14 +115,9 @@ async def inventory_page(request: Request, user: User | None = Depends(get_curre
         return RedirectResponse(url='/login', status_code=302)
     if user.role == 'admin':
         return RedirectResponse(url='/admin', status_code=302)
-
     return templates.TemplateResponse(
         'index.html',
-        {
-            'request': request,
-            'user': user,
-            'no_location_assigned': not bool(user.location),
-        },
+        {'request': request, 'user': user, 'no_location_assigned': not bool(user.location)},
     )
 
 
@@ -197,7 +188,18 @@ async def api_delete_user(
 async def get_inventory_structure(user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
     if user.role != 'employee' or not user.location:
         raise HTTPException(status_code=403, detail='Сотруднику не назначена точка.')
-    return await get_inventory_data(user.location, db)
+    return await get_inventory_data(user.location, db, user)
+
+
+@app.post('/assign-category', response_model=AssignCategoryResponse)
+async def api_assign_category(
+    payload: AssignCategoryRequest,
+    user: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if user.role != 'employee':
+        raise HTTPException(status_code=403, detail='Категории может брать только сотрудник.')
+    return await assign_category_to_user(payload.report_id, payload.category_id, db, user)
 
 
 @app.post('/verify', response_model=VerifyResponse)
@@ -206,7 +208,7 @@ async def verify_count(
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
-    return await verify_item_or_category(req, db, checked_by_user_id=user.id)
+    return await verify_item_or_category(req, db, checked_by_user=user)
 
 
 @app.post('/finish-report', response_model=FinishReportResponse)
