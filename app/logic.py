@@ -490,7 +490,6 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
                     ItemModel(
                         id=item['id'],
                         name=item['name'],
-                        expected_qty=float(item['expected_qty']),
                         status=item_status,
                         is_final=is_final,
                     )
@@ -511,7 +510,6 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
                 SubcategoryModel(
                     id=raw_sub['id'],
                     name=raw_sub['name'],
-                    expected_total=float(sum(item.expected_qty for item in items)),
                     is_locked=is_locked,
                     is_completed=is_completed,
                     is_expanded=is_expanded,

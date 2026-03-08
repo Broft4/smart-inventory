@@ -113,7 +113,7 @@ function renderCategories() {
                     return `
                         <div class="item-card">
                             <h4>${item.name} (${item.uom})</h4>
-                            <p class="muted-text">По системе: ${item.expected_qty}</p>
+                            <p class="muted-text">Посчитайте всё вместе.</p>
                             <div class="input-group">
                                 <input type="number"
                                     id="input-${item.id}"
@@ -135,7 +135,7 @@ function renderCategories() {
                 subCard.innerHTML = `
                     <h3 id="title-${sub.id}" onclick="toggleSubcategory('${sub.id}')">${icon} ${sub.name}</h3>
                     <div id="body-${sub.id}" style="display:${sub.is_expanded ? 'block' : 'none'}; ${locked ? 'opacity:.65;' : ''}">
-                        <p class="muted-text">Посчитайте всё вместе. По системе должно быть: <strong>${sub.expected_total}</strong></p>
+                        <p class="muted-text">Посчитайте всё вместе.</p>
                         <div class="input-group">
                             <input type="number" id="input-${sub.id}" placeholder="Общее кол-во" min="0" step="1" ${locked || sub.is_completed ? 'disabled' : ''}>
                             <button class="btn check btn-inline" onclick="verifySubcategory('${sub.id}')" ${locked || sub.is_completed ? 'disabled' : ''}>Ввод</button>

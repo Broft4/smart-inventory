@@ -104,7 +104,6 @@ class ItemModel(BaseModel):
     id: str
     name: str
     uom: str = 'шт'
-    expected_qty: float = 0
     status: StatusEnum = StatusEnum.GREY
     is_final: bool = False
 
@@ -112,7 +111,6 @@ class ItemModel(BaseModel):
 class SubcategoryModel(BaseModel):
     id: str
     name: str
-    expected_total: float
     is_locked: bool = False
     is_completed: bool = False
     is_expanded: bool = False

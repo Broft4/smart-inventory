@@ -7,8 +7,8 @@
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
-<div class="container admin-container">
-    <header class="page-header admin-header">
+<div class="container admin-container admin-v2">
+    <header class="page-header admin-header-v2">
         <div>
             <h1>Панель администратора</h1>
             <p class="muted-text">{{ user.full_name }}</p>
@@ -19,47 +19,140 @@
         </div>
     </header>
 
-    <section class="category-card">
-        <div class="admin-top-row">
-            <div>
-                <label for="admin-location-select">Точка</label>
+    <section class="category-card admin-hero-card">
+        <div class="admin-toolbar-grid">
+            <label>
+                Точка
                 <select id="admin-location-select">
                     <option value="Дубна">Дубна</option>
                     <option value="Дмитров">Дмитров</option>
                 </select>
-            </div>
-            <div>
-                <label for="admin-report-select">Ревизия</label>
+            </label>
+            <label>
+                Ревизия
                 <select id="admin-report-select"></select>
-            </div>
-            <div class="admin-delete-wrap">
+            </label>
+
+            <div class="admin-toolbar-actions">
+                <label class="checkbox-row admin-filter-checkbox">
+                    <input type="checkbox" id="admin-discrepancy-only">
+                    Только с расхождениями
+                </label>
                 <button id="delete-report-btn" type="button" class="btn danger btn-inline">Удалить ревизию</button>
             </div>
+
+
         </div>
     </section>
 
-    <section class="report-summary category-card">
-        <h2>Сводка по точке: <span id="report-location">-</span></h2>
-        <p><strong>Дата:</strong> <span id="report-date">-</span></p>
-        <p><strong>Статус:</strong> <span id="report-status">-</span></p>
-        <p><strong>ID ревизии:</strong> <span id="report-id">-</span></p>
-        <div class="totals">
-            <p class="total-plus">Излишки: <span id="total-plus">0</span> шт.</p>
-            <p class="total-minus">Недостача: <span id="total-minus">0</span> шт.</p>
+    <section class="category-card report-summary-v2">
+        <div class="report-summary-header">
+            <div>
+                <h2>Сводка по ревизии</h2>
+                <p class="muted-text">Общий статус, состав команды и ключевые показатели.</p>
+            </div>
+            <div class="report-status-chip" id="report-status-chip">—</div>
+        </div>
+
+        <div class="summary-topline">
+            <div class="summary-topline-item">
+                <span class="summary-label">Точка</span>
+                <strong id="report-location">-</strong>
+            </div>
+            <div class="summary-topline-item">
+                <span class="summary-label">Дата</span>
+                <strong id="report-date">-</strong>
+            </div>
+            <div class="summary-topline-item">
+                <span class="summary-label">Статус</span>
+                <strong id="report-status">-</strong>
+            </div>
+            <div class="summary-topline-item">
+                <span class="summary-label">ID ревизии</span>
+                <strong id="report-id">-</strong>
+            </div>
+        </div>
+
+        <div class="summary-kpi-grid">
+            <div class="summary-kpi-card plus">
+                <span class="summary-kpi-label">Излишки</span>
+                <strong id="total-plus">+0</strong>
+            </div>
+            <div class="summary-kpi-card minus">
+                <span class="summary-kpi-label">Недостача</span>
+                <strong id="total-minus">0</strong>
+            </div>
+            <div class="summary-kpi-card neutral">
+                <span class="summary-kpi-label">Сотрудников в ревизии</span>
+                <strong id="employees-count">0</strong>
+            </div>
+            <div class="summary-kpi-card neutral">
+                <span class="summary-kpi-label">Категорий завершено</span>
+                <strong id="completed-categories">0/0</strong>
+            </div>
+            <div class="summary-kpi-card warning">
+                <span class="summary-kpi-label">Категорий с расхождениями</span>
+                <strong id="discrepancy-categories">0</strong>
+            </div>
+            <div class="summary-kpi-card neutral">
+                <span class="summary-kpi-label">Проблемных товаров</span>
+                <strong id="discrepancy-items">0</strong>
+            </div>
         </div>
     </section>
 
     <section class="category-card">
-        <h2 class="section-title">Сотрудники в ревизии</h2>
-        <div id="report-employees">
-            <p style="text-align:center;">Данные о сотрудниках загрузятся после выбора ревизии.</p>
+        <div class="section-title-row">
+            <div>
+                <h2 class="section-title">Сотрудники в ревизии</h2>
+                <p class="muted-text">Кто какие категории взял, что уже завершено и где есть расхождения.</p>
+            </div>
         </div>
+        <div id="report-employees"></div>
     </section>
 
-    <h2 class="section-title">Детализация ревизии</h2>
-    <div id="report-categories">
-        <p style="text-align:center;">Загрузка данных...</p>
+<section>
+    <div class="section-title-row section-title-row-with-tabs detail-header-block">
+        <div class="detail-header-left">
+            <h2 class="section-title">Детализация ревизии</h2>
+            <p class="muted-text">Переключайтесь между просмотром по категориям и по сотрудникам.</p>
+        </div>
+
+        <div class="detail-header-tools">
+            <div class="detail-tools-grid">
+                <label class="detail-filter-label">
+                    Сотрудник
+                    <select id="admin-employee-filter">
+                        <option value="">Все сотрудники</option>
+                    </select>
+                </label>
+
+                <label class="admin-search-label detail-search-label">
+                    Поиск
+                    <input
+                        type="text"
+                        id="admin-search-input"
+                        placeholder="Поиск по категории, подкатегории или товару..."
+                        autocomplete="off"
+                    >
+                    <span id="admin-search-hint" class="muted-text search-hint">
+                        В режиме «По категориям» ищет по категориям, подкатегориям и товарам.
+                    </span>
+                </label>
+
+                <div class="detail-mode-wrap">
+                    <div class="view-mode-switch" id="admin-view-mode-switch">
+                        <button type="button" class="view-mode-btn active" data-view-mode="categories">По категориям</button>
+                        <button type="button" class="view-mode-btn" data-view-mode="employees">По сотрудникам</button>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
+
+    <div id="report-categories"></div>
+    <div id="report-employee-details" class="hidden"></div>
+</section>
 </div>
 
 <div id="users-modal" class="modal-overlay hidden">
@@ -67,7 +160,7 @@
         <div class="modal-header">
             <div>
                 <h2>Сотрудники</h2>
-                <p class="muted-text">Создание, редактирование и удаление учетных записей.</p>
+                <p class="muted-text">Создание, редактирование и удаление учётных записей.</p>
             </div>
             <div class="modal-header-actions">
                 <button id="open-create-user-btn" class="btn primary btn-inline" type="button">Добавить сотрудника</button>
@@ -85,7 +178,7 @@
         <div class="modal-header">
             <div>
                 <h2 id="user-form-title">Создать сотрудника</h2>
-                <p class="muted-text">Заполните данные учетной записи сотрудника.</p>
+                <p class="muted-text">Заполните данные учётной записи сотрудника.</p>
             </div>
             <button id="close-user-form-modal-btn" class="btn secondary btn-inline" type="button">Закрыть</button>
         </div>
