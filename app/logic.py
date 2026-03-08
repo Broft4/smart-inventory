@@ -4,7 +4,7 @@ import hashlib
 import hmac
 import os
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import HTTPException
@@ -133,6 +133,11 @@ MOCK_INVENTORY: dict[str, dict[str, Any]] = {
 
 MSK_SHIFT = timedelta(hours=3)
 SELECTION_CYCLE_DAYS = 15
+
+MSK_TZ = timezone(MSK_SHIFT)
+
+def get_moscow_today() -> date:
+    return datetime.now(MSK_TZ).date()
 
 
 def hash_password(password: str) -> str:
@@ -430,18 +435,19 @@ async def reset_selection_cycle(location: str, db: AsyncSession) -> ResetSelecti
 
 
 async def get_or_create_daily_report(location: str, db: AsyncSession) -> Report:
+    today = get_moscow_today()
     normalized = _normalize_location(location)
-    cycle = await _get_or_create_selection_cycle(normalized, db)
-    today = date.today()
-    report = await db.scalar(select(Report).where(Report.location == normalized, Report.report_date == today).limit(1))
+
+    report = await db.scalar(
+        select(Report).where(
+            Report.location == normalized,
+            Report.report_date == today,
+        ).limit(1)
+    )
     if report:
-        if report.cycle_version != cycle.cycle_version:
-            report.cycle_version = cycle.cycle_version
-            await db.commit()
-            await db.refresh(report)
         return report
 
-    report = Report(location=normalized, report_date=today, cycle_version=cycle.cycle_version, status='in_progress')
+    report = Report(location=normalized, report_date=today, status='in_progress')
     db.add(report)
     await db.commit()
     await db.refresh(report)

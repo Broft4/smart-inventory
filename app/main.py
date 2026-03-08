@@ -187,13 +187,6 @@ async def api_assign_selection(payload: AssignSelectionRequest, user: User = Dep
     return await assign_selection_to_user(payload.report_id, payload.category_id, payload.target_type, payload.subcategory_id, db, user)
 
 
-@app.post('/simulate-15-days', response_model=ResetSelectionCycleResponse)
-async def api_simulate_15_days(user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
-    if user.role != 'employee' or not user.location:
-        raise HTTPException(status_code=403, detail='Сотруднику не назначена точка.')
-    return await reset_selection_cycle(user.location, db)
-
-
 @app.post('/verify', response_model=VerifyResponse)
 async def verify_count(req: VerifyRequest, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
     return await verify_item_or_category(req, db, checked_by_user=user)

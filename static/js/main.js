@@ -3,7 +3,7 @@ let subcategoryAttempts = {};
 let itemAttempts = {};
 
 const employeePageState = {
-    filter: 'all',
+    filter: 'mine',
     searchQuery: '',
 };
 
@@ -429,22 +429,6 @@ window.verifyItem = async function (itemId) {
     }
 };
 
-async function simulate15Days() {
-    if (!confirm('Сбросить текущий 15-дневный выбор для вашей точки?')) return;
-    try {
-        const response = await fetch('/simulate-15-days', { method: 'POST' });
-        const data = await response.json();
-        if (!response.ok || !data.success) {
-            alert(data.detail || data.message || 'Не удалось обновить цикл.');
-            return;
-        }
-        alert(data.message);
-        await loadInventory();
-    } catch (error) {
-        console.error(error);
-        alert('Ошибка сервера при обновлении цикла.');
-    }
-}
 
 async function loadInventory() {
     const summary = document.getElementById('inventory-summary');
@@ -480,7 +464,6 @@ async function logout() {
 document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('logout-btn')?.addEventListener('click', logout);
     document.getElementById('finish-btn')?.addEventListener('click', loadInventory);
-    document.getElementById('simulate-15-days-btn')?.addEventListener('click', simulate15Days);
     document.querySelectorAll('[data-employee-filter]').forEach(button => {
         button.addEventListener('click', () => {
             employeePageState.filter = button.dataset.employeeFilter || 'all';

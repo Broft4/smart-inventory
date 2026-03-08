@@ -610,11 +610,9 @@ body.modal-open {
 }
 
 .inventory-topbar {
-    position: sticky;
-    top: 0;
-    z-index: 20;
-    background: #f6f8fb;
-    padding-top: 4px;
+    position: static;
+    background: transparent;
+    padding-top: 0;
 }
 
 .employee-tools-card {
