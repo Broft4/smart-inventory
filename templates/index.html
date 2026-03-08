@@ -27,17 +27,62 @@
         </div>
     {% else %}
         <div id="inventory-screen" class="screen active">
-            <div class="top-bar">
+            <div class="top-bar inventory-topbar">
                 <div>
                     <h2 id="current-location-title">Точка: {{ user.location }}</h2>
                     <p id="report-date-line" class="muted-text"></p>
                 </div>
                 <div class="finish-block">
                     <button id="finish-btn" class="finish-btn" type="button">Обновить</button>
-                    <div id="finish-hint" class="finish-hint">Общая ревизия по точке завершится автоматически, когда все категории будут проверены.</div>
+                    <div id="finish-hint" class="finish-hint">
+                        Общая ревизия по точке завершится автоматически, когда все категории будут проверены.
+                    </div>
                 </div>
             </div>
+
             <div id="inventory-summary" class="hint-box"></div>
+
+            <section class="employee-tools-card">
+                <div class="employee-tools-grid">
+                    <label class="employee-search-label">
+                        Поиск
+                        <input
+                            type="text"
+                            id="employee-search-input"
+                            placeholder="Поиск по категории, подкатегории или товару..."
+                            autocomplete="off"
+                        >
+                    </label>
+
+                    <div class="employee-stats" id="employee-stats">
+                        <div class="employee-stat-card">
+                            <span class="employee-stat-label">Мои</span>
+                            <strong id="stat-my">0</strong>
+                        </div>
+                        <div class="employee-stat-card">
+                            <span class="employee-stat-label">Свободные</span>
+                            <strong id="stat-free">0</strong>
+                        </div>
+                        <div class="employee-stat-card">
+                            <span class="employee-stat-label">Занятые</span>
+                            <strong id="stat-busy">0</strong>
+                        </div>
+                        <div class="employee-stat-card">
+                            <span class="employee-stat-label">С ошибками</span>
+                            <strong id="stat-problem">0</strong>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="employee-view-switch" id="employee-view-switch">
+                    <button type="button" class="employee-view-btn active" data-employee-filter="all">Все</button>
+                    <button type="button" class="employee-view-btn" data-employee-filter="mine">Мои</button>
+                    <button type="button" class="employee-view-btn" data-employee-filter="free">Свободные</button>
+                    <button type="button" class="employee-view-btn" data-employee-filter="busy">Занятые</button>
+                    <button type="button" class="employee-view-btn" data-employee-filter="problem">С расхождениями</button>
+                </div>
+            </section>
+
             <div id="categories-container"></div>
         </div>
 
