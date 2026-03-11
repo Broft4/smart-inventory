@@ -14,14 +14,13 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-
 DEFAULT_CATEGORY_NAME = 'Без категории'
 DEFAULT_SUBCATEGORY_NAME = 'Без подкатегории'
 
 
 @dataclass(slots=True)
 class CacheEntry:
-    value: dict[str, Any]
+    value: Any
     expires_at: float
 
 
@@ -29,18 +28,29 @@ class MoySkladClient:
     def __init__(self) -> None:
         self.base_url = settings.ms_api_base_url.rstrip('/')
 
-        configured_timeout = float(settings.ms_request_timeout_seconds or 0)
-        self.request_timeout = max(60.0, configured_timeout)
+        configured_timeout = float(settings.ms_request_timeout_seconds or 20)
+        self.request_timeout = max(5.0, configured_timeout)
 
-        configured_retries = int(settings.ms_retry_attempts or 0)
-        self.retry_attempts = max(5, configured_retries)
+        configured_retries = int(settings.ms_retry_attempts or 2)
+        self.retry_attempts = max(1, configured_retries)
 
-        self.inventory_cache_ttl = max(15, settings.ms_inventory_cache_ttl_seconds)
+        configured_inventory_ttl = int(settings.ms_inventory_cache_ttl_seconds or 300)
+        self.inventory_cache_ttl = max(30, configured_inventory_ttl)
+
+        self.folder_cache_ttl = max(1800, self.inventory_cache_ttl)
+        self.assortment_item_cache_ttl = max(900, self.inventory_cache_ttl)
 
         self._inventory_cache: dict[str, CacheEntry] = {}
         self._inventory_locks: dict[str, asyncio.Lock] = {}
-        self._catalog_cache: CacheEntry | None = None
-        self._catalog_lock = asyncio.Lock()
+
+        self._folders_cache: CacheEntry | None = None
+        self._folders_lock = asyncio.Lock()
+
+        self._assortment_cache: dict[str, CacheEntry] = {}
+        self._assortment_locks: dict[str, asyncio.Lock] = {}
+
+        self._stores_cache: CacheEntry | None = None
+        self._stores_lock = asyncio.Lock()
 
     @property
     def enabled(self) -> bool:
@@ -57,11 +67,12 @@ class MoySkladClient:
         }
 
     def _build_timeout(self) -> httpx.Timeout:
+        connect_timeout = min(10.0, self.request_timeout)
         return httpx.Timeout(
-            connect=min(20.0, self.request_timeout),
+            connect=connect_timeout,
             read=self.request_timeout,
             write=self.request_timeout,
-            pool=min(20.0, self.request_timeout),
+            pool=connect_timeout,
         )
 
     def _cache_alive(self, entry: CacheEntry | None) -> bool:
@@ -71,23 +82,31 @@ class MoySkladClient:
         if not href:
             return None
         path = urlparse(href).path.rstrip('/')
-        return path.split('/')[-1] if path else None
+        if not path:
+            return None
+        return path.split('/')[-1]
 
     def _get_retry_delay(self, response: httpx.Response, attempt: int) -> float:
-        retry_ms = response.headers.get('X-Lognex-Retry-TimeInterval') or response.headers.get('X-Lognex-Retry-After')
-        if retry_ms:
+        retry_after = response.headers.get('X-Lognex-Retry-TimeInterval') or response.headers.get('X-Lognex-Retry-After')
+        if retry_after:
             try:
-                return max(float(retry_ms) / 1000.0, 0.5)
+                return max(float(retry_after) / 1000.0, 0.5)
             except ValueError:
                 pass
-        return min(1.5 * attempt, 10.0)
+        return min(1.5 * attempt, 6.0)
 
     def _get_exception_retry_delay(self, attempt: int) -> float:
-        return min(2.0 * attempt, 10.0)
+        return min(1.5 * attempt, 6.0)
 
-    async def get(self, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        url = f"{self.base_url}/{endpoint.lstrip('/')}"
-        limits = httpx.Limits(max_connections=3, max_keepalive_connections=1)
+    async def _request_json(
+        self,
+        url_or_endpoint: str,
+        *,
+        params: dict[str, Any] | None = None,
+        absolute: bool = False,
+    ) -> dict[str, Any]:
+        url = url_or_endpoint if absolute else f"{self.base_url}/{url_or_endpoint.lstrip('/')}"
+        limits = httpx.Limits(max_connections=4, max_keepalive_connections=2)
         timeout = self._build_timeout()
 
         last_error: Exception | None = None
@@ -98,23 +117,18 @@ class MoySkladClient:
                     response = await client.get(url, headers=self.headers, params=params)
 
                     if response.status_code == 429:
-                        last_error = httpx.HTTPStatusError(
-                            '429 Too Many Requests',
-                            request=response.request,
-                            response=response,
-                        )
                         delay = self._get_retry_delay(response, attempt)
                         logger.warning(
-                            'МойСклад вернул 429 для %s. Повтор через %.2f сек. Попытка %s/%s.',
+                            'МойСклад вернул 429 для %s. Попытка %s/%s. Повтор через %.2f сек.',
                             url,
-                            delay,
                             attempt,
                             self.retry_attempts,
+                            delay,
                         )
                         if attempt < self.retry_attempts:
                             await asyncio.sleep(delay)
                             continue
-                        raise last_error
+                        response.raise_for_status()
 
                     response.raise_for_status()
                     return response.json()
@@ -180,6 +194,12 @@ class MoySkladClient:
             raise last_error
         raise RuntimeError('Не удалось выполнить запрос к МойСклад.')
 
+    async def get(self, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return await self._request_json(endpoint, params=params, absolute=False)
+
+    async def get_absolute(self, url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return await self._request_json(url, params=params, absolute=True)
+
     async def get_all_pages(self, endpoint: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         params = dict(params or {})
         params['limit'] = 1000
@@ -190,29 +210,48 @@ class MoySkladClient:
             data = await self.get(endpoint, params=params)
             rows = data.get('rows', [])
             all_rows.extend(rows)
-            logger.info('Получено %s записей из %s', len(all_rows), endpoint)
             if len(rows) < 1000:
                 break
             params['offset'] += 1000
 
+        logger.info('Получено %s записей из %s', len(all_rows), endpoint)
         return all_rows
 
     async def get_stores_ids(self) -> dict[str, str]:
-        data = await self.get('entity/store')
-        stores_mapping: dict[str, str] = {}
-        target_names = {settings.store_dmitrov.lower(), settings.store_dubna.lower()}
-        for store in data.get('rows', []):
-            store_name = store.get('name', '').strip()
-            if store_name.lower() in target_names:
-                stores_mapping[store_name] = store.get('id')
-        return stores_mapping
+        if self._cache_alive(self._stores_cache):
+            return self._stores_cache.value
+
+        async with self._stores_lock:
+            if self._cache_alive(self._stores_cache):
+                return self._stores_cache.value
+
+            data = await self.get('entity/store')
+            stores_mapping: dict[str, str] = {}
+            target_names = {
+                (settings.store_dmitrov or '').strip().lower(),
+                (settings.store_dubna or '').strip().lower(),
+            }
+
+            for store in data.get('rows', []):
+                store_name = (store.get('name') or '').strip()
+                if store_name.lower() in target_names:
+                    store_id = store.get('id')
+                    if store_id:
+                        stores_mapping[store_name] = store_id
+
+            self._stores_cache = CacheEntry(
+                value=stores_mapping,
+                expires_at=monotonic() + 3600,
+            )
+            return stores_mapping
 
     async def _resolve_store(self, location: str) -> tuple[str, str]:
         normalized = location.strip().title()
-        if normalized.lower() == settings.store_dmitrov.lower():
+
+        if normalized.lower() == (settings.store_dmitrov or '').lower():
             if settings.store_dmitrov_id:
                 return normalized, settings.store_dmitrov_id
-        elif normalized.lower() == settings.store_dubna.lower():
+        elif normalized.lower() == (settings.store_dubna or '').lower():
             if settings.store_dubna_id:
                 return normalized, settings.store_dubna_id
         else:
@@ -222,56 +261,70 @@ class MoySkladClient:
         for name, store_id in stores.items():
             if name.lower() == normalized.lower():
                 return normalized, store_id
+
         raise ValueError(f'Для точки {location} не найден склад в МойСклад.')
 
-    async def _get_catalog_bundle(self) -> dict[str, Any]:
-        if self._cache_alive(self._catalog_cache):
-            return self._catalog_cache.value
+    async def _get_folder_map(self) -> dict[str, dict[str, Any]]:
+        if self._cache_alive(self._folders_cache):
+            return self._folders_cache.value
 
-        async with self._catalog_lock:
-            if self._cache_alive(self._catalog_cache):
-                return self._catalog_cache.value
+        async with self._folders_lock:
+            if self._cache_alive(self._folders_cache):
+                return self._folders_cache.value
 
-            folders, assortment = await asyncio.gather(
-                self.get_all_pages('entity/productfolder'),
-                self.get_all_pages('entity/assortment', params={'filter': 'archived=false'}),
-            )
-
+            rows = await self.get_all_pages('entity/productfolder')
             folder_by_id: dict[str, dict[str, Any]] = {}
-            for folder in folders:
+
+            for folder in rows:
                 folder_id = folder.get('id')
                 if folder_id:
                     folder_by_id[folder_id] = folder
 
-            assortment_by_id: dict[str, dict[str, Any]] = {}
-            assortment_by_href: dict[str, dict[str, Any]] = {}
-            assortment_by_code: dict[str, dict[str, Any]] = {}
-
-            for row in assortment:
-                assortment_id = row.get('id')
-                if assortment_id:
-                    assortment_by_id[assortment_id] = row
-
-                meta = row.get('meta') or {}
-                href = meta.get('href')
-                if href:
-                    assortment_by_href[href] = row
-
-                code = (row.get('code') or '').strip()
-                if code:
-                    assortment_by_code[code] = row
-
-            bundle = {
-                'folder_by_id': folder_by_id,
-                'assortment_by_id': assortment_by_id,
-                'assortment_by_href': assortment_by_href,
-                'assortment_by_code': assortment_by_code,
-            }
-            self._catalog_cache = CacheEntry(
-                value=bundle,
-                expires_at=monotonic() + self.inventory_cache_ttl,
+            self._folders_cache = CacheEntry(
+                value=folder_by_id,
+                expires_at=monotonic() + self.folder_cache_ttl,
             )
-            return bundle
+            logger.info('Закешировано %s папок МоегоСклада', len(folder_by_id))
+            return folder_by_id
+
+    async def _get_assortment_row_by_meta(self, assortment_meta: dict[str, Any] | None) -> tuple[dict[str, Any] | None, str | None]:
+        if not assortment_meta:
+            return None, None
+
+        href = assortment_meta.get('href')
+        assortment_id = assortment_meta.get('id') or self._extract_id_from_href(href)
+        cache_key = href or assortment_id
+        if not cache_key:
+            return None, None
+
+        cached = self._assortment_cache.get(cache_key)
+        if self._cache_alive(cached):
+            return cached.value, 'cache'
+
+        lock = self._assortment_locks.setdefault(cache_key, asyncio.Lock())
+        async with lock:
+            cached = self._assortment_cache.get(cache_key)
+            if self._cache_alive(cached):
+                return cached.value, 'cache'
+
+            try:
+                if href:
+                    row = await self.get_absolute(href)
+                    source = 'assortment.meta.href'
+                elif assortment_id:
+                    row = await self.get(f'entity/assortment/{assortment_id}')
+                    source = 'assortment.id'
+                else:
+                    return None, None
+            except httpx.HTTPError:
+                logger.warning('Не удалось точечно получить карточку ассортимента для %s', cache_key)
+                return None, None
+
+            self._assortment_cache[cache_key] = CacheEntry(
+                value=row,
+                expires_at=monotonic() + self.assortment_item_cache_ttl,
+            )
+            return row, source
 
     def _resolve_folder_chain(self, folder_id: str | None, folder_by_id: dict[str, dict[str, Any]]) -> list[dict[str, str]]:
         if not folder_id:
@@ -300,28 +353,11 @@ class MoySkladClient:
         chain.reverse()
         return chain
 
-    def _lookup_assortment(self, stock_row: dict[str, Any], catalog: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
-        assortment_meta = (stock_row.get('assortment') or {}).get('meta') or {}
-        assortment_id = assortment_meta.get('id') or self._extract_id_from_href(assortment_meta.get('href'))
-        if assortment_id:
-            assortment = catalog['assortment_by_id'].get(assortment_id)
-            if assortment:
-                return assortment, 'assortment.id'
-
-        if assortment_meta.get('href'):
-            assortment = catalog['assortment_by_href'].get(assortment_meta['href'])
-            if assortment:
-                return assortment, 'assortment.href'
-
-        code = (stock_row.get('code') or '').strip()
-        if code:
-            assortment = catalog['assortment_by_code'].get(code)
-            if assortment:
-                return assortment, 'stock_row.code'
-
-        return None, None
-
-    def _extract_folder_id(self, stock_row: dict[str, Any], catalog: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
+    async def _extract_folder_id(
+        self,
+        stock_row: dict[str, Any],
+        folder_by_id: dict[str, dict[str, Any]],
+    ) -> tuple[str | None, dict[str, Any]]:
         diagnostics: dict[str, Any] = {
             'folder_source': None,
             'assortment_lookup': None,
@@ -338,17 +374,22 @@ class MoySkladClient:
                 if folder_id:
                     return folder_id, diagnostics
 
-        assortment, lookup_source = self._lookup_assortment(stock_row, catalog)
+        assortment_meta = (stock_row.get('assortment') or {}).get('meta') or {}
+        assortment_row, lookup_source = await self._get_assortment_row_by_meta(assortment_meta)
         diagnostics['assortment_lookup'] = lookup_source or 'не найдено'
-        diagnostics['assortment_found'] = bool(assortment)
+        diagnostics['assortment_found'] = bool(assortment_row)
 
-        if not assortment:
+        if not assortment_row:
             return None, diagnostics
 
-        folder = assortment.get('productFolder') or {}
+        folder = assortment_row.get('productFolder') or assortment_row.get('folder') or {}
         meta = folder.get('meta') or {}
         folder_id = folder.get('id') or meta.get('id') or self._extract_id_from_href(meta.get('href'))
         diagnostics['folder_source'] = 'assortment.productFolder'
+
+        if folder_id and folder_id not in folder_by_id:
+            logger.warning('Папка %s найдена у ассортимента, но отсутствует в кеше productfolder', folder_id)
+
         return folder_id, diagnostics
 
     def _build_item_diagnostics(
@@ -400,7 +441,7 @@ class MoySkladClient:
                 'folder_chain': [],
                 'folder_source': folder_source,
                 'assortment_lookup': assortment_lookup,
-                'reason': 'Попытка найти карточку ассортимента была, но по ссылке/ID/коду не удалось получить папку товара. Проверьте карточку ассортимента и её папку.',
+                'reason': 'Попытка найти карточку ассортимента была, но по ссылке/ID не удалось получить папку товара. Проверьте карточку ассортимента и её папку.',
             }
 
         return {
@@ -427,12 +468,14 @@ class MoySkladClient:
 
     async def _build_inventory(self, location: str) -> dict[str, Any]:
         normalized, store_id = await self._resolve_store(location)
-        catalog = await self._get_catalog_bundle()
         store_href = f'{self.base_url}/entity/store/{store_id}'
 
-        stock_rows = await self.get_all_pages(
-            'report/stock/all',
-            params={'filter': f'stockMode=all;quantityMode=all;store={store_href}'},
+        folder_by_id, stock_rows = await asyncio.gather(
+            self._get_folder_map(),
+            self.get_all_pages(
+                'report/stock/all',
+                params={'filter': f'stockMode=all;quantityMode=all;store={store_href}'},
+            ),
         )
 
         categories_map: dict[str, dict[str, Any]] = {}
@@ -440,8 +483,9 @@ class MoySkladClient:
         for stock_row in stock_rows:
             item_id, item_name = self._extract_item_identity(normalized, stock_row)
             expected_qty = self._extract_expected_qty(stock_row)
-            folder_id, diagnostics = self._extract_folder_id(stock_row, catalog)
-            folder_chain = self._resolve_folder_chain(folder_id, catalog['folder_by_id'])
+
+            folder_id, diagnostics = await self._extract_folder_id(stock_row, folder_by_id)
+            folder_chain = self._resolve_folder_chain(folder_id, folder_by_id)
             item_diagnostics = self._build_item_diagnostics(stock_row, diagnostics, folder_id, folder_chain)
 
             if folder_chain:
@@ -486,12 +530,14 @@ class MoySkladClient:
                     unique_items[item['id']] = item
                 subcategory['items'] = sorted(unique_items.values(), key=lambda item: item['name'].lower())
                 subcategories.append(subcategory)
+
             categories.append({
                 'id': category['id'],
                 'name': category['name'],
                 'subcategories': subcategories,
             })
 
+        logger.info('Для точки %s собрано %s категорий и %s товаров', normalized, len(categories), len(stock_rows))
         return {'location': normalized, 'categories': categories}
 
     async def get_inventory(self, location: str) -> dict[str, Any]:
@@ -516,7 +562,10 @@ class MoySkladClient:
     async def prewarm_inventory(self, location: str) -> None:
         if not self.enabled or not location:
             return
-        await self.get_inventory(location)
+        try:
+            await self.get_inventory(location)
+        except Exception:
+            logger.exception('Не удалось прогреть кеш МоегоСклада для точки %s', location)
 
 
 ms_client = MoySkladClient()

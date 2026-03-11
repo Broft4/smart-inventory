@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-import asyncio
 import csv
 import io
-import logging
-import re
-from urllib.parse import quote
 
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -31,13 +27,10 @@ from app.logic import (
     finish_report,
     get_admin_report,
     get_inventory_data,
-    get_inventory_diagnostics_details,
     get_inventory_diagnostics_rows,
     get_me_response,
-    prewarm_inventory_cache,
     get_reports_history,
     list_users,
-    reset_selection_cycle,
     update_user,
     user_to_schema,
     verify_item_or_category,
@@ -56,7 +49,6 @@ from app.schemas import (
     LogoutResponse,
     MeResponse,
     ReportHistoryResponse,
-    ResetSelectionCycleResponse,
     UserActionResponse,
     UserCreateRequest,
     UserListResponse,
@@ -66,7 +58,6 @@ from app.schemas import (
 )
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -75,15 +66,7 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(bootstrap_schema_and_admin)
     async with AsyncSession(bind=engine, expire_on_commit=False) as session:
         await ensure_default_admin(session)
-
-    warmup_task = asyncio.create_task(prewarm_inventory_cache(settings.store_dmitrov)) if settings.store_dmitrov else None
-    second_warmup_task = asyncio.create_task(prewarm_inventory_cache(settings.store_dubna)) if settings.store_dubna and settings.store_dubna != settings.store_dmitrov else None
-    try:
-        yield
-    finally:
-        for task in (warmup_task, second_warmup_task):
-            if task and not task.done():
-                task.cancel()
+    yield
 
 
 app = FastAPI(title='Умная ревизия', lifespan=lifespan)
@@ -153,16 +136,6 @@ async def api_login(payload: LoginRequest, request: Request, db: AsyncSession = 
     if not user:
         raise HTTPException(status_code=401, detail='Неверный логин или пароль.')
     request.session['user_id'] = user.id
-
-    if user.role == 'employee' and user.location:
-        async def _warm_employee_inventory(location: str, username: str) -> None:
-            try:
-                await prewarm_inventory_cache(location)
-            except Exception:
-                logger.exception('Не удалось прогреть каталог для точки %s при входе пользователя %s.', location, username)
-
-        asyncio.create_task(_warm_employee_inventory(user.location, user.username))
-
     return LoginResponse(
         success=True,
         message='Вход выполнен.',
@@ -249,11 +222,6 @@ async def api_delete_report(report_id: int, admin: User = Depends(require_admin)
     return await delete_report(report_id, db)
 
 
-@app.get('/api/inventory-diagnostics')
-async def api_inventory_diagnostics(location: str, admin: User = Depends(require_admin)):
-    return {'location': location, 'rows': await get_inventory_diagnostics_details(location)}
-
-
 @app.get('/api/inventory-diagnostics/export')
 async def api_export_inventory_diagnostics(location: str, admin: User = Depends(require_admin)):
     rows = await get_inventory_diagnostics_rows(location)
@@ -261,20 +229,32 @@ async def api_export_inventory_diagnostics(location: str, admin: User = Depends(
     output = io.StringIO()
     writer = csv.DictWriter(
         output,
-        fieldnames=['location', 'issue_type', 'category_name', 'subcategory_name', 'item_id', 'item_name', 'expected_qty', 'reason', 'folder_path', 'folder_source', 'assortment_lookup'],
+        fieldnames=[
+            'location',
+            'issue_type',
+            'category_name',
+            'subcategory_name',
+            'item_id',
+            'item_name',
+            'expected_qty',
+            'reason',
+            'folder_path',
+            'folder_source',
+            'assortment_lookup',
+        ],
+        extrasaction='ignore',
     )
     writer.writeheader()
     writer.writerows(rows)
 
-    safe_location = re.sub(r'[^A-Za-z0-9._-]+', '_', location).strip('_') or 'location'
-    filename = f'inventory_diagnostics_{safe_location}.csv'
-    encoded_filename = quote(f'inventory_diagnostics_{location}.csv')
+    safe_location = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '_' for ch in location)
+    filename = f'inventory_diagnostics_{safe_location or "location"}.csv'
     payload = output.getvalue().encode('utf-8-sig')
     return StreamingResponse(
         iter([payload]),
         media_type='text/csv; charset=utf-8',
         headers={
-            'Content-Disposition': f"attachment; filename=\"{filename}\"; filename*=UTF-8''{encoded_filename}",
+            'Content-Disposition': f'attachment; filename="{filename}"',
             'X-Inventory-Diagnostics-Count': str(len(rows)),
         },
     )
