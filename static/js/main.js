@@ -1,6 +1,47 @@
 let inventoryState = null;
 let subcategoryAttempts = {};
 let itemAttempts = {};
+let inventoryLoading = false;
+
+function getInventoryStatusElement() {
+    return document.getElementById('inventory-status');
+}
+
+function setInventoryStatus(mode, message, options = {}) {
+    const status = getInventoryStatusElement();
+    if (!status) return;
+
+    const { retry = false } = options;
+    if (!mode) {
+        status.className = 'inventory-status hidden';
+        status.innerHTML = '';
+        return;
+    }
+
+    const safeMessage = escapeHtml(message || '');
+    const retryButton = retry ? '<button type="button" id="inventory-retry-btn" class="btn secondary btn-inline">Повторить</button>' : '';
+    const spinner = mode === 'loading' ? '<span class="inventory-spinner" aria-hidden="true"></span>' : '';
+    status.className = `inventory-status ${mode}`;
+    status.innerHTML = `
+        <div class="inventory-status-row">
+            ${spinner}
+            <div class="inventory-status-text">${safeMessage}</div>
+            ${retryButton}
+        </div>
+    `;
+
+    const retryElement = document.getElementById('inventory-retry-btn');
+    if (retryElement) {
+        retryElement.addEventListener('click', () => loadInventory({ forceReload: true }));
+    }
+}
+
+function setRefreshButtonState(isLoading) {
+    const button = document.getElementById('finish-btn');
+    if (!button) return;
+    button.disabled = Boolean(isLoading);
+    button.textContent = isLoading ? 'Загрузка...' : 'Обновить';
+}
 
 const employeePageState = {
     filter: 'mine',
@@ -46,11 +87,12 @@ function highlightMatch(text, query) {
 }
 
 function getCategoryBucket(category) {
-    if (category.assigned_to_current_user || category.has_my_subcategories) return 'mine';
-    if (category.can_take || category.subcategories.some(sub => sub.can_take)) return 'free';
-    if (category.is_blocked_by_other || category.has_other_subcategories) return 'busy';
+    if (category.assigned_to_current_user || category.has_my_subcategories || category.has_my_items) return 'mine';
+    if (category.can_take || category.subcategories.some(sub => sub.can_take) || categoryHasFreeDiagnosticItems(category)) return 'free';
+    if (category.is_blocked_by_other || category.has_other_subcategories || category.has_other_items) return 'busy';
     return 'other';
 }
+
 
 function itemMatchesSearch(item, query) {
     const q = normalizeSearch(query);
@@ -90,12 +132,13 @@ function getVisibleSubcategories(category, query) {
 
 function categoryPassesFilter(category) {
     const mode = employeePageState.filter;
-    if (mode === 'mine') return category.assigned_to_current_user || category.has_my_subcategories;
-    if (mode === 'free') return category.can_take || category.subcategories.some(sub => sub.can_take);
-    if (mode === 'busy') return category.is_blocked_by_other || category.has_other_subcategories;
+    if (mode === 'mine') return category.assigned_to_current_user || category.has_my_subcategories || category.has_my_items;
+    if (mode === 'free') return category.can_take || category.subcategories.some(sub => sub.can_take) || categoryHasFreeDiagnosticItems(category);
+    if (mode === 'busy') return category.is_blocked_by_other || category.has_other_subcategories || category.has_other_items;
     if (mode === 'problem') return categoryHasProblems(category);
     return true;
 }
+
 
 function getFilteredCategories() {
     if (!inventoryState?.categories) return [];
@@ -111,9 +154,9 @@ function renderSummary() {
     const dateLine = document.getElementById('report-date-line');
     const cycleLine = document.getElementById('cycle-line');
     const allCategories = inventoryState?.categories || [];
-    const myCategories = allCategories.filter(cat => cat.assigned_to_current_user || cat.has_my_subcategories);
-    const freeCategories = allCategories.filter(cat => cat.can_take || cat.subcategories.some(sub => sub.can_take));
-    const occupiedCategories = allCategories.filter(cat => cat.is_blocked_by_other || cat.has_other_subcategories);
+    const myCategories = allCategories.filter(cat => cat.assigned_to_current_user || cat.has_my_subcategories || cat.has_my_items);
+    const freeCategories = allCategories.filter(cat => cat.can_take || cat.subcategories.some(sub => sub.can_take) || categoryHasFreeDiagnosticItems(cat));
+    const occupiedCategories = allCategories.filter(cat => cat.is_blocked_by_other || cat.has_other_subcategories || cat.has_other_items);
     const problemCategories = allCategories.filter(categoryHasProblems);
 
     if (dateLine) dateLine.textContent = `Общая ревизия за ${inventoryState.report_date}`;
@@ -134,6 +177,7 @@ function renderSummary() {
     }
 }
 
+
 function buildSectionHeader(title, description, count) {
     return `
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin:18px 0 10px;">
@@ -146,24 +190,51 @@ function buildSectionHeader(title, description, count) {
     `;
 }
 
+function isDiagnosticCategory(category) {
+    return normalizeSearch(category?.name) === normalizeSearch('Без категории');
+}
+
+function isDiagnosticSubcategory(category, sub) {
+    return isDiagnosticCategory(category) || normalizeSearch(sub?.name) === normalizeSearch('Без подкатегории');
+}
+
+function categoryHasFreeDiagnosticItems(category) {
+    return (category?.subcategories || []).some(sub => (sub?.items || []).some(item => item.can_take));
+}
+
+function buildSelectionConfirmMessage(kind, label) {
+    const safeLabel = label || 'эту позицию';
+    const entityLabel = kind === 'category' ? 'категорию' : kind === 'subcategory' ? 'подкатегорию' : 'товар';
+    return `Подтвердите выбор: ${entityLabel} «${safeLabel}».
+
+После закрепления отменить действие нельзя до начала нового 15-дневного цикла.`;
+}
+
+
 function categoryMetaText(category) {
-    if (category.is_completed && (category.assigned_to_current_user || category.has_my_subcategories)) return 'ваши выборы завершены';
+    if (category.is_diagnostic && category.has_my_items) return 'у вас есть закреплённые товары для проверки';
+    if (category.is_diagnostic && category.has_other_items) return 'внутри есть товары, взятые другими сотрудниками';
+    if (category.is_diagnostic && categoryHasFreeDiagnosticItems(category)) return 'служебная ветка: выбираются отдельные товары';
+    if (category.is_completed && (category.assigned_to_current_user || category.has_my_subcategories || category.has_my_items)) return 'ваши выборы завершены';
     if (category.assigned_to_current_user) return 'вся категория закреплена за вами';
     if (category.has_my_subcategories && category.has_other_subcategories) return 'подкатегории распределены между сотрудниками';
     if (category.has_my_subcategories) return 'у вас есть закреплённые подкатегории';
+    if (category.has_my_items) return 'у вас есть закреплённые товары';
     if (category.is_blocked_by_other) return `категория занята: ${category.assigned_to}`;
-    if (category.has_other_subcategories) return 'часть подкатегорий занята другими';
+    if (category.has_other_subcategories || category.has_other_items) return 'часть ветки занята другими';
     return 'свободна';
 }
 
+
 function renderSubcategoryCard(category, sub, query) {
     const locked = sub.is_locked;
-    let icon = '📂';
+    const diagnosticBucket = isDiagnosticSubcategory(category, sub) || sub.is_diagnostic;
+    let icon = diagnosticBucket ? '🧭' : '📂';
     if (sub.is_completed) icon = '✅';
-    if (locked && !sub.assigned_to_current_user && !sub.taken_as_part_of_category) icon = '🔒';
+    if (locked && !sub.assigned_to_current_user && !sub.taken_as_part_of_category && !diagnosticBucket) icon = '🔒';
 
     const queryActive = Boolean(normalizeSearch(query));
-    const subExpanded = queryActive ? true : sub.is_expanded;
+    const subExpanded = queryActive ? true : Boolean(sub.is_expanded);
     const visibleItems = (() => {
         if (!queryActive) return sub.items || [];
         const q = normalizeSearch(query);
@@ -172,18 +243,29 @@ function renderSubcategoryCard(category, sub, query) {
         return (sub.items || []).filter(item => itemMatchesSearch(item, q));
     })();
 
-    const selectionHtml = sub.can_take
-        ? `<div class="subcategory-action-row"><button class="btn secondary btn-inline" onclick="takeSubcategory('${category.id}', '${sub.id}')">Взять подкатегорию</button></div>`
-        : sub.is_blocked_by_other && !sub.assigned_to_current_user && !sub.taken_as_part_of_category
-            ? `<div class="muted-text">Подкатегория занята: <strong>${escapeHtml(sub.assigned_to || 'другой сотрудник')}</strong>.</div>`
-            : sub.assigned_to_current_user
-                ? `<div class="muted-text">Подкатегория закреплена за вами.</div>`
-                : sub.taken_as_part_of_category
-                    ? `<div class="muted-text">Доступна вам в составе выбранной категории.</div>`
-                    : '';
+    let selectionHtml = '';
+    if (diagnosticBucket) {
+        selectionHtml = '<div class="muted-text diagnostic-help">Эта служебная ветка не считает общий итог. Здесь можно закреплять только отдельные товары.</div>';
+    } else if (sub.can_take) {
+        selectionHtml = `<div class="subcategory-action-row"><button class="btn secondary btn-inline" onclick="takeSubcategory('${category.id}', '${sub.id}')">Взять подкатегорию</button></div>`;
+    } else if (sub.is_blocked_by_other && !sub.assigned_to_current_user && !sub.taken_as_part_of_category) {
+        selectionHtml = `<div class="muted-text">Подкатегория занята: <strong>${escapeHtml(sub.assigned_to || 'другой сотрудник')}</strong>.</div>`;
+    } else if (sub.assigned_to_current_user) {
+        selectionHtml = '<div class="muted-text">Подкатегория закреплена за вами.</div>';
+    } else if (sub.taken_as_part_of_category) {
+        selectionHtml = '<div class="muted-text">Доступна вам в составе выбранной категории.</div>';
+    } else if (sub.has_my_items) {
+        selectionHtml = '<div class="muted-text">У вас есть закреплённые товары внутри этой ветки.</div>';
+    } else if (sub.has_other_items) {
+        selectionHtml = '<div class="muted-text">Часть товаров уже закреплена другими сотрудниками.</div>';
+    }
 
     const itemsHtml = visibleItems.map(item => {
-        const itemDisabled = sub.status !== 'orange' || item.is_final;
+        const diagnosticItem = diagnosticBucket || item.is_diagnostic;
+        const canVerifyDiagnosticItem = diagnosticItem && item.assigned_to_current_user && !item.is_final;
+        const canVerifyRegularItem = !diagnosticItem && sub.status === 'orange' && !item.is_final;
+        const itemDisabled = !(canVerifyDiagnosticItem || canVerifyRegularItem);
+
         let itemMessage = '';
         let itemMessageColor = '';
         if (item.status === 'green') {
@@ -192,10 +274,24 @@ function renderSubcategoryCard(category, sub, query) {
         } else if (item.status === 'red') {
             itemMessage = 'Расхождение по товару зафиксировано.';
             itemMessageColor = 'red';
+        } else if (diagnosticItem && item.assigned_to_current_user) {
+            itemMessage = 'Товар закреплён за вами. Можно ввести факт.';
+        } else if (diagnosticItem && item.is_blocked_by_other) {
+            itemMessage = `Товар закреплён за сотрудником ${item.assigned_to || 'другой сотрудник'}.`;
+        } else if (diagnosticItem && item.can_take) {
+            itemMessage = 'Товар ещё не выбран на текущий 15-дневный цикл.';
+        } else if (diagnosticItem) {
+            itemMessage = 'Служебный товар без активного закрепления.';
         }
+
+        const diagnosticActions = diagnosticItem
+            ? `<div class="diagnostic-item-actions">${item.can_take ? `<button class="btn secondary btn-inline" onclick="takeItem('${category.id}', '${sub.id}', '${item.id}')">Взять товар</button>` : ''}${item.assigned_to_current_user ? '<span class="assigned-badge">Закреплён за вами</span>' : ''}</div>`
+            : '';
+
         return `
-            <div class="item-card">
+            <div class="item-card ${diagnosticItem ? 'diagnostic-item-card' : ''}">
                 <h4>${highlightMatch(item.name, query)} (${escapeHtml(item.uom)})</h4>
+                ${diagnosticActions}
                 <div class="input-group">
                     <input type="number" id="input-${item.id}" placeholder="Факт. шт." min="0" step="1" ${itemDisabled ? 'disabled' : ''}>
                     <button class="btn check btn-inline" onclick="verifyItem('${item.id}', '${sub.id}')" ${itemDisabled ? 'disabled' : ''}>Ввод</button>
@@ -205,12 +301,16 @@ function renderSubcategoryCard(category, sub, query) {
         `;
     }).join('');
 
-    const canCountThisSub = sub.assigned_to_current_user || sub.taken_as_part_of_category;
+    const canCountThisSub = !diagnosticBucket && (sub.assigned_to_current_user || sub.taken_as_part_of_category);
+    const showItemsBlock = diagnosticBucket || sub.status === 'orange';
+    const itemsTitle = diagnosticBucket
+        ? '<p class="items-warning diagnostic-warning">⚠️ Служебная ветка. Общий ввод отключён: выбирайте и проверяйте только отдельные товары.</p>'
+        : '<p class="items-warning">⚠️ Не сошлось. Считаем поштучно:</p>';
 
     return `
         <div class="category-card subcategory-card status-${sub.status}" id="card-${sub.id}">
             <h3 id="title-${sub.id}" onclick="toggleSubcategory('${sub.id}')">${icon} ${highlightMatch(sub.name, query)}</h3>
-            <div id="body-${sub.id}" style="display:${subExpanded ? 'block' : 'none'}; ${locked && !canCountThisSub ? 'opacity:.65;' : ''}">
+            <div id="body-${sub.id}" style="display:${subExpanded ? 'block' : 'none'}; ${locked && !canCountThisSub && !diagnosticBucket ? 'opacity:.65;' : ''}">
                 ${selectionHtml}
                 ${canCountThisSub ? `
                     <p class="muted-text">Посчитайте всё вместе.</p>
@@ -219,8 +319,10 @@ function renderSubcategoryCard(category, sub, query) {
                         <button class="btn check btn-inline" onclick="verifySubcategory('${sub.id}')" ${locked || sub.is_completed ? 'disabled' : ''}>Ввод</button>
                     </div>
                     <div id="msg-${sub.id}" class="message"></div>
-                    <div id="items-${sub.id}" class="items-container" style="display:${sub.status === 'orange' ? 'block' : 'none'};">
-                        <p class="items-warning">⚠️ Не сошлось. Считаем поштучно:</p>
+                ` : ''}
+                ${showItemsBlock ? `
+                    <div id="items-${sub.id}" class="items-container" style="display:block;">
+                        ${itemsTitle}
                         ${itemsHtml || '<div class="employee-empty-state">По этому запросу товары не найдены.</div>'}
                     </div>
                 ` : ''}
@@ -229,16 +331,17 @@ function renderSubcategoryCard(category, sub, query) {
     `;
 }
 
+
 function renderCategoryCard(category, query) {
-    const blockedClass = category.is_blocked_by_other && !category.has_my_subcategories ? 'blocked-category' : '';
-    const icon = category.is_completed ? '✅' : (category.assigned_to_current_user || category.has_my_subcategories ? '📂' : '📁');
+    const blockedClass = category.is_blocked_by_other && !category.has_my_subcategories && !category.has_my_items ? 'blocked-category' : '';
+    const icon = category.is_completed ? '✅' : (category.assigned_to_current_user || category.has_my_subcategories || category.has_my_items ? '📂' : '📁');
     const meta = categoryMetaText(category);
     const visibleSubcategories = getVisibleSubcategories(category, query);
     const queryActive = Boolean(normalizeSearch(query));
-    const bodyVisible = queryActive ? true : category.is_open;
+    const bodyVisible = queryActive ? true : Boolean(category.is_open);
 
     let bodyHtml = '';
-    if (category.can_take) {
+    if (!category.is_diagnostic && category.can_take) {
         bodyHtml += `
             <div class="category-card">
                 <p class="muted-text">Категория пока никем не взята в работу.</p>
@@ -265,6 +368,7 @@ function renderCategoryCard(category, query) {
         </div>
     `;
 }
+
 
 function renderCategorySection(title, description, categories, query) {
     if (!categories.length) {
@@ -297,15 +401,15 @@ function renderCategories() {
         const free = filtered.filter(cat => getCategoryBucket(cat) === 'free');
         const busy = filtered.filter(cat => getCategoryBucket(cat) === 'busy');
         container.innerHTML = [
-            renderCategorySection('Мои выборы', 'Категории или подкатегории, закреплённые за вами.', mine, query),
-            renderCategorySection('Свободные категории и подкатегории', 'Их можно взять в работу.', free, query),
-            renderCategorySection('Выборы других сотрудников', 'Эти категории или подкатегории уже заняты.', busy, query),
+            renderCategorySection('Мои выборы', 'Категории, подкатегории или отдельные товары, закреплённые за вами.', mine, query),
+            renderCategorySection('Свободные категории и подкатегории', 'Их можно взять в работу. В служебных ветках выбираются отдельные товары.', free, query),
+            renderCategorySection('Выборы других сотрудников', 'Эти категории, подкатегории или товары уже заняты.', busy, query),
         ].join('');
     } else {
         const descriptions = {
-            mine: 'Категории или подкатегории, закреплённые за вами.',
-            free: 'Категории и подкатегории, которые можно взять в работу.',
-            busy: 'Категории и подкатегории, закреплённые за другими сотрудниками.',
+            mine: 'Категории, подкатегории или отдельные товары, закреплённые за вами.',
+            free: 'Категории, подкатегории и товары, которые можно взять в работу.',
+            busy: 'Категории, подкатегории или товары, закреплённые за другими сотрудниками.',
             problem: 'Категории, в которых уже есть расхождения.',
         };
         const titles = {
@@ -336,6 +440,8 @@ window.toggleSubcategory = function (subId) {
 };
 
 window.takeCategory = async function (categoryId) {
+    const category = getCategory(categoryId);
+    if (!window.confirm(buildSelectionConfirmMessage('category', category?.name))) return;
     try {
         const response = await fetch('/assign-selection', {
             method: 'POST',
@@ -355,6 +461,8 @@ window.takeCategory = async function (categoryId) {
 };
 
 window.takeSubcategory = async function (categoryId, subcategoryId) {
+    const found = findSubcategory(subcategoryId);
+    if (!window.confirm(buildSelectionConfirmMessage('subcategory', found?.sub?.name))) return;
     try {
         const response = await fetch('/assign-selection', {
             method: 'POST',
@@ -372,6 +480,31 @@ window.takeSubcategory = async function (categoryId, subcategoryId) {
         alert('Ошибка сервера при закреплении подкатегории.');
     }
 };
+
+
+
+window.takeItem = async function (categoryId, subcategoryId, itemId) {
+    const found = findSubcategory(subcategoryId);
+    const item = found?.sub?.items?.find(row => row.id === itemId);
+    if (!window.confirm(buildSelectionConfirmMessage('item', item?.name))) return;
+    try {
+        const response = await fetch('/assign-selection', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ report_id: inventoryState.report_id, category_id: categoryId, target_type: 'item', subcategory_id: subcategoryId, item_id: itemId }),
+        });
+        const result = await response.json();
+        if (!response.ok || !result.success) {
+            alert(result.detail || result.message || 'Не удалось взять товар.');
+            return;
+        }
+        await loadInventory();
+    } catch (error) {
+        console.error(error);
+        alert('Ошибка сервера при закреплении товара.');
+    }
+};
+
 
 window.verifySubcategory = async function (subId) {
     const found = findSubcategory(subId);
@@ -430,9 +563,19 @@ window.verifyItem = async function (itemId) {
 };
 
 
-async function loadInventory() {
+async function loadInventory(options = {}) {
+    if (inventoryLoading) return;
+
+    const { forceReload = false } = options;
     const summary = document.getElementById('inventory-summary');
     const container = document.getElementById('categories-container');
+    inventoryLoading = true;
+    setRefreshButtonState(true);
+    setInventoryStatus('loading', forceReload ? 'Пожалуйста, подождите: обновляем категории и остатки из CRM.' : 'Пожалуйста, подождите: идёт выгрузка категорий и остатков из CRM (МойСклад).');
+    if (container && !inventoryState) {
+        container.innerHTML = '<div class="employee-empty-state">Пожалуйста, подождите: идёт выгрузка из CRM и построение дерева категорий.</div>';
+    }
+
     try {
         const response = await fetch('/get-structure');
         if (response.status === 401) {
@@ -444,15 +587,21 @@ async function loadInventory() {
             console.error('GET /get-structure failed:', response.status, text);
             if (summary) summary.innerHTML = '<span style="color:#dc3545;">Ошибка загрузки ревизии.</span>';
             if (container) container.innerHTML = '<div class="employee-empty-state">Не удалось загрузить данные с сервера.</div>';
+            setInventoryStatus('error', 'Не удалось получить данные ревизии. Попробуйте ещё раз.', { retry: true });
             return;
         }
         inventoryState = await response.json();
         document.getElementById('current-location-title').textContent = `Точка: ${inventoryState.location}`;
         renderCategories();
+        setInventoryStatus(null);
     } catch (error) {
         console.error('loadInventory error:', error);
         if (summary) summary.innerHTML = '<span style="color:#dc3545;">Ошибка загрузки ревизии.</span>';
         if (container) container.innerHTML = '<div class="employee-empty-state">Ошибка соединения с сервером.</div>';
+        setInventoryStatus('error', 'Сервер не ответил или соединение прервалось. Повторите загрузку.', { retry: true });
+    } finally {
+        inventoryLoading = false;
+        setRefreshButtonState(false);
     }
 }
 

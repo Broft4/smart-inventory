@@ -17,7 +17,12 @@ class Settings(BaseSettings):
     moysklad_token: Optional[str] = None
     store_dmitrov: str = "Дмитров"
     store_dubna: str = "Дубна"
+    store_dmitrov_id: Optional[str] = None
+    store_dubna_id: Optional[str] = None
     ms_api_base_url: str = "https://api.moysklad.ru/api/remap/1.2"
+    ms_inventory_cache_ttl_seconds: int = 120
+    ms_request_timeout_seconds: int = 30
+    ms_retry_attempts: int = 4
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

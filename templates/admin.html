@@ -38,6 +38,7 @@
                     <input type="checkbox" id="admin-discrepancy-only">
                     Только с расхождениями
                 </label>
+                <button id="download-diagnostics-btn" type="button" class="btn secondary btn-inline">Выгрузить ошибки разметки</button>
                 <button id="delete-report-btn" type="button" class="btn danger btn-inline">Удалить ревизию</button>
             </div>
 
@@ -223,6 +224,27 @@
     </div>
 </div>
 
+
+<div id="diagnostics-modal" class="modal-overlay hidden">
+    <div class="modal-card users-modal-card diagnostics-modal-card">
+        <div class="modal-header">
+            <div>
+                <h2>Диагностика разметки</h2>
+                <p class="muted-text">Показывает, почему товар попал в «Без категории» или «Без подкатегории».</p>
+            </div>
+            <div class="modal-header-actions">
+                <button id="diagnostics-export-btn" class="btn secondary btn-inline" type="button">Скачать CSV</button>
+                <button id="close-diagnostics-modal-btn" class="btn secondary btn-inline" type="button">Закрыть</button>
+            </div>
+        </div>
+        <div id="diagnostics-summary" class="diagnostics-summary muted-text"></div>
+        <div id="diagnostics-content" class="modal-users-list">
+            <p>Загрузка диагностики...</p>
+        </div>
+    </div>
+</div>
+
 <script src="/static/js/admin.js"></script>
+
 </body>
 </html>

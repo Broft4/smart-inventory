@@ -1,10 +1,15 @@
 document.addEventListener('DOMContentLoaded', () => {
     const form = document.getElementById('login-form');
     const message = document.getElementById('login-message');
+    const submitButton = form.querySelector('button[type="submit"]');
 
     form.addEventListener('submit', async (event) => {
         event.preventDefault();
-        message.textContent = '';
+        message.textContent = 'Выполняем вход...';
+        if (submitButton) {
+            submitButton.disabled = true;
+            submitButton.textContent = 'Входим...';
+        }
 
         try {
             const response = await fetch('/api/login', {
@@ -22,10 +27,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
+            message.textContent = 'Вход выполнен. Переходим на страницу ревизии...';
             location.href = data.redirect_to || '/';
         } catch (error) {
             console.error(error);
             message.textContent = 'Ошибка сервера при входе.';
+        } finally {
+            if (submitButton) {
+                submitButton.disabled = false;
+                submitButton.textContent = 'Войти';
+            }
         }
     });
 });

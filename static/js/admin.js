@@ -7,6 +7,8 @@ const adminState = {
     expandedCategories: new Set(),
     viewMode: 'categories',
     searchQuery: '',
+    diagnosticsRows: [],
+    diagnosticsLocation: null,
 };
 
 function formatDateTime(value) {
@@ -73,6 +75,139 @@ function updateSearchUI() {
     }
 
     input.value = adminState.searchQuery;
+}
+
+function isDiagnosticsCategoryName(name) {
+    return normalizeSearch(name) === normalizeSearch('Без категории');
+}
+
+function renderDiagnostics(rows, location) {
+    const summary = document.getElementById('diagnostics-summary');
+    const container = document.getElementById('diagnostics-content');
+    if (!summary || !container) return;
+
+    const noCategoryCount = rows.filter(row => normalizeSearch(row.issue_type).includes('без категории')).length;
+    const noSubcategoryCount = rows.filter(row => normalizeSearch(row.issue_type).includes('без подкатегории')).length;
+    summary.textContent = `Точка: ${location}. Найдено записей: ${rows.length}. Без категории: ${noCategoryCount}. Без подкатегории: ${noSubcategoryCount}.`;
+
+    if (!rows.length) {
+        container.innerHTML = '<div class="category-card"><p class="empty-text">Проблемных товаров не найдено.</p></div>';
+        return;
+    }
+
+    container.innerHTML = `
+        <div class="table-scroll diagnostics-table-wrap">
+            <table class="admin-table diagnostics-table">
+                <thead>
+                    <tr>
+                        <th>Тип проблемы</th>
+                        <th>Товар</th>
+                        <th>Остаток</th>
+                        <th>Куда попал</th>
+                        <th>Путь папок</th>
+                        <th>Источник папки</th>
+                        <th>Поиск карточки</th>
+                        <th>Причина</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${rows.map(row => `
+                        <tr>
+                            <td>${escapeHtml(row.issue_type)}</td>
+                            <td>
+                                <strong>${escapeHtml(row.item_name)}</strong>
+                                <div class="muted-text">${escapeHtml(row.item_id)}</div>
+                            </td>
+                            <td class="num-cell">${escapeHtml(row.expected_qty)}</td>
+                            <td>
+                                <div>${escapeHtml(row.category_name)}</div>
+                                <div class="muted-text">${escapeHtml(row.subcategory_name)}</div>
+                            </td>
+                            <td>${escapeHtml(row.folder_path || '-')}</td>
+                            <td>${escapeHtml(row.folder_source || '-')}</td>
+                            <td>${escapeHtml(row.assortment_lookup || '-')}</td>
+                            <td>${escapeHtml(row.reason || '-')}</td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        </div>
+    `;
+}
+
+async function downloadDiagnosticsCsv(location, triggerButton = null) {
+    const button = triggerButton || document.getElementById('diagnostics-export-btn');
+    const originalText = button?.textContent || 'Скачать CSV';
+    if (button) {
+        button.disabled = true;
+        button.textContent = 'Готовим CSV...';
+    }
+
+    try {
+        const response = await fetch(`/api/inventory-diagnostics/export?location=${encodeURIComponent(location)}`);
+        if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || 'Не удалось выгрузить диагностику.');
+        }
+
+        const blob = await response.blob();
+        const disposition = response.headers.get('Content-Disposition') || '';
+        const utfMatch = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+        const asciiMatch = disposition.match(/filename="?([^";]+)"?/i);
+        const filename = utfMatch ? decodeURIComponent(utfMatch[1]) : (asciiMatch?.[1] || `inventory_diagnostics_${location}.csv`);
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+    } catch (error) {
+        console.error(error);
+        alert('Не удалось скачать CSV с диагностикой.');
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = originalText;
+        }
+    }
+}
+
+async function openDiagnosticsModal(location, triggerButton) {
+    const summary = document.getElementById('diagnostics-summary');
+    const container = document.getElementById('diagnostics-content');
+    if (summary) summary.textContent = '';
+    if (container) container.innerHTML = '<p>Загрузка диагностики...</p>';
+    showModal('diagnostics-modal');
+
+    const originalText = triggerButton?.textContent || 'Выгрузить ошибки разметки';
+    if (triggerButton) {
+        triggerButton.disabled = true;
+        triggerButton.textContent = 'Проверяем разметку...';
+    }
+
+    try {
+        const response = await fetch(`/api/inventory-diagnostics?location=${encodeURIComponent(location)}`);
+        if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || 'Не удалось получить диагностику.');
+        }
+        const data = await response.json();
+        adminState.diagnosticsRows = Array.isArray(data.rows) ? data.rows : [];
+        adminState.diagnosticsLocation = location;
+        renderDiagnostics(adminState.diagnosticsRows, location);
+    } catch (error) {
+        console.error(error);
+        if (container) {
+            container.innerHTML = '<div class="category-card"><p class="empty-text error-text">Не удалось загрузить диагностику разметки.</p></div>';
+        }
+    } finally {
+        if (triggerButton) {
+            triggerButton.disabled = false;
+            triggerButton.textContent = originalText;
+        }
+    }
 }
 
 function renderUsers(users) {
@@ -602,7 +737,7 @@ function renderCategories(report) {
 
     categoriesContainer.innerHTML = categories.map((cat, index) => {
         const key = `${report.report_id || 'none'}:${cat.name}`;
-        const isOpen = adminState.expandedCategories.has(key) || index === 0;
+        const isOpen = adminState.expandedCategories.has(key) || (!isDiagnosticsCategoryName(cat.name) && index === 0);
         const problemItems = cat.problem_items || [];
         const summaryText = problemItems.length
             ? `Проблемных товаров: ${problemItems.length}`
@@ -817,6 +952,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('user-form').addEventListener('submit', submitUserForm);
     document.getElementById('user-form-reset').addEventListener('click', resetUserForm);
     document.getElementById('delete-report-btn').addEventListener('click', deleteSelectedReport);
+    document.getElementById('download-diagnostics-btn').addEventListener('click', async () => {
+        const location = locationSelect.value;
+        if (!location) return;
+        await openDiagnosticsModal(location, document.getElementById('download-diagnostics-btn'));
+    });
+    document.getElementById('close-diagnostics-modal-btn')?.addEventListener('click', () => hideModal('diagnostics-modal'));
+    document.getElementById('diagnostics-export-btn')?.addEventListener('click', async () => {
+        const location = adminState.diagnosticsLocation || locationSelect.value;
+        if (!location) return;
+        await downloadDiagnosticsCsv(location, document.getElementById('diagnostics-export-btn'));
+    });
 
     document.querySelectorAll('[data-view-mode]').forEach(button => {
         button.addEventListener('click', () => setViewMode(button.dataset.viewMode));

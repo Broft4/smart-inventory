@@ -104,6 +104,11 @@ class ItemModel(BaseModel):
     uom: str = 'шт'
     status: StatusEnum = StatusEnum.GREY
     is_final: bool = False
+    assigned_to: Optional[str] = None
+    assigned_to_current_user: bool = False
+    can_take: bool = False
+    is_blocked_by_other: bool = False
+    is_diagnostic: bool = False
 
 
 class SubcategoryModel(BaseModel):
@@ -119,6 +124,9 @@ class SubcategoryModel(BaseModel):
     can_take: bool = False
     is_blocked_by_other: bool = False
     taken_as_part_of_category: bool = False
+    is_diagnostic: bool = False
+    has_my_items: bool = False
+    has_other_items: bool = False
 
 
 class CategoryModel(BaseModel):
@@ -135,6 +143,9 @@ class CategoryModel(BaseModel):
     has_my_subcategories: bool = False
     has_other_subcategories: bool = False
     mixed_assignment: bool = False
+    is_diagnostic: bool = False
+    has_my_items: bool = False
+    has_other_items: bool = False
 
 
 class InventoryStructureResponse(BaseModel):
@@ -152,6 +163,7 @@ class AssignSelectionRequest(BaseModel):
     category_id: str
     target_type: str = 'category'
     subcategory_id: Optional[str] = None
+    item_id: Optional[str] = None
 
 
 class AssignSelectionResponse(BaseModel):

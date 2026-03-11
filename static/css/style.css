@@ -730,3 +730,113 @@ body.modal-open {
         width: 100%;
     }
 }
+
+
+.inventory-status {
+    margin-top: 14px;
+    margin-bottom: 14px;
+    border-radius: 12px;
+    padding: 14px 16px;
+    border: 1px solid #dfe6ef;
+    background: #ffffff;
+}
+
+.inventory-status.hidden {
+    display: none;
+}
+
+.inventory-status.loading {
+    background: #f8fbff;
+    border-color: #d8e7ff;
+    color: #234a91;
+}
+
+.inventory-status.error {
+    background: #fff7f7;
+    border-color: #f1c9c9;
+    color: #a33a3a;
+}
+
+.inventory-status-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.inventory-status-text {
+    flex: 1 1 260px;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.inventory-spinner {
+    width: 18px;
+    height: 18px;
+    border-radius: 999px;
+    border: 2px solid #c7d9fb;
+    border-top-color: #2563eb;
+    display: inline-block;
+    animation: inventory-spin .8s linear infinite;
+}
+
+@keyframes inventory-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.diagnostic-warning {
+    color: #b45309;
+}
+
+
+.inventory-status.loading {
+    border: 1px solid #d8e3f7;
+    background: #f3f7ff;
+    color: #234a91;
+}
+.inventory-status.error {
+    border: 1px solid #f3c7cd;
+    background: #fff5f6;
+    color: #a61e2d;
+}
+.inventory-status-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.inventory-spinner {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: 2px solid #bfd1f7;
+    border-top-color: #2563eb;
+    animation: spin .8s linear infinite;
+    flex: 0 0 auto;
+}
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+.diagnostic-help {
+    margin-bottom: 10px;
+}
+.diagnostic-item-actions {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+}
+.diagnostic-item-card {
+    border: 1px solid #e7edf4;
+}
+.diagnostic-warning {
+    color: #b06000;
+}
+
+
+.diagnostics-modal-card { width: min(1280px, 100%); }
+.diagnostics-summary { margin: 0 0 12px; }
+.diagnostics-table-wrap { max-height: calc(90vh - 220px); }
+.diagnostics-table td { vertical-align: top; min-width: 120px; }
+.diagnostics-table td:last-child { min-width: 320px; }
