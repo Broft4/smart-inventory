@@ -28,9 +28,15 @@ class CacheEntry:
 class MoySkladClient:
     def __init__(self) -> None:
         self.base_url = settings.ms_api_base_url.rstrip('/')
-        self.timeout = settings.ms_request_timeout_seconds
-        self.retry_attempts = max(1, settings.ms_retry_attempts)
+
+        configured_timeout = float(settings.ms_request_timeout_seconds or 0)
+        self.request_timeout = max(60.0, configured_timeout)
+
+        configured_retries = int(settings.ms_retry_attempts or 0)
+        self.retry_attempts = max(5, configured_retries)
+
         self.inventory_cache_ttl = max(15, settings.ms_inventory_cache_ttl_seconds)
+
         self._inventory_cache: dict[str, CacheEntry] = {}
         self._inventory_locks: dict[str, asyncio.Lock] = {}
         self._catalog_cache: CacheEntry | None = None
@@ -50,6 +56,14 @@ class MoySkladClient:
             'Content-Type': 'application/json',
         }
 
+    def _build_timeout(self) -> httpx.Timeout:
+        return httpx.Timeout(
+            connect=min(20.0, self.request_timeout),
+            read=self.request_timeout,
+            write=self.request_timeout,
+            pool=min(20.0, self.request_timeout),
+        )
+
     def _cache_alive(self, entry: CacheEntry | None) -> bool:
         return bool(entry and entry.expires_at > monotonic())
 
@@ -66,28 +80,105 @@ class MoySkladClient:
                 return max(float(retry_ms) / 1000.0, 0.5)
             except ValueError:
                 pass
-        return min(0.5 * attempt, 5.0)
+        return min(1.5 * attempt, 10.0)
+
+    def _get_exception_retry_delay(self, attempt: int) -> float:
+        return min(2.0 * attempt, 10.0)
 
     async def get(self, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         limits = httpx.Limits(max_connections=3, max_keepalive_connections=1)
+        timeout = self._build_timeout()
 
-        async with httpx.AsyncClient(timeout=self.timeout, limits=limits) as client:
-            last_error: Exception | None = None
+        last_error: Exception | None = None
+
+        async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
             for attempt in range(1, self.retry_attempts + 1):
-                response = await client.get(url, headers=self.headers, params=params)
-                if response.status_code != 429:
+                try:
+                    response = await client.get(url, headers=self.headers, params=params)
+
+                    if response.status_code == 429:
+                        last_error = httpx.HTTPStatusError(
+                            '429 Too Many Requests',
+                            request=response.request,
+                            response=response,
+                        )
+                        delay = self._get_retry_delay(response, attempt)
+                        logger.warning(
+                            'МойСклад вернул 429 для %s. Повтор через %.2f сек. Попытка %s/%s.',
+                            url,
+                            delay,
+                            attempt,
+                            self.retry_attempts,
+                        )
+                        if attempt < self.retry_attempts:
+                            await asyncio.sleep(delay)
+                            continue
+                        raise last_error
+
                     response.raise_for_status()
                     return response.json()
 
-                last_error = httpx.HTTPStatusError('429 Too Many Requests', request=response.request, response=response)
-                delay = self._get_retry_delay(response, attempt)
-                logger.warning('МойСклад вернул 429 для %s. Повтор через %.2f сек. Попытка %s/%s.', url, delay, attempt, self.retry_attempts)
-                await asyncio.sleep(delay)
+                except httpx.ReadTimeout as exc:
+                    last_error = exc
+                    delay = self._get_exception_retry_delay(attempt)
+                    logger.warning(
+                        'Таймаут чтения при запросе к МойСклад: %s. Попытка %s/%s. Повтор через %.2f сек.',
+                        url,
+                        attempt,
+                        self.retry_attempts,
+                        delay,
+                    )
+                    if attempt < self.retry_attempts:
+                        await asyncio.sleep(delay)
+                        continue
+                    raise
 
-            if last_error:
-                raise last_error
-            raise RuntimeError('Не удалось выполнить запрос к МойСклад.')
+                except httpx.ConnectTimeout as exc:
+                    last_error = exc
+                    delay = self._get_exception_retry_delay(attempt)
+                    logger.warning(
+                        'Таймаут подключения к МойСклад: %s. Попытка %s/%s. Повтор через %.2f сек.',
+                        url,
+                        attempt,
+                        self.retry_attempts,
+                        delay,
+                    )
+                    if attempt < self.retry_attempts:
+                        await asyncio.sleep(delay)
+                        continue
+                    raise
+
+                except httpx.HTTPStatusError as exc:
+                    last_error = exc
+                    status_code = exc.response.status_code if exc.response is not None else 'unknown'
+                    logger.exception(
+                        'HTTP-ошибка МойСклад %s для %s на попытке %s/%s.',
+                        status_code,
+                        url,
+                        attempt,
+                        self.retry_attempts,
+                    )
+                    raise
+
+                except httpx.RequestError as exc:
+                    last_error = exc
+                    delay = self._get_exception_retry_delay(attempt)
+                    logger.warning(
+                        'Сетевая ошибка при запросе к МойСклад: %s. Попытка %s/%s. Повтор через %.2f сек.',
+                        url,
+                        attempt,
+                        self.retry_attempts,
+                        delay,
+                    )
+                    if attempt < self.retry_attempts:
+                        await asyncio.sleep(delay)
+                        continue
+                    raise
+
+        if last_error:
+            raise last_error
+        raise RuntimeError('Не удалось выполнить запрос к МойСклад.')
 
     async def get_all_pages(self, endpoint: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         params = dict(params or {})
@@ -141,24 +232,31 @@ class MoySkladClient:
             if self._cache_alive(self._catalog_cache):
                 return self._catalog_cache.value
 
-            folders = await self.get_all_pages('entity/productfolder')
-            assortment = await self.get_all_pages('entity/assortment', params={'filter': 'archived=false'})
+            folders, assortment = await asyncio.gather(
+                self.get_all_pages('entity/productfolder'),
+                self.get_all_pages('entity/assortment', params={'filter': 'archived=false'}),
+            )
 
             folder_by_id: dict[str, dict[str, Any]] = {}
             for folder in folders:
-                folder_by_id[folder.get('id')] = folder
+                folder_id = folder.get('id')
+                if folder_id:
+                    folder_by_id[folder_id] = folder
 
             assortment_by_id: dict[str, dict[str, Any]] = {}
             assortment_by_href: dict[str, dict[str, Any]] = {}
             assortment_by_code: dict[str, dict[str, Any]] = {}
+
             for row in assortment:
                 assortment_id = row.get('id')
                 if assortment_id:
                     assortment_by_id[assortment_id] = row
+
                 meta = row.get('meta') or {}
                 href = meta.get('href')
                 if href:
                     assortment_by_href[href] = row
+
                 code = (row.get('code') or '').strip()
                 if code:
                     assortment_by_code[code] = row
@@ -169,7 +267,10 @@ class MoySkladClient:
                 'assortment_by_href': assortment_by_href,
                 'assortment_by_code': assortment_by_code,
             }
-            self._catalog_cache = CacheEntry(value=bundle, expires_at=monotonic() + self.inventory_cache_ttl)
+            self._catalog_cache = CacheEntry(
+                value=bundle,
+                expires_at=monotonic() + self.inventory_cache_ttl,
+            )
             return bundle
 
     def _resolve_folder_chain(self, folder_id: str | None, folder_by_id: dict[str, dict[str, Any]]) -> list[dict[str, str]]:
@@ -179,12 +280,17 @@ class MoySkladClient:
         chain: list[dict[str, str]] = []
         current = folder_by_id.get(folder_id)
         visited: set[str] = set()
+
         while current:
             current_id = current.get('id')
             if not current_id or current_id in visited:
                 break
+
             visited.add(current_id)
-            chain.append({'id': current_id, 'name': current.get('name') or 'Без названия'})
+            chain.append({
+                'id': current_id,
+                'name': current.get('name') or 'Без названия',
+            })
 
             parent = current.get('productFolder') or {}
             parent_meta = parent.get('meta') or {}
@@ -201,15 +307,18 @@ class MoySkladClient:
             assortment = catalog['assortment_by_id'].get(assortment_id)
             if assortment:
                 return assortment, 'assortment.id'
+
         if assortment_meta.get('href'):
             assortment = catalog['assortment_by_href'].get(assortment_meta['href'])
             if assortment:
                 return assortment, 'assortment.href'
+
         code = (stock_row.get('code') or '').strip()
         if code:
             assortment = catalog['assortment_by_code'].get(code)
             if assortment:
                 return assortment, 'stock_row.code'
+
         return None, None
 
     def _extract_folder_id(self, stock_row: dict[str, Any], catalog: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
@@ -232,6 +341,7 @@ class MoySkladClient:
         assortment, lookup_source = self._lookup_assortment(stock_row, catalog)
         diagnostics['assortment_lookup'] = lookup_source or 'не найдено'
         diagnostics['assortment_found'] = bool(assortment)
+
         if not assortment:
             return None, diagnostics
 
@@ -305,7 +415,7 @@ class MoySkladClient:
         assortment_id = assortment_meta.get('id') or self._extract_id_from_href(assortment_meta.get('href'))
         code = (stock_row.get('code') or '').strip()
         item_name = (stock_row.get('name') or code or 'Без названия').strip()
-        item_id = assortment_id or code or f"{location.lower()}-{item_name.lower().replace(' ', '-') }"
+        item_id = assortment_id or code or f"{location.lower()}-{item_name.lower().replace(' ', '-')}"
         return item_id, item_name
 
     def _extract_expected_qty(self, stock_row: dict[str, Any]) -> float:
@@ -319,6 +429,7 @@ class MoySkladClient:
         normalized, store_id = await self._resolve_store(location)
         catalog = await self._get_catalog_bundle()
         store_href = f'{self.base_url}/entity/store/{store_id}'
+
         stock_rows = await self.get_all_pages(
             'report/stock/all',
             params={'filter': f'stockMode=all;quantityMode=all;store={store_href}'},
@@ -375,7 +486,11 @@ class MoySkladClient:
                     unique_items[item['id']] = item
                 subcategory['items'] = sorted(unique_items.values(), key=lambda item: item['name'].lower())
                 subcategories.append(subcategory)
-            categories.append({'id': category['id'], 'name': category['name'], 'subcategories': subcategories})
+            categories.append({
+                'id': category['id'],
+                'name': category['name'],
+                'subcategories': subcategories,
+            })
 
         return {'location': normalized, 'categories': categories}
 
@@ -392,7 +507,10 @@ class MoySkladClient:
                 return cached.value
 
             inventory = await self._build_inventory(normalized)
-            self._inventory_cache[normalized] = CacheEntry(value=inventory, expires_at=monotonic() + self.inventory_cache_ttl)
+            self._inventory_cache[normalized] = CacheEntry(
+                value=inventory,
+                expires_at=monotonic() + self.inventory_cache_ttl,
+            )
             return inventory
 
     async def prewarm_inventory(self, location: str) -> None:
