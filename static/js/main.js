@@ -48,6 +48,11 @@ const employeePageState = {
     searchQuery: '',
 };
 
+const employeeUiState = {
+    openCategories: new Set(),
+    openSubcategories: new Set(),
+};
+
 function getCategory(categoryId) {
     return inventoryState?.categories?.find(category => category.id === categoryId) || null;
 }
@@ -122,12 +127,62 @@ function categoryHasProblems(category) {
     });
 }
 
+function subcategoryBelongsToCurrentUser(category, subcategory) {
+    if (!subcategory) return false;
+    if (subcategory.assigned_to_current_user || subcategory.taken_as_part_of_category || subcategory.has_my_items) return true;
+    return (subcategory.items || []).some(item => item.assigned_to_current_user);
+}
+
+function subcategoryHasPendingMineWork(category, subcategory) {
+    if (!subcategoryBelongsToCurrentUser(category, subcategory)) return false;
+
+    const hasPendingWholeSubcategory = (subcategory.assigned_to_current_user || subcategory.taken_as_part_of_category) && !subcategory.is_completed;
+    const hasPendingDiagnosticItems = (subcategory.items || []).some(item => item.assigned_to_current_user && !item.is_final);
+
+    return hasPendingWholeSubcategory || hasPendingDiagnosticItems;
+}
+
+function categoryHasPendingMineWork(category) {
+    return (category.subcategories || []).some(subcategory => subcategoryHasPendingMineWork(category, subcategory));
+}
+
+function captureEmployeeUiState() {
+    employeeUiState.openCategories = new Set((inventoryState?.categories || []).filter(category => category.is_open).map(category => category.id));
+    employeeUiState.openSubcategories = new Set(
+        (inventoryState?.categories || []).flatMap(category => (category.subcategories || []).filter(sub => sub.is_expanded).map(sub => sub.id))
+    );
+}
+
+function applyEmployeeUiState() {
+    if (!inventoryState?.categories) return;
+
+    for (const category of inventoryState.categories) {
+        if (employeeUiState.openCategories.has(category.id) || categoryHasPendingMineWork(category)) {
+            category.is_open = true;
+        }
+
+        for (const sub of category.subcategories || []) {
+            const diagnosticBucket = isDiagnosticSubcategory(category, sub) || sub.is_diagnostic;
+            const hasPendingMineItems = (sub.items || []).some(item => item.assigned_to_current_user && !item.is_final);
+            if (employeeUiState.openSubcategories.has(sub.id) || sub.status === 'orange' || (diagnosticBucket && hasPendingMineItems)) {
+                sub.is_expanded = true;
+            }
+        }
+    }
+}
+
 function getVisibleSubcategories(category, query) {
     const q = normalizeSearch(query);
-    if (!q) return category.subcategories || [];
+    const allSubcategories = category.subcategories || [];
+    const scopedSubcategories = employeePageState.filter === 'mine'
+        ? allSubcategories.filter(subcategory => subcategoryBelongsToCurrentUser(category, subcategory))
+        : allSubcategories;
+
+    if (!q) return scopedSubcategories;
+
     const categoryDirectMatch = normalizeSearch(category.name).includes(q) || normalizeSearch(category.assigned_to || '').includes(q);
-    if (categoryDirectMatch) return category.subcategories || [];
-    return (category.subcategories || []).filter(subcategory => subcategoryMatchesSearch(subcategory, q));
+    if (categoryDirectMatch) return scopedSubcategories;
+    return scopedSubcategories.filter(subcategory => subcategoryMatchesSearch(subcategory, q));
 }
 
 function categoryPassesFilter(category) {
@@ -212,9 +267,19 @@ function buildSelectionConfirmMessage(kind, label) {
 
 
 function categoryMetaText(category) {
-    if (category.is_diagnostic && category.has_my_items) return 'у вас есть закреплённые товары для проверки';
-    if (category.is_diagnostic && category.has_other_items) return 'внутри есть товары, взятые другими сотрудниками';
-    if (category.is_diagnostic && categoryHasFreeDiagnosticItems(category)) return 'служебная ветка: выбираются отдельные товары';
+    if (category.is_diagnostic && category.has_my_items) {
+        return 'служебная ветка: не входит в общую ревизию, у вас есть закреплённые товары';
+    }
+    if (category.is_diagnostic && category.has_other_items) {
+        return 'служебная ветка: не входит в общую ревизию, внутри есть товары, взятые другими сотрудниками';
+    }
+    if (category.is_diagnostic && categoryHasFreeDiagnosticItems(category)) {
+        return 'служебная ветка: не входит в общую ревизию, здесь выбираются отдельные товары';
+    }
+    if (category.is_diagnostic) {
+        return 'служебная ветка: не входит в общую ревизию';
+    }
+
     if (category.is_completed && (category.assigned_to_current_user || category.has_my_subcategories || category.has_my_items)) return 'ваши выборы завершены';
     if (category.assigned_to_current_user) return 'вся категория закреплена за вами';
     if (category.has_my_subcategories && category.has_other_subcategories) return 'подкатегории распределены между сотрудниками';
@@ -230,7 +295,7 @@ function renderSubcategoryCard(category, sub, query) {
     const locked = sub.is_locked;
     const diagnosticBucket = isDiagnosticSubcategory(category, sub) || sub.is_diagnostic;
     let icon = diagnosticBucket ? '🧭' : '📂';
-    if (sub.is_completed) icon = '✅';
+    if (sub.is_completed && !diagnosticBucket) icon = '✅';
     if (locked && !sub.assigned_to_current_user && !sub.taken_as_part_of_category && !diagnosticBucket) icon = '🔒';
 
     const queryActive = Boolean(normalizeSearch(query));
@@ -334,11 +399,16 @@ function renderSubcategoryCard(category, sub, query) {
 
 function renderCategoryCard(category, query) {
     const blockedClass = category.is_blocked_by_other && !category.has_my_subcategories && !category.has_my_items ? 'blocked-category' : '';
-    const icon = category.is_completed ? '✅' : (category.assigned_to_current_user || category.has_my_subcategories || category.has_my_items ? '📂' : '📁');
+    const icon = category.is_diagnostic
+        ? '🧭'
+        : (category.is_completed
+            ? '✅'
+            : (category.assigned_to_current_user || category.has_my_subcategories || category.has_my_items ? '📂' : '📁'));
+
     const meta = categoryMetaText(category);
     const visibleSubcategories = getVisibleSubcategories(category, query);
     const queryActive = Boolean(normalizeSearch(query));
-    const bodyVisible = queryActive ? true : Boolean(category.is_open);
+    const bodyVisible = queryActive ? true : (Boolean(category.is_open) || categoryHasPendingMineWork(category));
 
     let bodyHtml = '';
     if (!category.is_diagnostic && category.can_take) {
@@ -429,6 +499,11 @@ window.toggleCategory = function (categoryId) {
     const category = getCategory(categoryId);
     if (!category) return;
     category.is_open = !category.is_open;
+    if (category.is_open) {
+        employeeUiState.openCategories.add(categoryId);
+    } else {
+        employeeUiState.openCategories.delete(categoryId);
+    }
     renderCategories();
 };
 
@@ -436,6 +511,11 @@ window.toggleSubcategory = function (subId) {
     const found = findSubcategory(subId);
     if (!found) return;
     found.sub.is_expanded = !found.sub.is_expanded;
+    if (found.sub.is_expanded) {
+        employeeUiState.openSubcategories.add(subId);
+    } else {
+        employeeUiState.openSubcategories.delete(subId);
+    }
     renderCategories();
 };
 
@@ -566,6 +646,8 @@ window.verifyItem = async function (itemId) {
 async function loadInventory(options = {}) {
     if (inventoryLoading) return;
 
+    captureEmployeeUiState();
+
     const { forceReload = false } = options;
     const summary = document.getElementById('inventory-summary');
     const container = document.getElementById('categories-container');
@@ -591,6 +673,7 @@ async function loadInventory(options = {}) {
             return;
         }
         inventoryState = await response.json();
+        applyEmployeeUiState();
         document.getElementById('current-location-title').textContent = `Точка: ${inventoryState.location}`;
         renderCategories();
         setInventoryStatus(null);

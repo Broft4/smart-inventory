@@ -81,6 +81,26 @@ function isDiagnosticsCategoryName(name) {
     return normalizeSearch(name) === normalizeSearch('Без категории');
 }
 
+function setAdminReportLoading(message = 'Загрузка данных ревизии...') {
+    const spinner = '<span class="inventory-spinner" aria-hidden="true"></span>';
+    const loadingHtml = `
+        <div class="inventory-status loading">
+            <div class="inventory-status-row">
+                ${spinner}
+                <div class="inventory-status-text">${escapeHtml(message)}</div>
+            </div>
+        </div>
+    `;
+
+    const employeesContainer = document.getElementById('report-employees');
+    const categoriesContainer = document.getElementById('report-categories');
+    const employeeDetailsContainer = document.getElementById('report-employee-details');
+
+    if (employeesContainer) employeesContainer.innerHTML = loadingHtml;
+    if (categoriesContainer) categoriesContainer.innerHTML = loadingHtml;
+    if (employeeDetailsContainer) employeeDetailsContainer.innerHTML = loadingHtml;
+}
+
 function renderDiagnostics(rows, location) {
     const summary = document.getElementById('diagnostics-summary');
     const container = document.getElementById('diagnostics-content');
@@ -350,14 +370,18 @@ window.deleteUser = async function (userId) {
     await loadUsers();
 };
 
-function getCategoryStatusLabel(status) {
+function getCategoryStatusLabel(status, category = null) {
+    const name = typeof category === 'string' ? category : (category?.name || '');
+    if (isDiagnosticsCategoryName(name)) return 'Не входит в ревизию';
     if (status === 'green') return 'Завершена';
     if (status === 'orange') return 'В работе';
     if (status === 'red') return 'Есть расхождения';
     return 'Не начата';
 }
 
-function getCategoryStatusClass(status) {
+function getCategoryStatusClass(status, category = null) {
+    const name = typeof category === 'string' ? category : (category?.name || '');
+    if (isDiagnosticsCategoryName(name)) return 'status-chip grey';
     if (status === 'green') return 'status-chip green';
     if (status === 'orange') return 'status-chip orange';
     if (status === 'red') return 'status-chip red';
@@ -584,7 +608,7 @@ function renderEmployeeDetails(report) {
                         <strong>${highlightMatch(category.name, adminState.searchQuery)}</strong>
                         <div class="muted-text">${category.problemCount ? `Проблемных товаров: ${category.problemCount}` : 'Без расхождений'}</div>
                     </div>
-                    <span class="${getCategoryStatusClass(category.status)}">${getCategoryStatusLabel(category.status)}</span>
+                    <span class="${getCategoryStatusClass(category.status, category)}">${getCategoryStatusLabel(category.status, category)}</span>
                 </div>
             `).join('')}</div>`
             : '<p class="empty-text">Категории по текущим фильтрам не найдены.</p>';
@@ -672,10 +696,11 @@ function updateSummary(report) {
     document.getElementById('report-status-chip').textContent = report.status || '-';
     document.getElementById('report-status-chip').className = `report-status-chip ${((report.status || '').toLowerCase().includes('заверш')) ? 'completed' : 'progress'}`;
 
-    const totalCategories = report.categories.length;
-    const completedCategories = report.categories.filter(cat => cat.status === 'green' || cat.status === 'red').length;
-    const discrepancyCategories = report.categories.filter(cat => (cat.problem_items || []).length > 0).length;
-    const discrepancyItems = report.categories.reduce((sum, cat) => sum + (cat.problem_items || []).length, 0);
+    const countedCategories = (report.categories || []).filter(cat => !isDiagnosticsCategoryName(cat.name));
+    const totalCategories = countedCategories.length;
+    const completedCategories = countedCategories.filter(cat => cat.status === 'green' || cat.status === 'red').length;
+    const discrepancyCategories = countedCategories.filter(cat => (cat.problem_items || []).length > 0).length;
+    const discrepancyItems = countedCategories.reduce((sum, cat) => sum + (cat.problem_items || []).length, 0);
 
     document.getElementById('employees-count').textContent = String((report.employees || []).length);
     document.getElementById('completed-categories').textContent = `${completedCategories}/${totalCategories}`;
@@ -737,14 +762,20 @@ function renderCategories(report) {
 
     categoriesContainer.innerHTML = categories.map((cat, index) => {
         const key = `${report.report_id || 'none'}:${cat.name}`;
-        const isOpen = adminState.expandedCategories.has(key) || (!isDiagnosticsCategoryName(cat.name) && index === 0);
+        const isDiagnostic = isDiagnosticsCategoryName(cat.name);
+        const isOpen = adminState.expandedCategories.has(key) || (!isDiagnostic && index === 0);
         const problemItems = cat.problem_items || [];
-        const summaryText = problemItems.length
-            ? `Проблемных товаров: ${problemItems.length}`
-            : (cat.status === 'green' ? 'Без расхождений' : getCategoryStatusLabel(cat.status));
+        const summaryText = isDiagnostic
+            ? 'Служебная ветка. Не входит в общую ревизию.'
+            : (problemItems.length
+                ? `Проблемных товаров: ${problemItems.length}`
+                : (cat.status === 'green' ? 'Без расхождений' : getCategoryStatusLabel(cat.status, cat)));
+        const statusClass = getCategoryStatusClass(cat.status, cat);
+        const statusLabel = getCategoryStatusLabel(cat.status, cat);
+        const articleStatusClass = isDiagnostic ? 'status-grey' : `status-${cat.status}`;
 
         return `
-            <article class="category-card admin-category-card status-${cat.status}">
+            <article class="category-card admin-category-card ${articleStatusClass}">
                 <button class="admin-category-header" type="button" onclick="toggleAdminCategory('${escapeHtml(key)}')">
                     <div>
                         <h3>${highlightMatch(cat.name, adminState.searchQuery)}</h3>
@@ -754,13 +785,13 @@ function renderCategories(report) {
                         </div>
                     </div>
                     <div class="admin-category-header-right">
-                        <span class="${getCategoryStatusClass(cat.status)}">${getCategoryStatusLabel(cat.status)}</span>
+                        <span class="${statusClass}">${statusLabel}</span>
                         <span class="collapse-icon">${isOpen ? '−' : '+'}</span>
                     </div>
                 </button>
                 <div class="admin-category-body ${isOpen ? '' : 'hidden'}">
                     ${problemItems.length ? `
-                        <div class="discrepancy-banner">⚠️ Зафиксированы расхождения</div>
+                        ${isDiagnostic ? '' : '<div class="discrepancy-banner">⚠️ Зафиксированы расхождения</div>'}
                         <div class="table-scroll">
                             <table class="admin-table">
                                 <thead>
@@ -790,12 +821,14 @@ function renderCategories(report) {
                             </table>
                         </div>
                     ` : `
-                        <div class="category-empty-state ${cat.status}">
-                            ${cat.status === 'green'
-                                ? 'Категория завершена без расхождений.'
-                                : cat.status === 'orange'
-                                    ? 'Категория закреплена и находится в работе.'
-                                    : 'По категории пока нет зафиксированных данных.'}
+                        <div class="category-empty-state ${isDiagnostic ? 'grey' : cat.status}">
+                            ${isDiagnostic
+                                ? 'Эта служебная категория не включается в общую ревизию.'
+                                : cat.status === 'green'
+                                    ? 'Категория завершена без расхождений.'
+                                    : cat.status === 'orange'
+                                        ? 'Категория закреплена и находится в работе.'
+                                        : 'По категории пока нет зафиксированных данных.'}
                         </div>
                     `}
                 </div>
@@ -829,6 +862,7 @@ async function loadReportsList(location) {
     const select = document.getElementById('admin-report-select');
     select.disabled = true;
     select.innerHTML = '<option>Загрузка...</option>';
+    setAdminReportLoading(`Загружаем список ревизий для точки «${location}»...`);
 
     const response = await fetch(`/api/reports?location=${encodeURIComponent(location)}`);
     if (!response.ok) throw new Error('Ошибка загрузки списка ревизий');
@@ -849,6 +883,10 @@ async function loadAdminReport(location, reportId) {
     const categoriesContainer = document.getElementById('report-categories');
     const employeesContainer = document.getElementById('report-employees');
     const employeeDetailsContainer = document.getElementById('report-employee-details');
+
+    setAdminReportLoading(reportId
+        ? `Загружаем ревизию №${reportId} для точки «${location}»...`
+        : `Загружаем последнюю ревизию для точки «${location}»...`);
 
     try {
         const params = new URLSearchParams({ location });
@@ -952,7 +990,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('user-form').addEventListener('submit', submitUserForm);
     document.getElementById('user-form-reset').addEventListener('click', resetUserForm);
     document.getElementById('delete-report-btn').addEventListener('click', deleteSelectedReport);
-    document.getElementById('download-diagnostics-btn').addEventListener('click', async () => {
+    document.getElementById('download-diagnostics-btn')?.addEventListener('click', async () => {
         const location = locationSelect.value;
         if (!location) return;
         await openDiagnosticsModal(location, document.getElementById('download-diagnostics-btn'));
