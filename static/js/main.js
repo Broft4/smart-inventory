@@ -37,7 +37,7 @@ function setInventoryStatus(mode, message, options = {}) {
 }
 
 function setRefreshButtonState(isLoading) {
-    const button = document.getElementById('finish-btn');
+    const button = document.getElementById('refresh-btn');
     if (!button) return;
     button.disabled = Boolean(isLoading);
     button.textContent = isLoading ? 'Загрузка...' : 'Обновить';
@@ -52,6 +52,77 @@ const employeeUiState = {
     openCategories: new Set(),
     openSubcategories: new Set(),
 };
+
+function getRevisionStorageKey(reportDate) {
+    const userId = window.currentUser?.id || 'unknown';
+    const location = window.currentUser?.location || 'unknown';
+    return `inventory_revision_${userId}_${location}_${reportDate}`;
+}
+
+function getEmployeeRevisionState(reportDate = inventoryState?.report_date) {
+    if (!reportDate) return 'idle';
+    return localStorage.getItem(getRevisionStorageKey(reportDate)) || 'idle';
+}
+
+function setEmployeeRevisionState(state, reportDate = inventoryState?.report_date) {
+    if (!reportDate) return;
+    localStorage.setItem(getRevisionStorageKey(reportDate), state);
+}
+
+function employeeRevisionIsActive() {
+    return getEmployeeRevisionState() === 'started';
+}
+
+function employeeRevisionIsFinished() {
+    return getEmployeeRevisionState() === 'finished';
+}
+
+function renderEmployeeRevisionControls() {
+    const startBtn = document.getElementById('start-revision-btn');
+    const refreshBtn = document.getElementById('refresh-btn');
+    const finishBtn = document.getElementById('finish-revision-btn');
+    const banner = document.getElementById('employee-revision-banner');
+    const tools = document.querySelector('.employee-tools-card');
+    const categories = document.getElementById('categories-container');
+    const summary = document.getElementById('inventory-summary');
+    const hint = document.getElementById('finish-hint');
+    if (!startBtn || !refreshBtn || !finishBtn || !banner || !tools || !categories || !summary || !hint) return;
+
+    const state = getEmployeeRevisionState();
+    const active = state === 'started';
+    const finished = state === 'finished';
+
+    startBtn.classList.toggle('hidden', active);
+    startBtn.textContent = finished ? 'Продолжить ревизию' : 'Начать ревизию';
+    refreshBtn.classList.toggle('hidden', !active);
+    finishBtn.classList.toggle('hidden', !active);
+
+    tools.classList.toggle('hidden', !active);
+    categories.classList.toggle('hidden', !active);
+    summary.classList.toggle('hidden', false);
+
+    if (finished) {
+        banner.className = 'employee-revision-banner done';
+        banner.innerHTML = '<strong>Ревизия на сегодня скрыта.</strong> Рабочие поля закрыты, но вы можете снова открыть их этой же кнопкой.';
+        hint.textContent = 'Кнопка «Продолжить ревизию» снова откроет категории и поля ввода за этот же день.';
+    } else if (!active) {
+        banner.className = 'employee-revision-banner idle';
+        banner.innerHTML = '<strong>Ревизия ещё не начата.</strong> Нажмите «Начать ревизию», чтобы открыть категории и приступить к работе.';
+        hint.textContent = 'Сначала запустите ревизию на текущий день, затем введите данные и при необходимости скройте рабочие поля.';
+    } else {
+        banner.className = 'employee-revision-banner hidden';
+        banner.innerHTML = '';
+        hint.textContent = 'Ревизия активна. Кнопка «Завершить ревизию» только скрывает интерфейс и не создаёт новую ревизию.';
+    }
+}
+
+function ensureRevisionStateForCurrentDay() {
+    if (!inventoryState?.report_date) return;
+    const key = getRevisionStorageKey(inventoryState.report_date);
+    if (!localStorage.getItem(key)) {
+        localStorage.setItem(key, 'idle');
+    }
+}
 
 function getCategory(categoryId) {
     return inventoryState?.categories?.find(category => category.id === categoryId) || null;
@@ -230,6 +301,8 @@ function renderSummary() {
             <strong>С расхождениями:</strong> ${problemCategories.length}.
         `;
     }
+
+    renderEmployeeRevisionControls();
 }
 
 
@@ -291,7 +364,40 @@ function categoryMetaText(category) {
 }
 
 
+function renderDirectItemsBlock(category, sub, query) {
+    const visibleItems = (() => {
+        const q = normalizeSearch(query);
+        if (!q) return sub.items || [];
+        return (sub.items || []).filter(item => itemMatchesSearch(item, q));
+    })();
+    const itemsHtml = visibleItems.map(item => {
+        const canVerify = category.assigned_to_current_user && !item.is_final;
+        let itemMessage = item.status === 'green' ? 'Товар подтверждён.' : (item.status === 'red' ? 'Расхождение по товару зафиксировано.' : 'Товар входит в категорию без подкатегории.');
+        let itemMessageColor = item.status === 'green' ? 'green' : (item.status === 'red' ? 'red' : '');
+        return `
+            <div class="item-card">
+                <h4>${highlightMatch(item.name, query)} (${escapeHtml(item.uom)})</h4>
+                <div class="input-group">
+                    <input type="number" id="input-${item.id}" placeholder="Факт. шт." min="0" step="1" ${canVerify ? '' : 'disabled'}>
+                    <button class="btn check btn-inline" onclick="verifyItem('${item.id}')" ${canVerify ? '' : 'disabled'}>Ввод</button>
+                </div>
+                <div id="msg-${item.id}" class="message" style="color:${itemMessageColor};">${itemMessage}</div>
+            </div>
+        `;
+    }).join('');
+    return `
+        <div class="category-card subcategory-card status-${sub.status}">
+            <h3>📦 ${escapeHtml(category.direct_items_label || 'Товары без подкатегории')}</h3>
+            <div class="muted-text" style="margin-bottom:10px;">Промежуточная ветка скрыта: товары без подкатегории показаны сразу внутри категории.</div>
+            <div class="items-container" style="display:block; border-top:none; padding-top:0; margin-top:0;">${itemsHtml || '<div class="employee-empty-state">По этому запросу товары не найдены.</div>'}</div>
+        </div>
+    `;
+}
+
 function renderSubcategoryCard(category, sub, query) {
+    if (sub.flatten_mode === 'category_direct') {
+        return renderDirectItemsBlock(category, sub, query);
+    }
     const locked = sub.is_locked;
     const diagnosticBucket = isDiagnosticSubcategory(category, sub) || sub.is_diagnostic;
     let icon = diagnosticBucket ? '🧭' : '📂';
@@ -463,6 +569,7 @@ function renderCategories() {
         container.innerHTML = '<div class="employee-empty-state">По текущим фильтрам ничего не найдено.</div>';
         renderSummary();
         updateFilterButtons();
+        renderEmployeeRevisionControls();
         return;
     }
 
@@ -493,6 +600,7 @@ function renderCategories() {
 
     renderSummary();
     updateFilterButtons();
+    renderEmployeeRevisionControls();
 }
 
 window.toggleCategory = function (categoryId) {
@@ -520,6 +628,10 @@ window.toggleSubcategory = function (subId) {
 };
 
 window.takeCategory = async function (categoryId) {
+    if (!employeeRevisionIsActive()) {
+        alert('Сначала нажмите «Начать ревизию».');
+        return;
+    }
     const category = getCategory(categoryId);
     if (!window.confirm(buildSelectionConfirmMessage('category', category?.name))) return;
     try {
@@ -541,6 +653,10 @@ window.takeCategory = async function (categoryId) {
 };
 
 window.takeSubcategory = async function (categoryId, subcategoryId) {
+    if (!employeeRevisionIsActive()) {
+        alert('Сначала нажмите «Начать ревизию».');
+        return;
+    }
     const found = findSubcategory(subcategoryId);
     if (!window.confirm(buildSelectionConfirmMessage('subcategory', found?.sub?.name))) return;
     try {
@@ -564,6 +680,10 @@ window.takeSubcategory = async function (categoryId, subcategoryId) {
 
 
 window.takeItem = async function (categoryId, subcategoryId, itemId) {
+    if (!employeeRevisionIsActive()) {
+        alert('Сначала нажмите «Начать ревизию».');
+        return;
+    }
     const found = findSubcategory(subcategoryId);
     const item = found?.sub?.items?.find(row => row.id === itemId);
     if (!window.confirm(buildSelectionConfirmMessage('item', item?.name))) return;
@@ -587,6 +707,10 @@ window.takeItem = async function (categoryId, subcategoryId, itemId) {
 
 
 window.verifySubcategory = async function (subId) {
+    if (!employeeRevisionIsActive()) {
+        alert('Сначала нажмите «Начать ревизию».');
+        return;
+    }
     const found = findSubcategory(subId);
     if (!found) return;
     const inputElement = document.getElementById(`input-${subId}`);
@@ -616,6 +740,10 @@ window.verifySubcategory = async function (subId) {
 };
 
 window.verifyItem = async function (itemId) {
+    if (!employeeRevisionIsActive()) {
+        alert('Сначала нажмите «Начать ревизию».');
+        return;
+    }
     const inputElement = document.getElementById(`input-${itemId}`);
     const msgElement = document.getElementById(`msg-${itemId}`);
     const inputValue = parseFloat(inputElement.value);
@@ -673,6 +801,7 @@ async function loadInventory(options = {}) {
             return;
         }
         inventoryState = await response.json();
+        ensureRevisionStateForCurrentDay();
         applyEmployeeUiState();
         document.getElementById('current-location-title').textContent = `Точка: ${inventoryState.location}`;
         renderCategories();
@@ -695,7 +824,16 @@ async function logout() {
 
 document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('logout-btn')?.addEventListener('click', logout);
-    document.getElementById('finish-btn')?.addEventListener('click', loadInventory);
+    document.getElementById('refresh-btn')?.addEventListener('click', loadInventory);
+    document.getElementById('start-revision-btn')?.addEventListener('click', () => {
+        setEmployeeRevisionState('started');
+        renderEmployeeRevisionControls();
+    });
+    document.getElementById('finish-revision-btn')?.addEventListener('click', () => {
+        if (!window.confirm('Завершить ревизию на текущий день? Рабочие поля будут скрыты до следующего дня.')) return;
+        setEmployeeRevisionState('finished');
+        renderEmployeeRevisionControls();
+    });
     document.querySelectorAll('[data-employee-filter]').forEach(button => {
         button.addEventListener('click', () => {
             employeePageState.filter = button.dataset.employeeFilter || 'all';

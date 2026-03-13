@@ -245,3 +245,73 @@ class ReportHistoryItem(BaseModel):
 class ReportHistoryResponse(BaseModel):
     location: str
     reports: list[ReportHistoryItem]
+
+
+class StoreOption(BaseModel):
+    id: str
+    name: str
+
+
+class LocationPointModel(BaseModel):
+    id: int
+    name: str
+    ms_store_id: Optional[str] = None
+    ms_store_name: Optional[str] = None
+
+    model_config = {'from_attributes': True}
+
+
+class LocationListResponse(BaseModel):
+    locations: list[LocationPointModel]
+
+
+class CreateLocationRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=100)
+    ms_token: str = Field(..., min_length=10, max_length=255)
+    ms_store_id: str = Field(..., min_length=3, max_length=100)
+    ms_store_name: str = Field(..., min_length=1, max_length=255)
+
+
+class CreateLocationResponse(BaseModel):
+    success: bool
+    message: str
+    location: Optional[LocationPointModel] = None
+
+
+class StoreListResponse(BaseModel):
+    stores: list[StoreOption]
+
+
+class AdminCycleTargetItem(BaseModel):
+    id: str
+    name: str
+    selected: bool = False
+    disabled: bool = False
+
+
+class AdminCycleTargetCategory(BaseModel):
+    id: str
+    name: str
+    selected: bool = False
+    disabled: bool = False
+    subcategories: list[AdminCycleTargetItem] = Field(default_factory=list)
+
+
+class AdminCycleTargetsResponse(BaseModel):
+    location: str
+    cycle_version: int
+    cycle_started_at: str
+    categories: list[AdminCycleTargetCategory]
+
+
+class SaveCycleTargetsRequest(BaseModel):
+    location: str
+    cycle_started_at: Optional[date] = None
+    category_ids: list[str] = Field(default_factory=list)
+    subcategory_ids: list[str] = Field(default_factory=list)
+
+
+class SaveCycleTargetsResponse(BaseModel):
+    success: bool
+    message: str
+    cycle_started_at: Optional[str] = None

@@ -14,6 +14,8 @@
             <p class="muted-text">{{ user.full_name }}</p>
         </div>
         <div class="header-actions">
+            <button id="open-cycle-targets-btn" class="btn secondary btn-inline" type="button" data-open-modal-action="cycle-targets">Категории цикла</button>
+            <button id="open-create-location-btn" class="btn secondary btn-inline" type="button" data-open-modal-action="location">Новая точка</button>
             <button id="open-users-btn" class="btn secondary btn-inline" type="button">Сотрудники</button>
             <button id="logout-btn" class="btn secondary btn-inline" type="button">Выйти</button>
         </div>
@@ -34,10 +36,6 @@
             </label>
 
             <div class="admin-toolbar-actions">
-                <label class="checkbox-row admin-filter-checkbox">
-                    <input type="checkbox" id="admin-discrepancy-only">
-                    Только с расхождениями
-                </label>
                 <button id="delete-report-btn" type="button" class="btn danger btn-inline">Удалить ревизию</button>
             </div>
 
@@ -140,6 +138,16 @@
                     </span>
                 </label>
 
+                <label class="checkbox-row admin-filter-checkbox detail-filter-checkbox-inline">
+                    <input type="checkbox" id="admin-discrepancy-only">
+                    Показать только с расхождениями
+                </label>
+
+                <label class="checkbox-row admin-filter-checkbox detail-filter-checkbox-inline">
+                    <input type="checkbox" id="admin-completed-only">
+                    Показать только пройденные категории
+                </label>
+
                 <div class="detail-mode-wrap">
                     <div class="view-mode-switch" id="admin-view-mode-switch">
                         <button type="button" class="view-mode-btn active" data-view-mode="categories">По категориям</button>
@@ -240,6 +248,57 @@
         <div id="diagnostics-content" class="modal-users-list">
             <p>Загрузка диагностики...</p>
         </div>
+    </div>
+</div>
+
+
+<div id="location-modal" class="modal-overlay hidden">
+    <div class="modal-card form-modal-card">
+        <div class="modal-header">
+            <div>
+                <h2>Новая точка</h2>
+                <p class="muted-text">Введите токен МойСклад, загрузите список складов и выберите нужный.</p>
+            </div>
+            <button id="close-location-modal-btn" class="btn secondary btn-inline" type="button">Закрыть</button>
+        </div>
+        <form id="location-form" class="user-form" novalidate>
+            <label>Название точки
+                <input type="text" id="location-name" required>
+            </label>
+            <label>Токен МойСклад
+                <input type="text" id="location-token" required>
+            </label>
+            <div class="form-actions">
+                <button type="button" id="load-stores-btn" class="btn secondary">Загрузить склады</button>
+            </div>
+            <label>Склад
+                <select id="location-store-select" required>
+                    <option value="">Сначала загрузите список</option>
+                </select>
+            </label>
+            <div class="form-actions">
+                <button type="submit" class="btn primary">Создать точку</button>
+            </div>
+            <div id="location-form-message" class="message"></div>
+        </form>
+    </div>
+</div>
+
+<div id="cycle-targets-modal" class="modal-overlay hidden">
+    <div class="modal-card users-modal-card">
+        <div class="modal-header">
+            <div>
+                <h2>Категории цикла</h2>
+                <p class="muted-text">На 1-й день цикла администратор задаёт категории и подкатегории, которые сотрудники будут распределять между собой.</p>
+            </div>
+            <div class="modal-header-actions">
+                <button id="save-cycle-targets-btn" class="btn primary btn-inline" type="button">Сохранить</button>
+                <button id="close-cycle-targets-modal-btn" class="btn secondary btn-inline" type="button">Закрыть</button>
+            </div>
+        </div>
+        <div id="cycle-targets-meta" class="muted-text" style="margin-bottom:12px;"></div>
+        <div id="cycle-targets-list" class="modal-users-list"><p>Загрузка...</p></div>
+        <div id="cycle-targets-message" class="message"></div>
     </div>
 </div>
 

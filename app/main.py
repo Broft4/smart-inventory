@@ -18,6 +18,8 @@ from app.config import settings
 from app.database import engine, get_db
 from app.logic import (
     assign_selection_to_user,
+    create_location_point,
+    get_cycle_targets,
     authenticate_user,
     bootstrap_schema_and_admin,
     create_user,
@@ -27,18 +29,24 @@ from app.logic import (
     finish_report,
     get_admin_report,
     get_inventory_data,
+    list_locations,
+    list_moysklad_stores_by_token,
     get_inventory_diagnostics_rows,
     get_me_response,
     get_reports_history,
     list_users,
+    save_cycle_targets,
     update_user,
     user_to_schema,
     verify_item_or_category,
 )
 from app.models import User
 from app.schemas import (
+    AdminCycleTargetsResponse,
     AdminReport,
     AssignSelectionRequest,
+    CreateLocationRequest,
+    CreateLocationResponse,
     AssignSelectionResponse,
     DeleteResponse,
     FinishReportRequest,
@@ -46,9 +54,13 @@ from app.schemas import (
     InventoryStructureResponse,
     LoginRequest,
     LoginResponse,
+    LocationListResponse,
     LogoutResponse,
     MeResponse,
     ReportHistoryResponse,
+    SaveCycleTargetsRequest,
+    SaveCycleTargetsResponse,
+    StoreListResponse,
     UserActionResponse,
     UserCreateRequest,
     UserListResponse,
@@ -153,6 +165,34 @@ async def api_logout(request: Request):
 @app.get('/api/me', response_model=MeResponse)
 async def api_me(user: User | None = Depends(get_current_user)):
     return await get_me_response(user)
+
+
+@app.get('/api/locations', response_model=LocationListResponse)
+async def api_list_locations(admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    return await list_locations(db)
+
+
+@app.post('/api/locations/stores', response_model=StoreListResponse)
+async def api_list_location_stores(payload: dict, admin: User = Depends(require_admin)):
+    token = str(payload.get('ms_token') or '').strip()
+    if not token:
+        raise HTTPException(status_code=400, detail='Нужно передать токен МойСклад.')
+    return await list_moysklad_stores_by_token(token)
+
+
+@app.post('/api/locations', response_model=CreateLocationResponse)
+async def api_create_location(payload: CreateLocationRequest, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    return await create_location_point(payload, db)
+
+
+@app.get('/api/cycle-targets', response_model=AdminCycleTargetsResponse)
+async def api_get_cycle_targets(location: str, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    return await get_cycle_targets(location, db)
+
+
+@app.post('/api/cycle-targets', response_model=SaveCycleTargetsResponse)
+async def api_save_cycle_targets(payload: SaveCycleTargetsRequest, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    return await save_cycle_targets(payload, db)
 
 
 @app.get('/api/users', response_model=UserListResponse)

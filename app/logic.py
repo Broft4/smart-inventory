@@ -14,23 +14,34 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.moysklad import DEFAULT_CATEGORY_NAME, DEFAULT_SUBCATEGORY_NAME, ms_client
-from app.models import CategoryAssignment, CheckResult, Report, SelectionCycle, User
+from app.models import CategoryAssignment, CheckResult, LocationPoint, Report, SelectionCycle, SelectionTarget, User
 from app.schemas import (
+    AdminCycleTargetCategory,
+    AdminCycleTargetItem,
+    AdminCycleTargetsResponse,
     AdminReport,
     AssignSelectionResponse,
     CategoryModel,
     CategoryResult,
+    CreateLocationRequest,
+    CreateLocationResponse,
     DeleteResponse,
     DiscrepancyItem,
     EmployeeReportSummary,
     InventoryStructureResponse,
     ItemModel,
+    LocationListResponse,
+    LocationPointModel,
     MeResponse,
     ReportHistoryItem,
     ReportHistoryResponse,
     ResetSelectionCycleResponse,
+    SaveCycleTargetsRequest,
+    SaveCycleTargetsResponse,
     RoleEnum,
     StatusEnum,
+    StoreListResponse,
+    StoreOption,
     SubcategoryModel,
     UserActionResponse,
     UserCreateRequest,
@@ -168,7 +179,11 @@ def _format_moscow_datetime(dt: datetime | None) -> str:
 
 
 def _report_status_label(status: str) -> str:
-    return 'Завершена' if status == 'completed' else 'В процессе'
+    if status == 'created':
+        return 'Создана'
+    if status == 'completed':
+        return 'Завершена'
+    return 'В процессе'
 
 
 def bootstrap_schema_and_admin(sync_conn) -> None:
@@ -207,6 +222,18 @@ def bootstrap_schema_and_admin(sync_conn) -> None:
             reset_assignments = True
     elif 'selection_cycles' not in tables:
         reset_assignments = True if 'category_assignments' in tables else reset_assignments
+
+    if 'selection_targets' in tables:
+        cols = {c['name'] for c in inspector.get_columns('selection_targets')}
+        required = {'id', 'location', 'cycle_version', 'category_id', 'category_name', 'subcategory_id', 'subcategory_name', 'target_type', 'target_id', 'target_name', 'created_at'}
+        if not required.issubset(cols):
+            sync_conn.execute(text('DROP TABLE IF EXISTS selection_targets'))
+
+    if 'location_points' in tables:
+        cols = {c['name'] for c in inspector.get_columns('location_points')}
+        required = {'id', 'name', 'ms_token', 'ms_store_id', 'ms_store_name', 'created_at'}
+        if not required.issubset(cols):
+            sync_conn.execute(text('DROP TABLE IF EXISTS location_points'))
 
     if reset_reports:
         sync_conn.execute(text('DROP TABLE IF EXISTS check_results'))
@@ -521,6 +548,38 @@ async def reset_selection_cycle(location: str, db: AsyncSession) -> ResetSelecti
     )
 
 
+
+async def _sync_report_status(report: Report, db: AsyncSession) -> None:
+    results_count = await db.scalar(select(func.count()).select_from(CheckResult).where(CheckResult.report_id == report.id))
+    newer_report_exists = await db.scalar(
+        select(func.count()).select_from(Report).where(
+            Report.location == report.location,
+            Report.report_date > report.report_date,
+        )
+    )
+
+    if (results_count or 0) == 0:
+        report.status = 'created'
+    elif (newer_report_exists or 0) > 0:
+        report.status = 'completed'
+    else:
+        report.status = 'in_progress'
+
+
+async def _complete_previous_reports(location: str, current_report_date: date, db: AsyncSession) -> None:
+    previous_reports = (
+        await db.scalars(
+            select(Report).where(
+                Report.location == location,
+                Report.report_date < current_report_date,
+                Report.status != 'completed',
+            )
+        )
+    ).all()
+    for report in previous_reports:
+        report.status = 'completed'
+
+
 async def get_or_create_daily_report(location: str, cycle_version: int, db: AsyncSession) -> Report:
     today = get_moscow_today()
     normalized = _normalize_location(location)
@@ -532,10 +591,13 @@ async def get_or_create_daily_report(location: str, cycle_version: int, db: Asyn
         ).limit(1)
     )
     if report:
+        await _sync_report_status(report, db)
+        await db.commit()
         return report
 
-    report = Report(location=normalized, report_date=today, cycle_version=cycle_version, status='in_progress')
+    report = Report(location=normalized, report_date=today, cycle_version=cycle_version, status='created')
     db.add(report)
+    await _complete_previous_reports(normalized, today, db)
     await db.commit()
     await db.refresh(report)
     return report
@@ -547,6 +609,193 @@ async def _load_assignments(location: str, cycle_version: int, db: AsyncSession)
 
 async def _load_results(report_id: int, db: AsyncSession) -> list[CheckResult]:
     return (await db.scalars(select(CheckResult).where(CheckResult.report_id == report_id).order_by(CheckResult.id.asc()))).all()
+
+
+async def _load_selection_targets(location: str, cycle_version: int, db: AsyncSession) -> list[SelectionTarget]:
+    return (await db.scalars(select(SelectionTarget).where(SelectionTarget.location == location, SelectionTarget.cycle_version == cycle_version))).all()
+
+
+def _selection_target_maps(targets: list[SelectionTarget]) -> tuple[set[str], dict[str, set[str]]]:
+    category_ids: set[str] = set()
+    subcategory_ids: dict[str, set[str]] = defaultdict(set)
+    for row in targets:
+        if row.target_type == 'category':
+            category_ids.add(row.category_id)
+        elif row.target_type == 'subcategory' and row.subcategory_id:
+            subcategory_ids[row.category_id].add(row.subcategory_id)
+    return category_ids, subcategory_ids
+
+
+def _is_categoryless_subcategory(category: dict[str, Any], subcategory: dict[str, Any]) -> bool:
+    return category['name'] != DEFAULT_CATEGORY_NAME and subcategory['name'] == DEFAULT_SUBCATEGORY_NAME
+
+
+def _filter_inventory_by_targets(inventory: dict[str, Any], selected_category_ids: set[str], selected_subcategory_ids: dict[str, set[str]]) -> dict[str, Any]:
+    if not selected_category_ids and not any(selected_subcategory_ids.values()):
+        return inventory
+
+    categories: list[dict[str, Any]] = []
+    for category in inventory['categories']:
+        if category['name'] == DEFAULT_CATEGORY_NAME:
+            categories.append(category)
+            continue
+
+        include_full_category = category['id'] in selected_category_ids
+        allowed_sub_ids = selected_subcategory_ids.get(category['id'], set())
+        filtered_subcategories: list[dict[str, Any]] = []
+        for sub in category['subcategories']:
+            if _is_categoryless_subcategory(category, sub):
+                if include_full_category:
+                    filtered_subcategories.append(dict(sub))
+                continue
+            if include_full_category or sub['id'] in allowed_sub_ids:
+                filtered_subcategories.append(dict(sub))
+        if include_full_category or filtered_subcategories:
+            categories.append({
+                'id': category['id'],
+                'name': category['name'],
+                'subcategories': filtered_subcategories,
+            })
+    return {'location': inventory.get('location'), 'categories': categories}
+
+
+async def list_locations(db: AsyncSession) -> LocationListResponse:
+    rows = (await db.scalars(select(LocationPoint).order_by(LocationPoint.name.asc()))).all()
+    locations = [LocationPointModel.model_validate(row) for row in rows]
+    if not locations:
+        fallback = sorted(MOCK_INVENTORY.keys())
+        locations = [LocationPointModel(id=idx + 1, name=name, ms_store_name=name) for idx, name in enumerate(fallback)]
+    return LocationListResponse(locations=locations)
+
+
+async def list_moysklad_stores_by_token(ms_token: str) -> StoreListResponse:
+    headers = {
+        'Authorization': f'Bearer {ms_token}',
+        'Accept-Encoding': 'gzip',
+        'Content-Type': 'application/json',
+    }
+    timeout = httpx.Timeout(20.0, connect=10.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.get(f"{settings.ms_api_base_url.rstrip('/')}/entity/store", headers=headers)
+        response.raise_for_status()
+        data = response.json()
+    stores = [
+        StoreOption(id=row.get('id'), name=row.get('name') or 'Без названия')
+        for row in (data.get('rows') or []) if row.get('id')
+    ]
+    stores.sort(key=lambda item: item.name.lower())
+    return StoreListResponse(stores=stores)
+
+
+async def create_location_point(payload: CreateLocationRequest, db: AsyncSession) -> CreateLocationResponse:
+    name = _normalize_location(payload.name)
+    existing = await db.scalar(select(LocationPoint).where(LocationPoint.name == name).limit(1))
+    if existing:
+        raise HTTPException(status_code=400, detail='Точка с таким названием уже существует.')
+
+    point = LocationPoint(
+        name=name,
+        ms_token=payload.ms_token.strip(),
+        ms_store_id=payload.ms_store_id.strip(),
+        ms_store_name=payload.ms_store_name.strip(),
+    )
+    db.add(point)
+    await db.commit()
+    await db.refresh(point)
+    return CreateLocationResponse(success=True, message='Точка создана.', location=LocationPointModel.model_validate(point))
+
+
+async def get_cycle_targets(location: str, db: AsyncSession) -> AdminCycleTargetsResponse:
+    normalized = _normalize_location(location)
+    cycle = await _get_or_create_selection_cycle(normalized, db)
+    inventory = await _get_inventory_for(normalized)
+    targets = await _load_selection_targets(normalized, cycle.cycle_version, db)
+    selected_category_ids, selected_subcategory_ids = _selection_target_maps(targets)
+
+    categories: list[AdminCycleTargetCategory] = []
+    for category in inventory['categories']:
+        if category['name'] == DEFAULT_CATEGORY_NAME:
+            continue
+        subcategories: list[AdminCycleTargetItem] = []
+        for sub in category['subcategories']:
+            if _is_categoryless_subcategory(category, sub):
+                continue
+            subcategories.append(AdminCycleTargetItem(
+                id=sub['id'],
+                name=sub['name'],
+                selected=sub['id'] in selected_subcategory_ids.get(category['id'], set()),
+                disabled=category['id'] in selected_category_ids,
+            ))
+        categories.append(AdminCycleTargetCategory(
+            id=category['id'],
+            name=category['name'],
+            selected=category['id'] in selected_category_ids,
+            subcategories=subcategories,
+        ))
+
+    return AdminCycleTargetsResponse(
+        location=normalized,
+        cycle_version=cycle.cycle_version,
+        cycle_started_at=cycle.started_at.strftime('%d.%m.%Y'),
+        categories=categories,
+    )
+
+
+async def save_cycle_targets(payload: SaveCycleTargetsRequest, db: AsyncSession) -> SaveCycleTargetsResponse:
+    normalized = _normalize_location(payload.location)
+    cycle = await _get_or_create_selection_cycle(normalized, db)
+    inventory = await _get_inventory_for(normalized)
+
+    if payload.cycle_started_at:
+        cycle.started_at = payload.cycle_started_at
+        cycle.updated_at = datetime.utcnow()
+
+    category_by_id = {row['id']: row for row in inventory['categories']}
+    sub_by_id: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+    for category in inventory['categories']:
+        for sub in category['subcategories']:
+            sub_by_id[sub['id']] = (category, sub)
+
+    await db.execute(delete(SelectionTarget).where(SelectionTarget.location == normalized, SelectionTarget.cycle_version == cycle.cycle_version))
+
+    for category_id in sorted(set(payload.category_ids)):
+        category = category_by_id.get(category_id)
+        if not category or category['name'] == DEFAULT_CATEGORY_NAME:
+            continue
+        db.add(SelectionTarget(
+            location=normalized,
+            cycle_version=cycle.cycle_version,
+            category_id=category_id,
+            category_name=category['name'],
+            subcategory_id=None,
+            subcategory_name=None,
+            target_type='category',
+            target_id=category_id,
+            target_name=category['name'],
+        ))
+
+    selected_categories = set(payload.category_ids)
+    for subcategory_id in sorted(set(payload.subcategory_ids)):
+        pair = sub_by_id.get(subcategory_id)
+        if not pair:
+            continue
+        category, sub = pair
+        if category['id'] in selected_categories or category['name'] == DEFAULT_CATEGORY_NAME or _is_categoryless_subcategory(category, sub):
+            continue
+        db.add(SelectionTarget(
+            location=normalized,
+            cycle_version=cycle.cycle_version,
+            category_id=category['id'],
+            category_name=category['name'],
+            subcategory_id=sub['id'],
+            subcategory_name=sub['name'],
+            target_type='subcategory',
+            target_id=sub['id'],
+            target_name=sub['name'],
+        ))
+
+    await db.commit()
+    return SaveCycleTargetsResponse(success=True, message='Изменения сохранены.', cycle_started_at=cycle.started_at.strftime('%d.%m.%Y'))
 
 
 def _category_assignments_map(assignments: list[CategoryAssignment]) -> tuple[
@@ -574,19 +823,7 @@ def _subcategories_user_can_work(raw_category: dict[str, Any], category_assignme
 
 
 async def _refresh_report_status(report: Report, db: AsyncSession) -> None:
-    results = await _load_results(report.id, db)
-    rows_by_category_target: dict[str, dict[str, CheckResult]] = defaultdict(dict)
-    for row in results:
-        rows_by_category_target[row.category_id][row.target_id] = row
-
-    inventory = await _get_inventory_for(report.location)
-    all_complete = True
-    for raw_category in inventory['categories']:
-        if not _category_is_complete(raw_category, rows_by_category_target.get(raw_category['id'], {})):
-            all_complete = False
-            break
-
-    report.status = 'completed' if all_complete else 'in_progress'
+    await _sync_report_status(report, db)
     await db.commit()
 
 
@@ -596,14 +833,18 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
     report = await get_or_create_daily_report(normalized, cycle.cycle_version, db)
     assignments = await _load_assignments(normalized, cycle.cycle_version, db)
     results = await _load_results(report.id, db)
+    targets = await _load_selection_targets(normalized, cycle.cycle_version, db)
 
     category_assignments, subcategory_assignments, item_assignments = _category_assignments_map(assignments)
+    selected_category_ids, selected_subcategory_ids = _selection_target_maps(targets)
     rows_by_category_target: dict[str, dict[str, CheckResult]] = defaultdict(dict)
     for row in results:
         rows_by_category_target[row.category_id][row.target_id] = row
 
     categories: list[CategoryModel] = []
     inventory = await _get_inventory_for(normalized)
+    inventory = _filter_inventory_by_targets(inventory, selected_category_ids, selected_subcategory_ids)
+
     for raw_category in inventory['categories']:
         category_is_diagnostic = raw_category['name'] == DEFAULT_CATEGORY_NAME
         category_assignment = category_assignments.get(raw_category['id'])
@@ -780,7 +1021,9 @@ async def assign_selection_to_user(report_id: int, category_id: str, target_type
 
     cycle = await _get_or_create_selection_cycle(report.location, db)
     assignments = await _load_assignments(report.location, cycle.cycle_version, db)
+    targets = await _load_selection_targets(report.location, cycle.cycle_version, db)
     category_map, sub_map, item_map = _category_assignments_map(assignments)
+    selected_category_ids, selected_subcategory_ids = _selection_target_maps(targets)
 
     category = await _find_category(report.location, category_id)
     category_assignment = category_map.get(category_id)
@@ -789,7 +1032,11 @@ async def assign_selection_to_user(report_id: int, category_id: str, target_type
     category_is_diagnostic = category['name'] == DEFAULT_CATEGORY_NAME
 
     if target_type == 'category':
-        if category_is_diagnostic or any(sub['name'] == DEFAULT_SUBCATEGORY_NAME for sub in category['subcategories']):
+        if category_is_diagnostic:
+            raise HTTPException(status_code=400, detail='Категорию «Без категории» нельзя брать целиком.')
+        if category_id not in selected_category_ids:
+            raise HTTPException(status_code=400, detail='Эта категория не выбрана администратором для текущего цикла.')
+        if any(sub['name'] == DEFAULT_SUBCATEGORY_NAME for sub in category['subcategories']):
             raise HTTPException(status_code=400, detail='Категории со служебными ветками «Без категории/Без подкатегории» нельзя брать целиком. Выберите обычную подкатегорию или конкретные товары.')
         if category_assignment:
             if category_assignment.user_id == user.id:
@@ -821,6 +1068,9 @@ async def assign_selection_to_user(report_id: int, category_id: str, target_type
             if category_assignment.user_id == user.id:
                 return AssignSelectionResponse(success=True, message='Вся категория уже закреплена за вами.')
             raise HTTPException(status_code=400, detail=f'Вся категория уже закреплена за сотрудником {category_assignment.user_full_name_snapshot}.')
+
+        if category_id not in selected_category_ids and subcategory_id not in selected_subcategory_ids.get(category_id, set()):
+            raise HTTPException(status_code=400, detail='Эта подкатегория не выбрана администратором для текущего цикла.')
 
         subcategory = await _find_subcategory(report.location, category_id, subcategory_id)
         diagnostic_sub = category_is_diagnostic or subcategory['name'] == DEFAULT_SUBCATEGORY_NAME
@@ -856,6 +1106,9 @@ async def assign_selection_to_user(report_id: int, category_id: str, target_type
             raise HTTPException(status_code=400, detail='Для выбора товара нужно указать подкатегорию и товар.')
         if category_assignment:
             raise HTTPException(status_code=400, detail='Сейчас внутри этой категории нельзя закреплять отдельные товары, потому что уже есть выбор категории целиком.')
+
+        if category_id not in selected_category_ids and subcategory_id not in selected_subcategory_ids.get(category_id, set()):
+            raise HTTPException(status_code=400, detail='Эта подкатегория не выбрана администратором для текущего цикла.')
 
         subcategory = await _find_subcategory(report.location, category_id, subcategory_id)
         diagnostic_sub = category_is_diagnostic or subcategory['name'] == DEFAULT_SUBCATEGORY_NAME
@@ -1048,6 +1301,9 @@ async def finish_report(report_id: int, db: AsyncSession) -> tuple[bool, str]:
 async def get_reports_history(location: str, db: AsyncSession) -> ReportHistoryResponse:
     normalized = _normalize_location(location)
     reports = (await db.scalars(select(Report).where(Report.location == normalized).order_by(Report.report_date.desc(), Report.id.desc()))).all()
+    for report in reports:
+        await _sync_report_status(report, db)
+    await db.commit()
     return ReportHistoryResponse(
         location=normalized,
         reports=[
@@ -1087,8 +1343,12 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
     if not report:
         return AdminReport(report_id=None, date='-', location=normalized, status='-', categories=[], total_plus=0.0, total_minus=0.0, employees=[])
 
+    await _sync_report_status(report, db)
+    await db.commit()
+
     assignments = await _load_assignments(report.location, report.cycle_version, db)
     results = await _load_results(report.id, db)
+    targets = await _load_selection_targets(normalized, report.cycle_version, db)
 
     rows_by_category_target: dict[str, dict[str, CheckResult]] = defaultdict(dict)
     for row in results:
@@ -1121,6 +1381,8 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
 
     categories: list[CategoryResult] = []
     inventory = await _get_inventory_for(normalized)
+    selected_category_ids, selected_subcategory_ids = _selection_target_maps(targets)
+    inventory = _filter_inventory_by_targets(inventory, selected_category_ids, selected_subcategory_ids)
     for raw_category in inventory['categories']:
         result_map = rows_by_category_target.get(raw_category['id'], {})
         is_completed, status = (True, StatusEnum.GREEN) if _category_is_complete(raw_category, result_map) else (False, StatusEnum.GREY)

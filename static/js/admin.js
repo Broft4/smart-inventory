@@ -1,9 +1,10 @@
 const adminState = {
     report: null,
-    selectedLocation: 'Дубна',
+    selectedLocation: '',
     selectedReportId: null,
     employeeFilter: '',
     discrepancyOnly: false,
+    completedOnly: false,
     expandedCategories: new Set(),
     viewMode: 'categories',
     searchQuery: '',
@@ -50,15 +51,24 @@ function encodeUser(user) {
 }
 
 function showModal(modalId) {
-    document.getElementById(modalId).classList.remove('hidden');
+    const modal = document.getElementById(modalId);
+    if (!modal) return;
+    modal.classList.remove('hidden');
     document.body.classList.add('modal-open');
 }
 
 function hideModal(modalId) {
-    document.getElementById(modalId).classList.add('hidden');
+    const modal = document.getElementById(modalId);
+    if (!modal) return;
+    modal.classList.add('hidden');
     if (document.querySelectorAll('.modal-overlay:not(.hidden)').length === 0) {
         document.body.classList.remove('modal-open');
     }
+}
+
+function getSelectedAdminLocation() {
+    const locationSelect = document.getElementById('admin-location-select');
+    return adminState.selectedLocation || locationSelect?.value || '';
 }
 
 function updateSearchUI() {
@@ -228,6 +238,149 @@ async function openDiagnosticsModal(location, triggerButton) {
             triggerButton.textContent = originalText;
         }
     }
+}
+
+
+
+function renderLocationOptions(locations) {
+    const locationSelect = document.getElementById('admin-location-select');
+    const userLocation = document.getElementById('user-location');
+    if (locationSelect) {
+        locationSelect.innerHTML = locations.map(location => `<option value="${escapeHtml(location.name)}">${escapeHtml(location.name)}</option>`).join('');
+        if (!adminState.selectedLocation && locations.length) adminState.selectedLocation = locations[0].name;
+        locationSelect.value = adminState.selectedLocation || '';
+    }
+    if (userLocation) {
+        userLocation.innerHTML = `<option value="">— не выбрано —</option>${locations.map(location => `<option value="${escapeHtml(location.name)}">${escapeHtml(location.name)}</option>`).join('')}`;
+    }
+}
+
+async function loadLocations() {
+    const response = await fetch('/api/locations');
+    if (!response.ok) throw new Error('Не удалось загрузить список точек');
+    const data = await response.json();
+    renderLocationOptions(data.locations || []);
+}
+
+function renderCycleTargets(data) {
+    const meta = document.getElementById('cycle-targets-meta');
+    const container = document.getElementById('cycle-targets-list');
+    if (meta) meta.textContent = `Точка: ${data.location}. Цикл №${data.cycle_version}, старт: ${data.cycle_started_at}.`;
+    if (!container) return;
+    const categories = Array.isArray(data.categories) ? data.categories : [];
+    if (!categories.length) {
+        container.innerHTML = '<div class="employee-empty-state">Категории для выбора не найдены.</div>';
+        return;
+    }
+    container.innerHTML = categories.map(category => `
+        <div class="category-card" style="margin-bottom:12px;">
+            <label class="checkbox-row">
+                <input type="checkbox" class="cycle-category-checkbox" value="${escapeHtml(category.id)}" ${category.selected ? 'checked' : ''}>
+                <strong>${escapeHtml(category.name)}</strong>
+            </label>
+            <div style="padding-left:22px; display:grid; gap:8px; margin-top:10px;">
+                ${(category.subcategories || []).map(sub => `
+                    <label class="checkbox-row">
+                        <input type="checkbox" class="cycle-subcategory-checkbox" data-category-id="${escapeHtml(category.id)}" value="${escapeHtml(sub.id)}" ${sub.selected ? 'checked' : ''} ${category.selected ? 'disabled' : ''}>
+                        ${escapeHtml(sub.name)}
+                    </label>
+                `).join('')}
+            </div>
+        </div>
+    `).join('');
+
+    document.querySelectorAll('.cycle-category-checkbox').forEach(box => {
+        box.addEventListener('change', () => {
+            const categoryId = box.value;
+            document.querySelectorAll(`.cycle-subcategory-checkbox[data-category-id="${CSS.escape(categoryId)}"]`).forEach(sub => {
+                sub.disabled = box.checked;
+                if (box.checked) sub.checked = false;
+            });
+        });
+    });
+}
+
+async function openCycleTargetsModal() {
+    const location = getSelectedAdminLocation();
+    if (!location) {
+        alert('Сначала выберите точку.');
+        return;
+    }
+    showModal('cycle-targets-modal');
+    const container = document.getElementById('cycle-targets-list');
+    if (container) container.innerHTML = '<p>Загрузка...</p>';
+    const response = await fetch(`/api/cycle-targets?location=${encodeURIComponent(location)}`);
+    if (!response.ok) throw new Error('Не удалось загрузить категории цикла');
+    const data = await response.json();
+    renderCycleTargets(data);
+}
+
+async function saveCycleTargetsSelection() {
+    const categoryIds = [...document.querySelectorAll('.cycle-category-checkbox:checked')].map(el => el.value);
+    const subcategoryIds = [...document.querySelectorAll('.cycle-subcategory-checkbox:checked')].map(el => el.value);
+    const message = document.getElementById('cycle-targets-message');
+    if (message) { message.textContent = ''; message.style.color = '#dc3545'; }
+    const response = await fetch('/api/cycle-targets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ location: adminState.selectedLocation, category_ids: categoryIds, subcategory_ids: subcategoryIds }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+        if (message) message.textContent = data.detail || data.message || 'Не удалось сохранить выбор.';
+        return;
+    }
+    if (message) { message.style.color = '#1f9d55'; message.textContent = data.message || 'Сохранено.'; }
+    await reloadReportsSection(adminState.selectedLocation);
+}
+
+async function loadStoresByToken() {
+    const token = document.getElementById('location-token').value.trim();
+    const message = document.getElementById('location-form-message');
+    const select = document.getElementById('location-store-select');
+    if (!token) { if (message) message.textContent = 'Введите токен.'; return; }
+    if (message) { message.textContent = ''; }
+    select.innerHTML = '<option value="">Загрузка...</option>';
+    const response = await fetch('/api/locations/stores', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ms_token: token }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+        if (message) message.textContent = data.detail || 'Не удалось получить список складов.';
+        select.innerHTML = '<option value="">Ошибка загрузки</option>';
+        return;
+    }
+    select.innerHTML = `<option value="">Выберите склад</option>${(data.stores || []).map(store => `<option value="${escapeHtml(store.id)}" data-store-name="${escapeHtml(store.name)}">${escapeHtml(store.name)}</option>`).join('')}`;
+}
+
+async function submitLocationForm(event) {
+    event.preventDefault();
+    const message = document.getElementById('location-form-message');
+    const select = document.getElementById('location-store-select');
+    const selected = select.options[select.selectedIndex];
+    const payload = {
+        name: document.getElementById('location-name').value.trim(),
+        ms_token: document.getElementById('location-token').value.trim(),
+        ms_store_id: select.value,
+        ms_store_name: selected?.dataset?.storeName || selected?.textContent || '',
+    };
+    const response = await fetch('/api/locations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+        if (message) message.textContent = data.detail || data.message || 'Не удалось создать точку.';
+        return;
+    }
+    if (message) { message.style.color = '#1f9d55'; message.textContent = data.message || 'Точка создана.'; }
+    await loadLocations();
+    adminState.selectedLocation = data.location?.name || adminState.selectedLocation;
+    document.getElementById('admin-location-select').value = adminState.selectedLocation;
+    await reloadReportsSection(adminState.selectedLocation);
 }
 
 function renderUsers(users) {
@@ -420,6 +573,10 @@ function getFilteredCategories(report) {
 
     if (adminState.discrepancyOnly) {
         categories = categories.filter(cat => (cat.problem_items || []).length > 0);
+    }
+
+    if (adminState.completedOnly) {
+        categories = categories.filter(cat => ['green', 'red'].includes((cat.status || '').toLowerCase()));
     }
 
     return categories;
@@ -689,7 +846,7 @@ function populateEmployeeFilter(report) {
 function updateSummary(report) {
     document.getElementById('report-location').textContent = report.location;
     document.getElementById('report-date').textContent = formatDateTime(report.date);
-    document.getElementById('report-status').textContent = report.status || '-';
+    document.getElementById('report-status').textContent = `${report.status || '-'}${report.report_type === 'final' ? ' · итоговая' : ''}`;
     document.getElementById('report-id').textContent = report.report_id ?? '-';
     document.getElementById('total-plus').textContent = `+${report.total_plus}`;
     document.getElementById('total-minus').textContent = report.total_minus;
@@ -974,6 +1131,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const locationSelect = document.getElementById('admin-location-select');
     const employeeFilter = document.getElementById('admin-employee-filter');
     const discrepancyOnly = document.getElementById('admin-discrepancy-only');
+    const completedOnly = document.getElementById('admin-completed-only');
     const searchInput = document.getElementById('admin-search-input');
 
     document.getElementById('logout-btn').addEventListener('click', logout);
@@ -981,6 +1139,20 @@ document.addEventListener('DOMContentLoaded', async () => {
         showModal('users-modal');
         await loadUsers();
     });
+    document.getElementById('open-create-location-btn')?.addEventListener('click', () => showModal('location-modal'));
+    document.getElementById('open-cycle-targets-btn')?.addEventListener('click', async () => {
+        try {
+            await openCycleTargetsModal();
+        } catch (error) {
+            console.error(error);
+            alert('Не удалось загрузить категории цикла.');
+        }
+    });
+    document.getElementById('close-location-modal-btn')?.addEventListener('click', () => hideModal('location-modal'));
+    document.getElementById('load-stores-btn')?.addEventListener('click', loadStoresByToken);
+    document.getElementById('location-form')?.addEventListener('submit', submitLocationForm);
+    document.getElementById('close-cycle-targets-modal-btn')?.addEventListener('click', () => hideModal('cycle-targets-modal'));
+    document.getElementById('save-cycle-targets-btn')?.addEventListener('click', saveCycleTargetsSelection);
     document.getElementById('close-users-modal-btn').addEventListener('click', () => hideModal('users-modal'));
     document.getElementById('open-create-user-btn').addEventListener('click', openCreateUserModal);
     document.getElementById('close-user-form-modal-btn').addEventListener('click', () => {
@@ -1006,6 +1178,25 @@ document.addEventListener('DOMContentLoaded', async () => {
         button.addEventListener('click', () => setViewMode(button.dataset.viewMode));
     });
 
+    document.addEventListener('click', async (event) => {
+        const actionButton = event.target.closest('[data-open-modal-action]');
+        if (!actionButton) return;
+
+        if (actionButton.dataset.openModalAction === 'location') {
+            showModal('location-modal');
+            return;
+        }
+
+        if (actionButton.dataset.openModalAction === 'cycle-targets') {
+            try {
+                await openCycleTargetsModal();
+            } catch (error) {
+                console.error(error);
+                alert('Не удалось загрузить категории цикла.');
+            }
+        }
+    });
+
     locationSelect.addEventListener('change', async () => {
         await reloadReportsSection(locationSelect.value);
     });
@@ -1024,6 +1215,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
+    completedOnly?.addEventListener('change', () => {
+        adminState.completedOnly = completedOnly.checked;
+        if (adminState.report) {
+            renderAllReportViews(adminState.report);
+        }
+    });
+
     searchInput?.addEventListener('input', () => {
         adminState.searchQuery = searchInput.value.trim();
         if (adminState.report) {
@@ -1033,5 +1231,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     initModalCloseBehavior();
     setViewMode('categories');
-    await reloadReportsSection(locationSelect.value);
+    await loadLocations();
+    await reloadReportsSection(document.getElementById('admin-location-select').value);
 });

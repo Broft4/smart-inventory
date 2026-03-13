@@ -840,3 +840,90 @@ body.modal-open {
 .diagnostics-table-wrap { max-height: calc(90vh - 220px); }
 .diagnostics-table td { vertical-align: top; min-width: 120px; }
 .diagnostics-table td:last-child { min-width: 320px; }
+
+.detail-filter-checkbox-bottom {
+    justify-content: flex-start;
+    align-self: end;
+    min-height: 48px;
+}
+
+@media (max-width: 768px) {
+    .header-actions {
+        flex-wrap: wrap;
+    }
+    .admin-toolbar-grid {
+        grid-template-columns: 1fr;
+    }
+    .detail-tools-grid {
+        grid-template-columns: 1fr;
+    }
+    .detail-filter-checkbox-inline {
+        width: 100%;
+    }
+}
+
+
+.employee-action-row-multi {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.employee-revision-banner {
+    margin: 12px 0 16px;
+    border-radius: 14px;
+    padding: 14px 16px;
+    border: 1px solid #dbe5f1;
+    background: #f8fafc;
+    color: #425466;
+}
+
+.employee-revision-banner.idle {
+    background: #f8fbff;
+    border-color: #d7e7ff;
+    color: #234a91;
+}
+
+.employee-revision-banner.done {
+    background: #f4fbf6;
+    border-color: #cfe8d5;
+    color: #256c3d;
+}
+
+.detail-filter-checkbox-inline {
+    justify-content: flex-start;
+    align-self: end;
+    min-height: 48px;
+    padding-top: 22px;
+}
+
+@media (max-width: 768px) {
+    .detail-filter-checkbox-inline {
+        width: 100%;
+        padding-top: 0;
+        min-height: auto;
+    }
+}
+
+@media (max-width: 640px) {
+    .employee-action-row-multi {
+        width: 100%;
+        justify-content: stretch;
+    }
+
+    .employee-action-row-multi .btn,
+    .employee-action-row-multi .finish-btn {
+        width: 100%;
+    }
+
+    .finish-block {
+        width: 100%;
+        align-items: stretch;
+    }
+
+    .finish-hint {
+        max-width: none;
+        text-align: left;
+    }
+}

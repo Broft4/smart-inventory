@@ -34,14 +34,17 @@
                     <p id="cycle-line" class="muted-text"></p>
                 </div>
                 <div class="finish-block employee-action-block">
-                    <div class="employee-action-row">
-                        <button id="finish-btn" class="finish-btn" type="button">Обновить</button>
+                    <div class="employee-action-row employee-action-row-multi">
+                        <button id="start-revision-btn" class="btn primary btn-inline" type="button">Начать ревизию</button>
+                        <button id="refresh-btn" class="btn secondary btn-inline hidden" type="button">Обновить</button>
+                        <button id="finish-revision-btn" class="finish-btn hidden" type="button">Завершить ревизию</button>
                     </div>
-                    <div id="finish-hint" class="finish-hint">Выбор категорий и подкатегорий действует 15 дней, потом обновляется.</div>
+                    <div id="finish-hint" class="finish-hint">Ревизию на текущий день можно начать вручную, а после завершения скрыть рабочие поля до следующего дня.</div>
                 </div>
             </div>
 
             <div id="inventory-summary" class="hint-box"></div>
+            <div id="employee-revision-banner" class="employee-revision-banner hidden"></div>
             <div id="inventory-status" class="inventory-status hidden" aria-live="polite"></div>
 
             <section class="employee-tools-card">

@@ -8,6 +8,17 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
 
+class LocationPoint(Base):
+    __tablename__ = 'location_points'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True, index=True, nullable=False)
+    ms_token: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    ms_store_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    ms_store_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class User(Base):
     __tablename__ = 'users'
 
@@ -50,6 +61,25 @@ class Report(Base):
     date_created: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     results: Mapped[list['CheckResult']] = relationship(back_populates='report', cascade='all, delete-orphan')
+
+
+class SelectionTarget(Base):
+    __tablename__ = 'selection_targets'
+    __table_args__ = (
+        UniqueConstraint('location', 'cycle_version', 'target_type', 'target_id', name='uq_selection_targets_per_cycle'),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    location: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    cycle_version: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    category_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    category_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    subcategory_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    subcategory_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    target_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    target_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    target_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class CategoryAssignment(Base):
