@@ -296,6 +296,13 @@
                 <button id="close-cycle-targets-modal-btn" class="btn secondary btn-inline" type="button">Закрыть</button>
             </div>
         </div>
+        <div style="display:grid; gap:8px; margin-bottom:12px;">
+            <label>
+                Дата начала цикла
+                <input type="date" id="cycle-start-date">
+            </label>
+            <p class="muted-text" style="margin:0;">Можно выбрать дату в пределах последних 15 дней. Ревизии сохраняются: текущими будут считаться те, что попадают в этот интервал.</p>
+        </div>
         <div id="cycle-targets-meta" class="muted-text" style="margin-bottom:12px;"></div>
         <div id="cycle-targets-list" class="modal-users-list"><p>Загрузка...</p></div>
         <div id="cycle-targets-message" class="message"></div>

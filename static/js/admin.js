@@ -71,6 +71,26 @@ function getSelectedAdminLocation() {
     return adminState.selectedLocation || locationSelect?.value || '';
 }
 
+function parseRuDateToIso(value) {
+    const match = String(value || '').match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+    if (!match) return '';
+    const [, day, month, year] = match;
+    return `${year}-${month}-${day}`;
+}
+
+function toggleCycleCategoryBody(categoryId) {
+    const body = document.querySelector(`[data-cycle-category-body="${CSS.escape(categoryId)}"]`);
+    const button = document.querySelector(`[data-cycle-category-toggle="${CSS.escape(categoryId)}"]`);
+    if (!body || !button) return;
+
+    const isHidden = body.style.display === 'none';
+    body.style.display = isHidden ? 'grid' : 'none';
+    button.textContent = isHidden ? '−' : '+';
+    button.setAttribute('aria-expanded', isHidden ? 'true' : 'false');
+}
+
+window.toggleCycleCategoryBody = toggleCycleCategoryBody;
+
 function updateSearchUI() {
     const input = document.getElementById('admin-search-input');
     const hint = document.getElementById('admin-search-hint');
@@ -265,7 +285,11 @@ async function loadLocations() {
 function renderCycleTargets(data) {
     const meta = document.getElementById('cycle-targets-meta');
     const container = document.getElementById('cycle-targets-list');
+    const cycleStartInput = document.getElementById('cycle-start-date');
     if (meta) meta.textContent = `Точка: ${data.location}. Цикл №${data.cycle_version}, старт: ${data.cycle_started_at}.`;
+    if (cycleStartInput) {
+        cycleStartInput.value = parseRuDateToIso(data.cycle_started_at);
+    }
     if (!container) return;
     const categories = Array.isArray(data.categories) ? data.categories : [];
     if (!categories.length) {
@@ -274,11 +298,20 @@ function renderCycleTargets(data) {
     }
     container.innerHTML = categories.map(category => `
         <div class="category-card" style="margin-bottom:12px;">
-            <label class="checkbox-row">
-                <input type="checkbox" class="cycle-category-checkbox" value="${escapeHtml(category.id)}" ${category.selected ? 'checked' : ''}>
-                <strong>${escapeHtml(category.name)}</strong>
-            </label>
-            <div style="padding-left:22px; display:grid; gap:8px; margin-top:10px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+                <label class="checkbox-row" style="margin:0; flex:1;">
+                    <input type="checkbox" class="cycle-category-checkbox" value="${escapeHtml(category.id)}" ${category.selected ? 'checked' : ''}>
+                    <strong>${escapeHtml(category.name)}</strong>
+                </label>
+                <button
+                    type="button"
+                    class="btn secondary btn-inline cycle-category-toggle"
+                    data-cycle-category-toggle="${escapeHtml(category.id)}"
+                    aria-expanded="false"
+                    title="Развернуть подкатегории"
+                >+</button>
+            </div>
+            <div data-cycle-category-body="${escapeHtml(category.id)}" style="padding-left:22px; display:none; gap:8px; margin-top:10px;">
                 ${(category.subcategories || []).map(sub => `
                     <label class="checkbox-row">
                         <input type="checkbox" class="cycle-subcategory-checkbox" data-category-id="${escapeHtml(category.id)}" value="${escapeHtml(sub.id)}" ${sub.selected ? 'checked' : ''} ${category.selected ? 'disabled' : ''}>
@@ -298,6 +331,12 @@ function renderCycleTargets(data) {
             });
         });
     });
+
+    document.querySelectorAll('.cycle-category-toggle').forEach(button => {
+        button.addEventListener('click', () => {
+            toggleCycleCategoryBody(button.dataset.cycleCategoryToggle || '');
+        });
+    });
 }
 
 async function openCycleTargetsModal() {
@@ -308,7 +347,12 @@ async function openCycleTargetsModal() {
     }
     showModal('cycle-targets-modal');
     const container = document.getElementById('cycle-targets-list');
+    const message = document.getElementById('cycle-targets-message');
     if (container) container.innerHTML = '<p>Загрузка...</p>';
+    if (message) {
+        message.textContent = '';
+        message.style.color = '#dc3545';
+    }
     const response = await fetch(`/api/cycle-targets?location=${encodeURIComponent(location)}`);
     if (!response.ok) throw new Error('Не удалось загрузить категории цикла');
     const data = await response.json();
@@ -318,19 +362,40 @@ async function openCycleTargetsModal() {
 async function saveCycleTargetsSelection() {
     const categoryIds = [...document.querySelectorAll('.cycle-category-checkbox:checked')].map(el => el.value);
     const subcategoryIds = [...document.querySelectorAll('.cycle-subcategory-checkbox:checked')].map(el => el.value);
+    const cycleStartInput = document.getElementById('cycle-start-date');
     const message = document.getElementById('cycle-targets-message');
     if (message) { message.textContent = ''; message.style.color = '#dc3545'; }
+
+    const payload = {
+        location: adminState.selectedLocation,
+        category_ids: categoryIds,
+        subcategory_ids: subcategoryIds,
+    };
+    if (cycleStartInput?.value) {
+        payload.cycle_started_at = cycleStartInput.value;
+    }
+
     const response = await fetch('/api/cycle-targets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ location: adminState.selectedLocation, category_ids: categoryIds, subcategory_ids: subcategoryIds }),
+        body: JSON.stringify(payload),
     });
     const data = await response.json();
     if (!response.ok) {
         if (message) message.textContent = data.detail || data.message || 'Не удалось сохранить выбор.';
         return;
     }
-    if (message) { message.style.color = '#1f9d55'; message.textContent = data.message || 'Сохранено.'; }
+
+    const refreshResponse = await fetch(`/api/cycle-targets?location=${encodeURIComponent(adminState.selectedLocation)}`);
+    if (refreshResponse.ok) {
+        const refreshedData = await refreshResponse.json();
+        renderCycleTargets(refreshedData);
+    }
+
+    if (message) {
+        message.style.color = '#1f9d55';
+        message.textContent = data.message || 'Сохранено.';
+    }
     await reloadReportsSection(adminState.selectedLocation);
 }
 
