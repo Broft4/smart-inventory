@@ -605,12 +605,13 @@ async def get_or_create_daily_report(location: str, cycle_version: int, db: Asyn
         await db.commit()
         return report
 
-    report = Report(location=normalized, report_date=today, cycle_version=cycle_version, status='created')
-    db.add(report)
-    await _complete_previous_reports(normalized, today, db)
-    await db.commit()
-    await db.refresh(report)
-    return report
+    report = Report(
+        location=normalized,
+        report_date=today,
+        cycle_version=cycle_version,
+        report_type='daily',
+        status='created',
+    )
 
 
 async def _load_assignments(location: str, cycle_version: int, db: AsyncSession) -> list[CategoryAssignment]:

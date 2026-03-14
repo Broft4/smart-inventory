@@ -57,6 +57,7 @@ class Report(Base):
     location: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
     report_date: Mapped[date] = mapped_column(Date, nullable=False)
     cycle_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    report_type: Mapped[str] = mapped_column(String(20), default='daily', nullable=False)
     status: Mapped[str] = mapped_column(String(20), default='in_progress', nullable=False)
     date_created: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
