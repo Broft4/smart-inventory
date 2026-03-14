@@ -163,7 +163,8 @@ function highlightMatch(text, query) {
 }
 
 function getCategoryBucket(category) {
-    if (category.assigned_to_current_user || category.has_my_subcategories || category.has_my_items) return 'mine';
+    if (categoryHasPendingMineWork(category)) return 'mine';
+    if (categoryHasCompletedMineWork(category)) return 'completed';
     if (category.can_take || category.subcategories.some(sub => sub.can_take) || categoryHasFreeDiagnosticItems(category)) return 'free';
     if (category.is_blocked_by_other || category.has_other_subcategories || category.has_other_items) return 'busy';
     return 'other';
@@ -214,7 +215,23 @@ function subcategoryHasPendingMineWork(category, subcategory) {
 }
 
 function categoryHasPendingMineWork(category) {
+    if (category.assigned_to_current_user && !category.is_completed) return true;
     return (category.subcategories || []).some(subcategory => subcategoryHasPendingMineWork(category, subcategory));
+}
+
+function subcategoryHasCompletedMineWork(category, subcategory) {
+    if (!subcategoryBelongsToCurrentUser(category, subcategory)) return false;
+
+    const hasCompletedWholeSubcategory = (subcategory.assigned_to_current_user || subcategory.taken_as_part_of_category) && subcategory.is_completed;
+    const myItems = (subcategory.items || []).filter(item => item.assigned_to_current_user);
+    const hasCompletedDiagnosticItems = myItems.length > 0 && myItems.every(item => item.is_final);
+
+    return hasCompletedWholeSubcategory || hasCompletedDiagnosticItems;
+}
+
+function categoryHasCompletedMineWork(category) {
+    if (category.assigned_to_current_user && category.is_completed) return true;
+    return (category.subcategories || []).some(subcategory => subcategoryHasCompletedMineWork(category, subcategory));
 }
 
 function captureEmployeeUiState() {
@@ -245,9 +262,13 @@ function applyEmployeeUiState() {
 function getVisibleSubcategories(category, query) {
     const q = normalizeSearch(query);
     const allSubcategories = category.subcategories || [];
-    const scopedSubcategories = employeePageState.filter === 'mine'
-        ? allSubcategories.filter(subcategory => subcategoryBelongsToCurrentUser(category, subcategory))
-        : allSubcategories;
+    let scopedSubcategories = allSubcategories;
+
+    if (employeePageState.filter === 'mine') {
+        scopedSubcategories = allSubcategories.filter(subcategory => subcategoryHasPendingMineWork(category, subcategory));
+    } else if (employeePageState.filter === 'completed') {
+        scopedSubcategories = allSubcategories.filter(subcategory => subcategoryHasCompletedMineWork(category, subcategory));
+    }
 
     if (!q) return scopedSubcategories;
 
@@ -258,7 +279,8 @@ function getVisibleSubcategories(category, query) {
 
 function categoryPassesFilter(category) {
     const mode = employeePageState.filter;
-    if (mode === 'mine') return category.assigned_to_current_user || category.has_my_subcategories || category.has_my_items;
+    if (mode === 'mine') return categoryHasPendingMineWork(category);
+    if (mode === 'completed') return categoryHasCompletedMineWork(category);
     if (mode === 'free') return category.can_take || category.subcategories.some(sub => sub.can_take) || categoryHasFreeDiagnosticItems(category);
     if (mode === 'busy') return category.is_blocked_by_other || category.has_other_subcategories || category.has_other_items;
     if (mode === 'problem') return categoryHasProblems(category);
@@ -280,7 +302,8 @@ function renderSummary() {
     const dateLine = document.getElementById('report-date-line');
     const cycleLine = document.getElementById('cycle-line');
     const allCategories = inventoryState?.categories || [];
-    const myCategories = allCategories.filter(cat => cat.assigned_to_current_user || cat.has_my_subcategories || cat.has_my_items);
+    const myCategories = allCategories.filter(categoryHasPendingMineWork);
+    const completedCategories = allCategories.filter(categoryHasCompletedMineWork);
     const freeCategories = allCategories.filter(cat => cat.can_take || cat.subcategories.some(sub => sub.can_take) || categoryHasFreeDiagnosticItems(cat));
     const occupiedCategories = allCategories.filter(cat => cat.is_blocked_by_other || cat.has_other_subcategories || cat.has_other_items);
     const problemCategories = allCategories.filter(categoryHasProblems);
@@ -291,11 +314,13 @@ function renderSummary() {
     document.getElementById('stat-my').textContent = String(myCategories.length);
     document.getElementById('stat-free').textContent = String(freeCategories.length);
     document.getElementById('stat-busy').textContent = String(occupiedCategories.length);
+    document.getElementById('stat-completed').textContent = String(completedCategories.length);
     document.getElementById('stat-problem').textContent = String(problemCategories.length);
 
     if (summary) {
         summary.innerHTML = `
             <strong>Мои выборы:</strong> ${myCategories.length}.
+            <strong>Завершённые:</strong> ${completedCategories.length}.
             <strong>Свободные:</strong> ${freeCategories.length}.
             <strong>У других сотрудников:</strong> ${occupiedCategories.length}.
             <strong>С расхождениями:</strong> ${problemCategories.length}.
@@ -584,13 +609,15 @@ function renderCategories() {
         ].join('');
     } else {
         const descriptions = {
-            mine: 'Категории, подкатегории или отдельные товары, закреплённые за вами.',
+            mine: 'Категории и подкатегории, по которым у вас ещё осталась незавершённая работа.',
+            completed: 'Подкатегории и выбранные ветки, которые вы уже полностью завершили.',
             free: 'Категории, подкатегории и товары, которые можно взять в работу.',
             busy: 'Категории, подкатегории или товары, закреплённые за другими сотрудниками.',
             problem: 'Категории, в которых уже есть расхождения.',
         };
         const titles = {
             mine: 'Мои выборы',
+            completed: 'Завершённые подкатегории',
             free: 'Свободные категории и подкатегории',
             busy: 'Занятые категории и подкатегории',
             problem: 'Категории с расхождениями',
