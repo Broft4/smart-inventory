@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import delete, func, inspect, select, text, update
+from sqlalchemy import and_, delete, func, inspect, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -507,20 +507,10 @@ def _category_is_complete(raw_category: dict[str, Any], results_by_target: dict[
     return bool(relevant_subcategories) and all(_subcategory_is_complete(sub, results_by_target)[0] for sub in relevant_subcategories)
 
 
-def _get_cycle_window_bounds(cycle_started_at: date) -> tuple[date, date]:
-    cycle_ends_at = cycle_started_at + timedelta(days=SELECTION_CYCLE_DAYS - 1)
-    return cycle_started_at, cycle_ends_at
-
-
-def _is_report_in_cycle_window(report_date: date, cycle_started_at: date) -> bool:
-    cycle_starts_at, cycle_ends_at = _get_cycle_window_bounds(cycle_started_at)
-    return cycle_starts_at <= report_date <= cycle_ends_at
-
-
 async def _get_or_create_selection_cycle(location: str, db: AsyncSession) -> SelectionCycle:
     normalized = _normalize_location(location)
     cycle = await db.scalar(select(SelectionCycle).where(SelectionCycle.location == normalized).limit(1))
-    today = get_moscow_today()
+    today = date.today()
 
     if not cycle:
         cycle = SelectionCycle(location=normalized, cycle_version=1, started_at=today)
@@ -545,7 +535,7 @@ async def reset_selection_cycle(location: str, db: AsyncSession) -> ResetSelecti
     cycle = await _get_or_create_selection_cycle(location, db)
     old_version = cycle.cycle_version
     cycle.cycle_version += 1
-    cycle.started_at = get_moscow_today()
+    cycle.started_at = date.today()
     cycle.updated_at = datetime.utcnow()
     await db.execute(delete(CategoryAssignment).where(CategoryAssignment.location == _normalize_location(location), CategoryAssignment.cycle_version == old_version))
     await db.commit()
@@ -605,7 +595,7 @@ async def get_or_create_daily_report(location: str, cycle_version: int, db: Asyn
         await db.commit()
         return report
 
-    report = Report(location=normalized, report_date=today, cycle_version=cycle_version, report_type='daily', status='created')
+    report = Report(location=normalized, report_date=today, cycle_version=cycle_version, status='created')
     db.add(report)
     await _complete_previous_reports(normalized, today, db)
     await db.commit()
@@ -757,16 +747,6 @@ async def save_cycle_targets(payload: SaveCycleTargetsRequest, db: AsyncSession)
     inventory = await _get_inventory_for(normalized)
 
     if payload.cycle_started_at:
-        today = get_moscow_today()
-        earliest_allowed = today - timedelta(days=SELECTION_CYCLE_DAYS - 1)
-        if payload.cycle_started_at > today:
-            raise HTTPException(status_code=400, detail='Дата начала цикла не может быть в будущем.')
-        if payload.cycle_started_at < earliest_allowed:
-            raise HTTPException(
-                status_code=400,
-                detail=f'Можно выбрать дату только в пределах последних {SELECTION_CYCLE_DAYS} дней.',
-            )
-
         cycle.started_at = payload.cycle_started_at
         cycle.updated_at = datetime.utcnow()
 
@@ -1019,7 +999,7 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
             )
         )
 
-    days_left = max(0, SELECTION_CYCLE_DAYS - (get_moscow_today() - cycle.started_at).days)
+    days_left = max(0, SELECTION_CYCLE_DAYS - (date.today() - cycle.started_at).days)
     return InventoryStructureResponse(
         report_id=report.id,
         location=normalized,
@@ -1320,32 +1300,24 @@ async def finish_report(report_id: int, db: AsyncSession) -> tuple[bool, str]:
 
 async def get_reports_history(location: str, db: AsyncSession) -> ReportHistoryResponse:
     normalized = _normalize_location(location)
-    cycle = await _get_or_create_selection_cycle(normalized, db)
-    reports = (await db.scalars(select(Report).where(Report.location == normalized).order_by(Report.report_date.desc(), Report.id.desc()))).all()
+    reports = (await db.scalars(select(Report).where(Report.location == normalized).order_by(Report.date_created.desc(), Report.id.desc()))).all()
     for report in reports:
         await _sync_report_status(report, db)
     await db.commit()
 
-    reports = sorted(
-        reports,
-        key=lambda report: (
-            0 if _is_report_in_cycle_window(report.report_date, cycle.started_at) else 1,
-            -report.report_date.toordinal(),
-            -report.id,
-        ),
-    )
+    report_numbers = _build_report_numbers(reports)
 
     return ReportHistoryResponse(
         location=normalized,
         reports=[
             ReportHistoryItem(
                 report_id=report.id,
+                report_number=report_numbers.get(report.id),
                 date=_format_moscow_datetime(report.date_created),
                 status=report.status,
                 label=(
-                    f"{_format_moscow_datetime(report.date_created)} — {_report_status_label(report.status)} · текущий цикл"
-                    if _is_report_in_cycle_window(report.report_date, cycle.started_at)
-                    else f"{_format_moscow_datetime(report.date_created)} — {_report_status_label(report.status)}"
+                    f"Цикл {report.cycle_version} · №{report_numbers.get(report.id, '-')} · "
+                    f"{_format_moscow_datetime(report.date_created)} — {_report_status_label(report.status)}"
                 ),
             )
             for report in reports
@@ -1365,22 +1337,47 @@ def _category_assignment_label(category_id: str, report_assignments: list[Catego
     return 'Несколько сотрудников'
 
 
+def _build_report_numbers(reports: list[Report]) -> dict[int, int]:
+    ordered = sorted(reports, key=lambda item: (item.cycle_version, item.date_created, item.id))
+    counters: dict[int, int] = defaultdict(int)
+    numbers: dict[int, int] = {}
+
+    for report in ordered:
+        cycle_key = int(report.cycle_version or 0)
+        counters[cycle_key] += 1
+        numbers[report.id] = counters[cycle_key]
+
+    return numbers
+
+
+async def _get_report_number(report: Report, db: AsyncSession) -> int:
+    result = await db.scalar(
+        select(func.count())
+        .select_from(Report)
+        .where(
+            Report.location == report.location,
+            Report.cycle_version == report.cycle_version,
+            or_(
+                Report.date_created < report.date_created,
+                and_(Report.date_created == report.date_created, Report.id <= report.id),
+            ),
+        )
+    )
+    return int(result or 0)
+
+
 async def get_admin_report(location: str, db: AsyncSession, report_id: int | None = None) -> AdminReport:
     normalized = _normalize_location(location)
-    cycle = await _get_or_create_selection_cycle(normalized, db)
     report: Report | None = None
     if report_id is not None:
         report = await db.get(Report, report_id)
         if report and report.location != normalized:
             report = None
     if report is None:
-        reports = (await db.scalars(select(Report).where(Report.location == normalized).order_by(Report.report_date.desc(), Report.id.desc()))).all()
-        report = next((row for row in reports if _is_report_in_cycle_window(row.report_date, cycle.started_at)), None)
-        if report is None and reports:
-            report = reports[0]
+        report = await db.scalar(select(Report).where(Report.location == normalized).order_by(Report.date_created.desc(), Report.id.desc()).limit(1))
 
     if not report:
-        return AdminReport(report_id=None, date='-', location=normalized, status='-', categories=[], total_plus=0.0, total_minus=0.0, employees=[])
+        return AdminReport(report_id=None, report_number=None, date='-', location=normalized, status='-', categories=[], total_plus=0.0, total_minus=0.0, employees=[])
 
     await _sync_report_status(report, db)
     await db.commit()
@@ -1460,8 +1457,11 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
     total_plus = sum(max(float(item.diff), 0.0) for items in grouped_problem_items.values() for item in items)
     total_minus = abs(sum(min(float(item.diff), 0.0) for items in grouped_problem_items.values() for item in items))
 
+    report_number = await _get_report_number(report, db)
+
     return AdminReport(
         report_id=report.id,
+        report_number=report_number,
         date=_format_moscow_datetime(report.date_created),
         location=report.location,
         status=_report_status_label(report.status),

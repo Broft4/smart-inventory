@@ -111,6 +111,45 @@ function isDiagnosticsCategoryName(name) {
     return normalizeSearch(name) === normalizeSearch('Без категории');
 }
 
+function setAdminTopStatus(message = '', type = 'loading') {
+    const card = document.getElementById('admin-report-loading-card');
+    const container = document.getElementById('admin-report-loading');
+    if (!card || !container) return;
+
+    if (!message) {
+        card.classList.add('hidden');
+        container.innerHTML = '';
+        return;
+    }
+
+    card.classList.remove('hidden');
+
+    if (type === 'error') {
+        container.innerHTML = `
+            <div class="inventory-status error">
+                <div class="inventory-status-row">
+                    <div class="inventory-status-text">${escapeHtml(message)}</div>
+                </div>
+            </div>
+        `;
+        return;
+    }
+
+    const spinner = '<span class="inventory-spinner" aria-hidden="true"></span>';
+    container.innerHTML = `
+        <div class="inventory-status loading">
+            <div class="inventory-status-row">
+                ${spinner}
+                <div class="inventory-status-text">${escapeHtml(message)}</div>
+            </div>
+        </div>
+    `;
+}
+
+function clearAdminTopStatus() {
+    setAdminTopStatus('');
+}
+
 function setAdminReportLoading(message = 'Загрузка данных ревизии...') {
     const spinner = '<span class="inventory-spinner" aria-hidden="true"></span>';
     const loadingHtml = `
@@ -126,6 +165,7 @@ function setAdminReportLoading(message = 'Загрузка данных реви
     const categoriesContainer = document.getElementById('report-categories');
     const employeeDetailsContainer = document.getElementById('report-employee-details');
 
+    setAdminTopStatus(message, 'loading');
     if (employeesContainer) employeesContainer.innerHTML = loadingHtml;
     if (categoriesContainer) categoriesContainer.innerHTML = loadingHtml;
     if (employeeDetailsContainer) employeeDetailsContainer.innerHTML = loadingHtml;
@@ -912,7 +952,7 @@ function updateSummary(report) {
     document.getElementById('report-location').textContent = report.location;
     document.getElementById('report-date').textContent = formatDateTime(report.date);
     document.getElementById('report-status').textContent = `${report.status || '-'}${report.report_type === 'final' ? ' · итоговая' : ''}`;
-    document.getElementById('report-id').textContent = report.report_id ?? '-';
+    document.getElementById('report-id').textContent = report.report_number ?? report.report_id ?? '-';
     document.getElementById('total-plus').textContent = `+${report.total_plus}`;
     document.getElementById('total-minus').textContent = report.total_minus;
     document.getElementById('report-status-chip').textContent = report.status || '-';
@@ -1107,7 +1147,7 @@ async function loadAdminReport(location, reportId) {
     const employeeDetailsContainer = document.getElementById('report-employee-details');
 
     setAdminReportLoading(reportId
-        ? `Загружаем ревизию №${reportId} для точки «${location}»...`
+        ? `Загружаем выбранную ревизию для точки «${location}»...`
         : `Загружаем последнюю ревизию для точки «${location}»...`);
 
     try {
@@ -1123,6 +1163,7 @@ async function loadAdminReport(location, reportId) {
         updateSummary(report);
         populateEmployeeFilter(report);
         renderAllReportViews(report);
+        clearAdminTopStatus();
     } catch (error) {
         console.error(error);
         employeesContainer.innerHTML = '<p class="empty-text error-text">Ошибка загрузки данных о сотрудниках.</p>';
@@ -1130,6 +1171,7 @@ async function loadAdminReport(location, reportId) {
             employeeDetailsContainer.innerHTML = '<div class="category-card"><p class="empty-text error-text">Ошибка загрузки детализации по сотрудникам.</p></div>';
         }
         categoriesContainer.innerHTML = '<div class="category-card"><p class="empty-text error-text">Ошибка загрузки данных ревизии.</p></div>';
+        setAdminTopStatus('Не удалось загрузить ревизию. Проверьте соединение и повторите попытку.', 'error');
     }
 }
 
