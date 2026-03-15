@@ -20,6 +20,39 @@ function safeText(value) {
     return value ?? '-';
 }
 
+function formatMoney(value) {
+    const number = Number(value ?? 0);
+    if (!Number.isFinite(number)) return '—';
+    return `${number.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`;
+}
+
+function formatQty(value) {
+    const number = Number(value ?? 0);
+    if (!Number.isFinite(number)) return '0';
+    return number.toLocaleString('ru-RU', { minimumFractionDigits: 0, maximumFractionDigits: 3 });
+}
+
+function renderMoneyCell(total, unit, quantity, { highlight = false } = {}) {
+    const totalHtml = total != null ? formatMoney(total) : '—';
+    const unitHtml = unit != null ? `${formatMoney(unit)}/шт` : '—';
+    const qtyHtml = quantity != null ? `× ${formatQty(quantity)}` : '';
+    return `
+        <div class="money-cell${highlight ? ' emphasis' : ''}">
+            <strong>${totalHtml}</strong>
+            <span class="muted-text">${unitHtml}${qtyHtml ? ` ${qtyHtml}` : ''}</span>
+        </div>
+    `;
+}
+
+function calculateDiscrepancyTotals(items = []) {
+    return items.reduce((acc, item) => {
+        acc.cost += Number(item.cost_total || 0);
+        acc.retail += Number(item.retail_total || 0);
+        acc.profit += Number(item.lost_profit || 0);
+        return acc;
+    }, { cost: 0, retail: 0, profit: 0 });
+}
+
 function escapeHtml(value) {
     return String(value ?? '')
         .replaceAll('&', '&amp;')
@@ -776,6 +809,11 @@ function buildEmployeeDetailGroups(report) {
                 actual: item.actual,
                 diff: item.diff,
                 checked_by: item.checked_by || owner,
+                cost_price: item.cost_price,
+                retail_price: item.retail_price,
+                cost_total: item.cost_total,
+                retail_total: item.retail_total,
+                lost_profit: item.lost_profit,
             });
         });
     });
@@ -875,10 +913,25 @@ function renderEmployeeDetails(report) {
             `).join('')}</div>`
             : '<p class="empty-text">Категории по текущим фильтрам не найдены.</p>';
 
+        const discrepancyTotals = calculateDiscrepancyTotals(employee.discrepancyItems);
         const discrepanciesHtml = employee.discrepancyItems.length
             ? `
+                <div class="employee-detail-economics">
+                    <div class="employee-detail-economics-card">
+                        <span class="summary-label">Себестоимость</span>
+                        <strong>${formatMoney(discrepancyTotals.cost)}</strong>
+                    </div>
+                    <div class="employee-detail-economics-card">
+                        <span class="summary-label">По рознице</span>
+                        <strong>${formatMoney(discrepancyTotals.retail)}</strong>
+                    </div>
+                    <div class="employee-detail-economics-card accent">
+                        <span class="summary-label">Упущенная прибыль</span>
+                        <strong>${formatMoney(discrepancyTotals.profit)}</strong>
+                    </div>
+                </div>
                 <div class="table-scroll">
-                    <table class="admin-table">
+                    <table class="admin-table discrepancy-table">
                         <thead>
                             <tr>
                                 <th>Категория</th>
@@ -886,6 +939,9 @@ function renderEmployeeDetails(report) {
                                 <th>План</th>
                                 <th>Факт</th>
                                 <th>Разница</th>
+                                <th>Себестоимость</th>
+                                <th>Розница</th>
+                                <th>Упущенная прибыль</th>
                                 <th>Сотрудник</th>
                             </tr>
                         </thead>
@@ -893,13 +949,17 @@ function renderEmployeeDetails(report) {
                             ${employee.discrepancyItems.map(item => {
                                 const diffSign = item.diff > 0 ? '+' : '';
                                 const diffClass = item.diff > 0 ? 'diff-plus' : 'diff-minus';
+                                const diffQty = Math.abs(Number(item.diff || 0));
                                 return `
                                     <tr>
                                         <td>${highlightMatch(item.category_name, adminState.searchQuery)}</td>
                                         <td>${highlightMatch(item.name, adminState.searchQuery)}</td>
-                                        <td class="num-cell">${item.expected}</td>
-                                        <td class="num-cell">${item.actual}</td>
-                                        <td class="num-cell ${diffClass}">${diffSign}${item.diff}</td>
+                                        <td class="num-cell">${formatQty(item.expected)}</td>
+                                        <td class="num-cell">${formatQty(item.actual)}</td>
+                                        <td class="num-cell ${diffClass}">${diffSign}${formatQty(item.diff)}</td>
+                                        <td>${renderMoneyCell(item.cost_total, item.cost_price, diffQty)}</td>
+                                        <td>${renderMoneyCell(item.retail_total, item.retail_price, diffQty)}</td>
+                                        <td>${renderMoneyCell(item.lost_profit, item.retail_price != null && item.cost_price != null ? Number(item.retail_price) - Number(item.cost_price) : null, diffQty, { highlight: true })}</td>
                                         <td><span class="employee-pill">${highlightMatch(item.checked_by, adminState.searchQuery)}</span></td>
                                     </tr>
                                 `;
@@ -920,6 +980,7 @@ function renderEmployeeDetails(report) {
                     <div class="employee-detail-kpis">
                         <div><span class="summary-label">Категорий</span><strong>${employee.categories.length}</strong></div>
                         <div><span class="summary-label">Расхождений</span><strong>${employee.discrepancyItems.length}</strong></div>
+                        <div><span class="summary-label">Упущенная прибыль</span><strong>${formatMoney(discrepancyTotals.profit)}</strong></div>
                     </div>
                 </div>
                 <div class="employee-detail-section">
@@ -968,6 +1029,9 @@ function updateSummary(report) {
     document.getElementById('completed-categories').textContent = `${completedCategories}/${totalCategories}`;
     document.getElementById('discrepancy-categories').textContent = String(discrepancyCategories);
     document.getElementById('discrepancy-items').textContent = String(discrepancyItems);
+    document.getElementById('total-cost').textContent = formatMoney(report.total_cost || 0);
+    document.getElementById('total-retail').textContent = formatMoney(report.total_retail || 0);
+    document.getElementById('total-lost-profit').textContent = formatMoney(report.total_lost_profit || 0);
 }
 
 function renderEmployees(report) {
@@ -1027,6 +1091,7 @@ function renderCategories(report) {
         const isDiagnostic = isDiagnosticsCategoryName(cat.name);
         const isOpen = adminState.expandedCategories.has(key) || (!isDiagnostic && index === 0);
         const problemItems = cat.problem_items || [];
+        const categoryTotals = calculateDiscrepancyTotals(problemItems);
         const summaryText = isDiagnostic
             ? 'Служебная ветка. Не входит в общую ревизию.'
             : (problemItems.length
@@ -1035,6 +1100,24 @@ function renderCategories(report) {
         const statusClass = getCategoryStatusClass(cat.status, cat);
         const statusLabel = getCategoryStatusLabel(cat.status, cat);
         const articleStatusClass = isDiagnostic ? 'status-grey' : `status-${cat.status}`;
+        const economicsStrip = problemItems.length
+            ? `
+                <div class="admin-category-economics">
+                    <div class="admin-category-economics-card">
+                        <span class="summary-label">Себестоимость</span>
+                        <strong>${formatMoney(categoryTotals.cost)}</strong>
+                    </div>
+                    <div class="admin-category-economics-card">
+                        <span class="summary-label">По рознице</span>
+                        <strong>${formatMoney(categoryTotals.retail)}</strong>
+                    </div>
+                    <div class="admin-category-economics-card accent">
+                        <span class="summary-label">Упущенная прибыль</span>
+                        <strong>${formatMoney(categoryTotals.profit)}</strong>
+                    </div>
+                </div>
+            `
+            : '';
 
         return `
             <article class="category-card admin-category-card ${articleStatusClass}">
@@ -1054,14 +1137,18 @@ function renderCategories(report) {
                 <div class="admin-category-body ${isOpen ? '' : 'hidden'}">
                     ${problemItems.length ? `
                         ${isDiagnostic ? '' : '<div class="discrepancy-banner">⚠️ Зафиксированы расхождения</div>'}
+                        ${economicsStrip}
                         <div class="table-scroll">
-                            <table class="admin-table">
+                            <table class="admin-table discrepancy-table">
                                 <thead>
                                     <tr>
                                         <th>Товар</th>
                                         <th>План</th>
                                         <th>Факт</th>
                                         <th>Разница</th>
+                                        <th>Себестоимость</th>
+                                        <th>Розница</th>
+                                        <th>Упущенная прибыль</th>
                                         <th>Сотрудник</th>
                                     </tr>
                                 </thead>
@@ -1069,12 +1156,16 @@ function renderCategories(report) {
                                     ${problemItems.map(item => {
                                         const diffSign = item.diff > 0 ? '+' : '';
                                         const diffClass = item.diff > 0 ? 'diff-plus' : 'diff-minus';
+                                        const diffQty = Math.abs(Number(item.diff || 0));
                                         return `
                                             <tr>
                                                 <td>${highlightMatch(item.name, adminState.searchQuery)}</td>
-                                                <td class="num-cell">${item.expected}</td>
-                                                <td class="num-cell">${item.actual}</td>
-                                                <td class="num-cell ${diffClass}">${diffSign}${item.diff}</td>
+                                                <td class="num-cell">${formatQty(item.expected)}</td>
+                                                <td class="num-cell">${formatQty(item.actual)}</td>
+                                                <td class="num-cell ${diffClass}">${diffSign}${formatQty(item.diff)}</td>
+                                                <td>${renderMoneyCell(item.cost_total, item.cost_price, diffQty)}</td>
+                                                <td>${renderMoneyCell(item.retail_total, item.retail_price, diffQty)}</td>
+                                                <td>${renderMoneyCell(item.lost_profit, item.retail_price != null && item.cost_price != null ? Number(item.retail_price) - Number(item.cost_price) : null, diffQty, { highlight: true })}</td>
                                                 <td><span class="employee-pill">${highlightMatch(item.checked_by || '-', adminState.searchQuery)}</span></td>
                                             </tr>
                                         `;

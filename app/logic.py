@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import httpx
 import hmac
@@ -1366,6 +1367,29 @@ async def _get_report_number(report: Report, db: AsyncSession) -> int:
     return int(result or 0)
 
 
+async def _load_discrepancy_financials(results: list[CheckResult]) -> dict[str, dict[str, float | None]]:
+    if not ms_client.enabled:
+        return {}
+
+    unique_item_ids = sorted({
+        row.target_id
+        for row in results
+        if row.target_type == 'item' and row.status == 'red' and row.target_id
+    })
+    if not unique_item_ids:
+        return {}
+
+    async def fetch(item_id: str) -> tuple[str, dict[str, float | None]]:
+        try:
+            values = await ms_client.get_item_financials(item_id)
+        except Exception:
+            return item_id, {'cost_price': None, 'retail_price': None}
+        return item_id, values
+
+    loaded = await asyncio.gather(*(fetch(item_id) for item_id in unique_item_ids))
+    return {item_id: values for item_id, values in loaded}
+
+
 async def get_admin_report(location: str, db: AsyncSession, report_id: int | None = None) -> AdminReport:
     normalized = _normalize_location(location)
     report: Report | None = None
@@ -1385,6 +1409,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
     assignments = await _load_assignments(report.location, report.cycle_version, db)
     results = await _load_results(report.id, db)
     targets = await _load_selection_targets(normalized, report.cycle_version, db)
+    discrepancy_financials = await _load_discrepancy_financials(results)
 
     rows_by_category_target: dict[str, dict[str, CheckResult]] = defaultdict(dict)
     for row in results:
@@ -1405,6 +1430,16 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
                 bucket.discrepancy_items += 1
 
         if row.target_type == 'item' and row.status == 'red':
+            financials = discrepancy_financials.get(row.target_id, {})
+            diff_qty = abs(float(row.diff or 0))
+            cost_price = financials.get('cost_price')
+            retail_price = financials.get('retail_price')
+            cost_total = round(diff_qty * cost_price, 2) if cost_price is not None else None
+            retail_total = round(diff_qty * retail_price, 2) if retail_price is not None else None
+            lost_profit = None
+            if cost_total is not None and retail_total is not None:
+                lost_profit = round(retail_total - cost_total, 2)
+
             grouped_problem_items[row.category_name].append(
                 DiscrepancyItem(
                     name=row.target_name,
@@ -1412,6 +1447,11 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
                     actual=float(row.actual_qty or 0),
                     diff=float(row.diff or 0),
                     checked_by=row.checked_by_name_snapshot,
+                    cost_price=cost_price,
+                    retail_price=retail_price,
+                    cost_total=cost_total,
+                    retail_total=retail_total,
+                    lost_profit=lost_profit,
                 )
             )
 
@@ -1456,6 +1496,9 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
 
     total_plus = sum(max(float(item.diff), 0.0) for items in grouped_problem_items.values() for item in items)
     total_minus = abs(sum(min(float(item.diff), 0.0) for items in grouped_problem_items.values() for item in items))
+    total_cost = sum(float(item.cost_total or 0.0) for items in grouped_problem_items.values() for item in items)
+    total_retail = sum(float(item.retail_total or 0.0) for items in grouped_problem_items.values() for item in items)
+    total_lost_profit = sum(float(item.lost_profit or 0.0) for items in grouped_problem_items.values() for item in items)
 
     report_number = await _get_report_number(report, db)
 
@@ -1468,6 +1511,9 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         categories=categories,
         total_plus=float(total_plus),
         total_minus=float(total_minus),
+        total_cost=float(round(total_cost, 2)),
+        total_retail=float(round(total_retail, 2)),
+        total_lost_profit=float(round(total_lost_profit, 2)),
         employees=sorted(employee_bucket.values(), key=lambda item: item.full_name.lower()),
     )
 

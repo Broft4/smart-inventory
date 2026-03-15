@@ -466,6 +466,72 @@ class MoySkladClient:
         except (TypeError, ValueError):
             return 0.0
 
+    def _normalize_money_value(self, value: Any) -> float | None:
+        if isinstance(value, dict):
+            value = value.get('value')
+        if value is None:
+            return None
+        try:
+            amount = float(value)
+        except (TypeError, ValueError):
+            return None
+        return round(amount / 100.0, 2)
+
+    def _extract_sale_price_from_source(self, source: dict[str, Any] | None) -> float | None:
+        if not source:
+            return None
+
+        sale_prices = source.get('salePrices') or []
+        if isinstance(sale_prices, dict):
+            sale_prices = sale_prices.get('rows') or []
+
+        entries: list[dict[str, Any]] = [entry for entry in sale_prices if isinstance(entry, dict)]
+        if not entries:
+            direct_price = self._normalize_money_value(source.get('salePrice') or source.get('price'))
+            return direct_price
+
+        preferred = None
+        for entry in entries:
+            price_type = str(entry.get('priceType') or '').lower()
+            if 'продаж' in price_type:
+                preferred = entry
+                break
+
+        candidate = preferred or next((entry for entry in entries if self._normalize_money_value(entry) not in {None, 0.0}), None) or entries[0]
+        return self._normalize_money_value(candidate)
+
+    def _extract_buy_price_from_source(self, source: dict[str, Any] | None) -> float | None:
+        if not source:
+            return None
+        return self._normalize_money_value(source.get('buyPrice'))
+
+    def _extract_financials_from_sources(self, *sources: dict[str, Any] | None) -> tuple[float | None, float | None]:
+        cost_price = None
+        retail_price = None
+        for source in sources:
+            if cost_price is None:
+                cost_price = self._extract_buy_price_from_source(source)
+            if retail_price is None:
+                retail_price = self._extract_sale_price_from_source(source)
+            if cost_price is not None and retail_price is not None:
+                break
+        return cost_price, retail_price
+
+    async def get_item_financials(self, assortment_id: str) -> dict[str, float | None]:
+        if not assortment_id:
+            return {'cost_price': None, 'retail_price': None}
+
+        assortment_row, _ = await self._get_assortment_row_by_meta({'id': assortment_id})
+        if not assortment_row:
+            return {'cost_price': None, 'retail_price': None}
+
+        product_row = assortment_row.get('product') if isinstance(assortment_row.get('product'), dict) else None
+        cost_price, retail_price = self._extract_financials_from_sources(assortment_row, product_row)
+        return {
+            'cost_price': cost_price,
+            'retail_price': retail_price,
+        }
+
     async def _build_inventory(self, location: str) -> dict[str, Any]:
         normalized, store_id = await self._resolve_store(location)
         store_href = f'{self.base_url}/entity/store/{store_id}'

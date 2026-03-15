@@ -208,6 +208,11 @@ class DiscrepancyItem(BaseModel):
     actual: float
     diff: float
     checked_by: Optional[str] = None
+    cost_price: Optional[float] = None
+    retail_price: Optional[float] = None
+    cost_total: Optional[float] = None
+    retail_total: Optional[float] = None
+    lost_profit: Optional[float] = None
 
 
 class CategoryResult(BaseModel):
@@ -233,6 +238,9 @@ class AdminReport(BaseModel):
     categories: list[CategoryResult]
     total_plus: float
     total_minus: float
+    total_cost: float = 0.0
+    total_retail: float = 0.0
+    total_lost_profit: float = 0.0
     employees: list[EmployeeReportSummary] = Field(default_factory=list)
 
 
