@@ -311,11 +311,17 @@ function renderSummary() {
     if (dateLine) dateLine.textContent = `Общая ревизия за ${inventoryState.report_date}`;
     if (cycleLine) cycleLine.textContent = `Текущий цикл выбора: с ${inventoryState.cycle_started_at}. Осталось дней: ${inventoryState.cycle_days_left}.`;
 
-    document.getElementById('stat-my').textContent = String(myCategories.length);
-    document.getElementById('stat-free').textContent = String(freeCategories.length);
-    document.getElementById('stat-busy').textContent = String(occupiedCategories.length);
-    document.getElementById('stat-completed').textContent = String(completedCategories.length);
-    document.getElementById('stat-problem').textContent = String(problemCategories.length);
+    const statMy = document.getElementById('stat-my');
+    const statFree = document.getElementById('stat-free');
+    const statBusy = document.getElementById('stat-busy');
+    const statCompleted = document.getElementById('stat-completed');
+    const statProblem = document.getElementById('stat-problem');
+
+    if (statMy) statMy.textContent = String(myCategories.length);
+    if (statFree) statFree.textContent = String(freeCategories.length);
+    if (statBusy) statBusy.textContent = String(occupiedCategories.length);
+    if (statCompleted) statCompleted.textContent = String(completedCategories.length);
+    if (statProblem) statProblem.textContent = String(problemCategories.length);
 
     if (summary) {
         summary.innerHTML = `
