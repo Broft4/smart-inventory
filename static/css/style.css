@@ -488,7 +488,7 @@ body.modal-open {
 .discrepancy-table th:nth-child(1),
 .discrepancy-table td:nth-child(1) { min-width: 180px; }
 .discrepancy-table th:nth-child(2),
-.discrepancy-table td:nth-child(2) { min-width: 240px; }
+.discrepancy-table td:nth-child(2) { min-width: 110px; }
 .discrepancy-table th:nth-child(6),
 .discrepancy-table td:nth-child(6),
 .discrepancy-table th:nth-child(7),
