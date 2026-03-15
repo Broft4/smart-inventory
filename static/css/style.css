@@ -927,3 +927,17 @@ body.modal-open {
         text-align: left;
     }
 }
+
+@media (max-width: 768px) {
+  .header-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    width: 100%;
+  }
+
+  .header-actions .btn {
+    width: 100%;
+    margin: 0;
+  }
+}
