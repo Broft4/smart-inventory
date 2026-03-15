@@ -927,7 +927,6 @@ body.modal-open {
         text-align: left;
     }
 }
-
 @media (max-width: 768px) {
   .header-actions {
     display: grid;
@@ -941,3 +940,4 @@ body.modal-open {
     margin: 0;
   }
 }
+
