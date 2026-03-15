@@ -1367,7 +1367,7 @@ async def _get_report_number(report: Report, db: AsyncSession) -> int:
     return int(result or 0)
 
 
-async def _load_discrepancy_financials(results: list[CheckResult]) -> dict[str, dict[str, float | None]]:
+async def _load_discrepancy_financials(location: str, results: list[CheckResult]) -> dict[str, dict[str, float | None]]:
     if not ms_client.enabled:
         return {}
 
@@ -1381,7 +1381,7 @@ async def _load_discrepancy_financials(results: list[CheckResult]) -> dict[str, 
 
     async def fetch(item_id: str) -> tuple[str, dict[str, float | None]]:
         try:
-            values = await ms_client.get_item_financials(item_id)
+            values = await ms_client.get_item_financials(location, item_id)
         except Exception:
             return item_id, {'cost_price': None, 'retail_price': None}
         return item_id, values
@@ -1409,7 +1409,8 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
     assignments = await _load_assignments(report.location, report.cycle_version, db)
     results = await _load_results(report.id, db)
     targets = await _load_selection_targets(normalized, report.cycle_version, db)
-    discrepancy_financials = await _load_discrepancy_financials(results)
+    inventory = await _get_inventory_for(normalized)
+    discrepancy_financials = await _load_discrepancy_financials(normalized, results)
 
     rows_by_category_target: dict[str, dict[str, CheckResult]] = defaultdict(dict)
     for row in results:
@@ -1456,7 +1457,6 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
             )
 
     categories: list[CategoryResult] = []
-    inventory = await _get_inventory_for(normalized)
     selected_category_ids, selected_subcategory_ids = _selection_target_maps(targets)
     inventory = _filter_inventory_by_targets(inventory, selected_category_ids, selected_subcategory_ids)
     for raw_category in inventory['categories']:

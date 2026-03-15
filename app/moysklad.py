@@ -52,6 +52,11 @@ class MoySkladClient:
         self._stores_cache: CacheEntry | None = None
         self._stores_lock = asyncio.Lock()
 
+        self._product_cache: dict[str, CacheEntry] = {}
+        self._product_locks: dict[str, asyncio.Lock] = {}
+
+        self._financials_by_location_cache: dict[str, CacheEntry] = {}
+
     @property
     def enabled(self) -> bool:
         return bool(settings.moysklad_token)
@@ -466,6 +471,69 @@ class MoySkladClient:
         except (TypeError, ValueError):
             return 0.0
 
+    async def _get_entity_by_meta(self, meta: dict[str, Any] | None, *, cache: dict[str, CacheEntry], locks: dict[str, asyncio.Lock], entity_name: str) -> tuple[dict[str, Any] | None, str | None]:
+        if not meta:
+            return None, None
+
+        href = meta.get('href')
+        entity_id = meta.get('id') or self._extract_id_from_href(href)
+        cache_key = href or entity_id
+        if not cache_key:
+            return None, None
+
+        cached = cache.get(cache_key)
+        if self._cache_alive(cached):
+            return cached.value, 'cache'
+
+        lock = locks.setdefault(cache_key, asyncio.Lock())
+        async with lock:
+            cached = cache.get(cache_key)
+            if self._cache_alive(cached):
+                return cached.value, 'cache'
+
+            try:
+                if href:
+                    row = await self.get_absolute(href)
+                    source = f'{entity_name}.meta.href'
+                elif entity_id:
+                    row = await self.get(f'entity/{entity_name}/{entity_id}')
+                    source = f'{entity_name}.id'
+                else:
+                    return None, None
+            except httpx.HTTPError:
+                logger.warning('Не удалось получить карточку %s для %s', entity_name, cache_key)
+                return None, None
+
+            cache[cache_key] = CacheEntry(
+                value=row,
+                expires_at=monotonic() + self.assortment_item_cache_ttl,
+            )
+            return row, source
+
+    async def _get_product_row_by_meta(self, product_meta: dict[str, Any] | None) -> tuple[dict[str, Any] | None, str | None]:
+        return await self._get_entity_by_meta(product_meta, cache=self._product_cache, locks=self._product_locks, entity_name='product')
+
+    def _extract_stock_retail_price(self, stock_row: dict[str, Any]) -> float | None:
+        return self._normalize_money_value(stock_row.get('salePrice'))
+
+    def _build_financial_seed(self, stock_row: dict[str, Any], item_id: str) -> dict[str, Any]:
+        assortment_meta = (stock_row.get('assortment') or {}).get('meta') or {}
+        code = (stock_row.get('code') or '').strip() or None
+        return {
+            'item_id': item_id,
+            'code': code,
+            'retail_price': self._extract_stock_retail_price(stock_row),
+            'assortment_id': assortment_meta.get('id') or self._extract_id_from_href(assortment_meta.get('href')),
+            'assortment_href': assortment_meta.get('href'),
+        }
+
+    def _get_financial_seed(self, location: str, item_id: str) -> dict[str, Any] | None:
+        normalized = location.strip().title()
+        cached = self._financials_by_location_cache.get(normalized)
+        if self._cache_alive(cached):
+            return (cached.value or {}).get(item_id)
+        return None
+
     def _normalize_money_value(self, value: Any) -> float | None:
         if isinstance(value, dict):
             value = value.get('value')
@@ -517,19 +585,39 @@ class MoySkladClient:
                 break
         return cost_price, retail_price
 
-    async def get_item_financials(self, assortment_id: str) -> dict[str, float | None]:
-        if not assortment_id:
+    async def get_item_financials(self, location: str, item_id: str) -> dict[str, float | None]:
+        if not item_id:
             return {'cost_price': None, 'retail_price': None}
 
-        assortment_row, _ = await self._get_assortment_row_by_meta({'id': assortment_id})
+        seed = self._get_financial_seed(location, item_id)
+        if seed is None:
+            try:
+                await self.get_inventory(location)
+            except Exception:
+                logger.exception('Не удалось прогреть инвентарь для финансов товара %s (%s)', item_id, location)
+            seed = self._get_financial_seed(location, item_id)
+
+        retail_price = seed.get('retail_price') if seed else None
+        assortment_meta = None
+        if seed and (seed.get('assortment_href') or seed.get('assortment_id')):
+            assortment_meta = {
+                'href': seed.get('assortment_href'),
+                'id': seed.get('assortment_id'),
+            }
+        elif item_id:
+            assortment_meta = {'id': item_id}
+
+        assortment_row, _ = await self._get_assortment_row_by_meta(assortment_meta)
         if not assortment_row:
-            return {'cost_price': None, 'retail_price': None}
+            return {'cost_price': None, 'retail_price': retail_price}
 
-        product_row = assortment_row.get('product') if isinstance(assortment_row.get('product'), dict) else None
-        cost_price, retail_price = self._extract_financials_from_sources(assortment_row, product_row)
+        product_meta = assortment_row.get('product') if isinstance(assortment_row.get('product'), dict) else None
+        product_row, _ = await self._get_product_row_by_meta((product_meta or {}).get('meta') if isinstance(product_meta, dict) else None)
+
+        cost_price, fallback_retail_price = self._extract_financials_from_sources(assortment_row, product_row, product_meta)
         return {
             'cost_price': cost_price,
-            'retail_price': retail_price,
+            'retail_price': retail_price if retail_price is not None else fallback_retail_price,
         }
 
     async def _build_inventory(self, location: str) -> dict[str, Any]:
@@ -545,10 +633,12 @@ class MoySkladClient:
         )
 
         categories_map: dict[str, dict[str, Any]] = {}
+        financial_index: dict[str, dict[str, Any]] = {}
 
         for stock_row in stock_rows:
             item_id, item_name = self._extract_item_identity(normalized, stock_row)
             expected_qty = self._extract_expected_qty(stock_row)
+            financial_index[item_id] = self._build_financial_seed(stock_row, item_id)
 
             folder_id, diagnostics = await self._extract_folder_id(stock_row, folder_by_id)
             folder_chain = self._resolve_folder_chain(folder_id, folder_by_id)
@@ -602,6 +692,11 @@ class MoySkladClient:
                 'name': category['name'],
                 'subcategories': subcategories,
             })
+
+        self._financials_by_location_cache[normalized] = CacheEntry(
+            value=financial_index,
+            expires_at=monotonic() + self.inventory_cache_ttl,
+        )
 
         logger.info('Для точки %s собрано %s категорий и %s товаров', normalized, len(categories), len(stock_rows))
         return {'location': normalized, 'categories': categories}
