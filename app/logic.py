@@ -1528,9 +1528,22 @@ async def _load_discrepancy_financials(location: str, results: list[CheckResult]
     if not unique_item_ids:
         return {}
 
+    red_rows_by_id = {
+        row.target_id: row
+        for row in results
+        if row.target_type == 'item' and row.status == 'red' and row.target_id
+    }
+
     async def fetch(item_id: str) -> tuple[str, dict[str, float | None]]:
+        row = red_rows_by_id.get(item_id)
         try:
-            values = await ms_client.get_item_financials(location, item_id, token=token, store_id=store_id)
+            values = await ms_client.get_item_financials(
+                location,
+                item_id,
+                item_name=row.target_name if row else None,
+                token=token,
+                store_id=store_id,
+            )
         except Exception:
             return item_id, {'cost_price': None, 'retail_price': None}
         return item_id, values

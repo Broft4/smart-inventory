@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 from dataclasses import dataclass
 from time import monotonic
 from typing import Any
@@ -100,6 +101,13 @@ class MoySkladClient:
         if not path:
             return None
         return path.split('/')[-1]
+
+    def _looks_like_uuid(self, value: str | None) -> bool:
+        normalized = str(value or '').strip()
+        return bool(re.fullmatch(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', normalized))
+
+    def _normalize_lookup_value(self, value: Any) -> str:
+        return str(value or '').strip().lower()
 
     def _get_retry_delay(self, response: httpx.Response, attempt: int) -> float:
         retry_after = response.headers.get('X-Lognex-Retry-TimeInterval') or response.headers.get('X-Lognex-Retry-After')
@@ -610,17 +618,23 @@ class MoySkladClient:
         return self._normalize_money_value(stock_row.get('salePrice'))
 
     def _build_financial_seed(self, stock_row: dict[str, Any], item_id: str) -> dict[str, Any]:
-        assortment_meta = (stock_row.get('assortment') or {}).get('meta') or {}
+        assortment = stock_row.get('assortment') if isinstance(stock_row.get('assortment'), dict) else {}
+        assortment_meta = assortment.get('meta') or {}
         code = (stock_row.get('code') or '').strip() or None
         article = (stock_row.get('article') or '').strip() or None
         item_name = (stock_row.get('name') or '').strip() or None
+        assortment_id = (
+            assortment.get('id')
+            or assortment_meta.get('id')
+            or self._extract_id_from_href(assortment_meta.get('href'))
+        )
         return {
             'item_id': item_id,
             'code': code,
             'article': article,
             'name': item_name,
             'retail_price': self._extract_stock_retail_price(stock_row),
-            'assortment_id': assortment_meta.get('id') or self._extract_id_from_href(assortment_meta.get('href')),
+            'assortment_id': assortment_id,
             'assortment_href': assortment_meta.get('href'),
         }
 
@@ -628,22 +642,53 @@ class MoySkladClient:
         normalized = location.strip().title()
         return f"{normalized}::{self._token_key(token)}::{store_id or 'auto'}"
 
-    def _get_financial_seed(self, location: str, item_id: str, token: str | None = None, store_id: str | None = None) -> dict[str, Any] | None:
-        token_key = self._token_key(token)
-        primary_key = self._financial_cache_key(location, token=token, store_id=store_id)
-        cached = self._financials_cache.get(primary_key)
-        if self._cache_alive(cached):
-            seed = (cached.value or {}).get(item_id)
-            if seed is not None:
-                return seed
+    def _get_financial_seed(
+        self,
+        location: str,
+        item_id: str,
+        token: str | None = None,
+        store_id: str | None = None,
+        item_name: str | None = None,
+    ) -> dict[str, Any] | None:
+        exact_key = self._financial_cache_key(location, token=token, store_id=store_id)
+        cached = self._financials_cache.get(exact_key)
 
-        prefix = f"{location.strip().title()}::{token_key}::"
+        lookup_values = {self._normalize_lookup_value(item_id)}
+        normalized_name = self._normalize_lookup_value(item_name)
+        if normalized_name:
+            lookup_values.add(normalized_name)
+
+        def find_seed(financial_index: dict[str, Any]) -> dict[str, Any] | None:
+            direct = financial_index.get(item_id)
+            if isinstance(direct, dict):
+                return direct
+
+            for seed in financial_index.values():
+                if not isinstance(seed, dict):
+                    continue
+                candidates = {
+                    self._normalize_lookup_value(seed.get('item_id')),
+                    self._normalize_lookup_value(seed.get('code')),
+                    self._normalize_lookup_value(seed.get('article')),
+                    self._normalize_lookup_value(seed.get('assortment_id')),
+                    self._normalize_lookup_value(seed.get('name')),
+                }
+                if lookup_values.intersection(candidate for candidate in candidates if candidate):
+                    return seed
+            return None
+
+        if self._cache_alive(cached):
+            found = find_seed(cached.value or {})
+            if found:
+                return found
+
+        prefix = f"{location.strip().title()}::{self._token_key(token)}::"
         for cache_key, entry in self._financials_cache.items():
-            if cache_key == primary_key or not cache_key.startswith(prefix) or not self._cache_alive(entry):
+            if not cache_key.startswith(prefix) or not self._cache_alive(entry):
                 continue
-            seed = (entry.value or {}).get(item_id)
-            if seed is not None:
-                return seed
+            found = find_seed(entry.value or {})
+            if found:
+                return found
         return None
 
     def _normalize_money_value(self, value: Any) -> float | None:
@@ -701,30 +746,43 @@ class MoySkladClient:
                 break
         return cost_price, retail_price
 
-    async def _get_item_financials_once(self, location: str, item_id: str, *, token: str | None = None, store_id: str | None = None) -> dict[str, float | None]:
-        if not item_id:
+    async def _get_item_financials_once(
+        self,
+        location: str,
+        item_id: str,
+        *,
+        item_name: str | None = None,
+        token: str | None = None,
+        store_id: str | None = None,
+    ) -> dict[str, float | None]:
+        if not item_id and not item_name:
             return {'cost_price': None, 'retail_price': None}
 
-        seed = self._get_financial_seed(location, item_id, token=token, store_id=store_id)
+        seed = self._get_financial_seed(location, item_id, token=token, store_id=store_id, item_name=item_name)
         if seed is None:
             try:
                 await self.get_inventory(location, token=token, store_id=store_id)
             except Exception:
-                logger.exception('Не удалось прогреть инвентарь для финансов товара %s (%s)', item_id, location)
-            seed = self._get_financial_seed(location, item_id, token=token, store_id=store_id)
+                logger.exception('Не удалось прогреть инвентарь для финансов товара %s (%s)', item_id or item_name, location)
+            seed = self._get_financial_seed(location, item_id, token=token, store_id=store_id, item_name=item_name)
 
         retail_price = seed.get('retail_price') if seed else None
         code = (seed or {}).get('code')
         article = (seed or {}).get('article')
-        item_name = (seed or {}).get('name')
+        item_name = (seed or {}).get('name') or item_name
+
+        normalized_item_id = str(item_id or '').strip()
+        if not code and normalized_item_id and not self._looks_like_uuid(normalized_item_id):
+            code = normalized_item_id
+
         assortment_meta = None
         if seed and (seed.get('assortment_href') or seed.get('assortment_id')):
             assortment_meta = {
                 'href': seed.get('assortment_href'),
                 'id': seed.get('assortment_id'),
             }
-        elif item_id:
-            assortment_meta = {'id': item_id}
+        elif normalized_item_id and self._looks_like_uuid(normalized_item_id):
+            assortment_meta = {'id': normalized_item_id}
 
         assortment_row, assortment_source = await self._get_assortment_row_by_meta(assortment_meta, token=token)
         product_meta = assortment_row.get('product') if isinstance((assortment_row or {}).get('product'), dict) else None
@@ -794,8 +852,16 @@ class MoySkladClient:
             'retail_price': retail_price if retail_price is not None else fallback_retail_price,
         }
 
-    async def get_item_financials(self, location: str, item_id: str, token: str | None = None, store_id: str | None = None) -> dict[str, float | None]:
-        primary = await self._get_item_financials_once(location, item_id, token=token, store_id=store_id)
+    async def get_item_financials(
+        self,
+        location: str,
+        item_id: str,
+        *,
+        item_name: str | None = None,
+        token: str | None = None,
+        store_id: str | None = None,
+    ) -> dict[str, float | None]:
+        primary = await self._get_item_financials_once(location, item_id, item_name=item_name, token=token, store_id=store_id)
         if primary.get('cost_price') is not None or primary.get('retail_price') is not None:
             return primary
 
@@ -804,10 +870,10 @@ class MoySkladClient:
         if explicit_token and default_token and explicit_token != default_token:
             logger.warning(
                 'Для товара %s (%s) цены не найдены через токен точки. Пробуем глобальный токен как fallback.',
-                item_id,
+                item_id or item_name,
                 location,
             )
-            fallback = await self._get_item_financials_once(location, item_id, token=None, store_id=store_id)
+            fallback = await self._get_item_financials_once(location, item_id, item_name=item_name, token=None, store_id=store_id)
             if fallback.get('cost_price') is not None or fallback.get('retail_price') is not None:
                 return fallback
 
@@ -832,7 +898,16 @@ class MoySkladClient:
         for stock_row in stock_rows:
             item_id, item_name = self._extract_item_identity(normalized, stock_row)
             expected_qty = self._extract_expected_qty(stock_row)
-            financial_index[item_id] = self._build_financial_seed(stock_row, item_id)
+            seed = self._build_financial_seed(stock_row, item_id)
+            for lookup_key in (
+                item_id,
+                seed.get('assortment_id'),
+                seed.get('code'),
+                seed.get('article'),
+            ):
+                normalized_lookup = str(lookup_key or '').strip()
+                if normalized_lookup and normalized_lookup not in financial_index:
+                    financial_index[normalized_lookup] = seed
 
             folder_id, diagnostics = await self._extract_folder_id(stock_row, folder_by_id, token=token)
             folder_chain = self._resolve_folder_chain(folder_id, folder_by_id)
@@ -887,16 +962,15 @@ class MoySkladClient:
                 'subcategories': subcategories,
             })
 
-        expires_at = monotonic() + self.inventory_cache_ttl
-        cache_keys = {
-            self._financial_cache_key(normalized, token=token, store_id=store_id),
-            self._financial_cache_key(normalized, token=token, store_id='auto'),
-        }
-        for cache_key in cache_keys:
-            self._financials_cache[cache_key] = CacheEntry(
-                value=financial_index,
-                expires_at=expires_at,
-            )
+        cache_value = CacheEntry(
+            value=financial_index,
+            expires_at=monotonic() + self.inventory_cache_ttl,
+        )
+        cache_key = self._financial_cache_key(normalized, token=token, store_id=store_id)
+        self._financials_cache[cache_key] = cache_value
+
+        auto_cache_key = self._financial_cache_key(normalized, token=token, store_id=None)
+        self._financials_cache[auto_cache_key] = cache_value
 
         logger.info('Для точки %s собрано %s категорий и %s товаров', normalized, len(categories), len(stock_rows))
         return {'location': normalized, 'categories': categories}

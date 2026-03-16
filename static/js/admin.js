@@ -1049,6 +1049,8 @@ function buildEmployeeDetailGroups(report) {
                 actual: item.actual,
                 diff: item.diff,
                 checked_by: item.checked_by || owner,
+                cost_price: item.cost_price,
+                retail_price: item.retail_price,
                 cost_total: item.cost_total,
                 retail_total: item.retail_total,
                 lost_profit: item.lost_profit,
