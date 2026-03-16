@@ -238,9 +238,9 @@ class AdminReport(BaseModel):
     categories: list[CategoryResult]
     total_plus: float
     total_minus: float
-    total_cost: float = 0.0
-    total_retail: float = 0.0
-    total_lost_profit: float = 0.0
+    total_cost: Optional[float] = None
+    total_retail: Optional[float] = None
+    total_lost_profit: Optional[float] = None
     employees: list[EmployeeReportSummary] = Field(default_factory=list)
 
 

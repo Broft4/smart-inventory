@@ -1729,9 +1729,14 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
 
     total_plus = sum(max(float(item.diff), 0.0) for items in grouped_problem_items.values() for item in items)
     total_minus = abs(sum(min(float(item.diff), 0.0) for items in grouped_problem_items.values() for item in items))
-    total_cost = sum(float(item.cost_total or 0.0) for items in grouped_problem_items.values() for item in items)
-    total_retail = sum(float(item.retail_total or 0.0) for items in grouped_problem_items.values() for item in items)
-    total_lost_profit = sum(float(item.lost_profit or 0.0) for items in grouped_problem_items.values() for item in items)
+
+    known_costs = [float(item.cost_total) for items in grouped_problem_items.values() for item in items if item.cost_total is not None]
+    known_retails = [float(item.retail_total) for items in grouped_problem_items.values() for item in items if item.retail_total is not None]
+    known_lost_profits = [float(item.lost_profit) for items in grouped_problem_items.values() for item in items if item.lost_profit is not None]
+
+    total_cost = round(sum(known_costs), 2) if known_costs else None
+    total_retail = round(sum(known_retails), 2) if known_retails else None
+    total_lost_profit = round(sum(known_lost_profits), 2) if known_lost_profits else None
 
     report_number = await _get_report_number(report, db)
 
@@ -1744,9 +1749,9 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         categories=categories,
         total_plus=float(total_plus),
         total_minus=float(total_minus),
-        total_cost=float(round(total_cost, 2)),
-        total_retail=float(round(total_retail, 2)),
-        total_lost_profit=float(round(total_lost_profit, 2)),
+        total_cost=total_cost,
+        total_retail=total_retail,
+        total_lost_profit=total_lost_profit,
         employees=sorted(employee_bucket.values(), key=lambda item: item.full_name.lower()),
     )
 

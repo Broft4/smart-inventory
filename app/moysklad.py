@@ -58,6 +58,9 @@ class MoySkladClient:
 
         self._financials_cache: dict[str, CacheEntry] = {}
 
+        self._assortment_search_cache: dict[str, CacheEntry] = {}
+        self._assortment_search_locks: dict[str, asyncio.Lock] = {}
+
     @property
     def enabled(self) -> bool:
         return bool(settings.moysklad_token)
@@ -400,6 +403,51 @@ class MoySkladClient:
     async def _get_product_row_by_meta(self, product_meta: dict[str, Any] | None, token: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
         return await self._get_entity_by_meta(product_meta, cache=self._product_cache, locks=self._product_locks, entity_name='product', token=token)
 
+    async def _search_assortment_row_by_code(self, code: str | None, token: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
+        normalized_code = (code or '').strip()
+        if not normalized_code:
+            return None, None
+
+        cache_key = f"{self._token_key(token)}::code:{normalized_code.lower()}"
+        cached = self._assortment_search_cache.get(cache_key)
+        if self._cache_alive(cached):
+            return cached.value, 'cache'
+
+        lock = self._assortment_search_locks.setdefault(cache_key, asyncio.Lock())
+        async with lock:
+            cached = self._assortment_search_cache.get(cache_key)
+            if self._cache_alive(cached):
+                return cached.value, 'cache'
+
+            row = None
+            try:
+                data = await self.get(
+                    'entity/assortment',
+                    params={
+                        'filter': f'code={normalized_code}',
+                        'limit': 100,
+                    },
+                    token=token,
+                )
+                rows = data.get('rows') or []
+                normalized_code_lower = normalized_code.lower()
+                for candidate in rows:
+                    candidate_code = str(candidate.get('code') or '').strip().lower()
+                    if candidate_code == normalized_code_lower:
+                        row = candidate
+                        break
+                if row is None and rows:
+                    row = rows[0]
+            except httpx.HTTPError:
+                logger.warning('Не удалось найти ассортимент по коду %s', normalized_code)
+                return None, None
+
+            self._assortment_search_cache[cache_key] = CacheEntry(
+                value=row,
+                expires_at=monotonic() + self.assortment_item_cache_ttl,
+            )
+            return row, 'assortment.code'
+
     def _resolve_folder_chain(self, folder_id: str | None, folder_by_id: dict[str, dict[str, Any]]) -> list[dict[str, str]]:
         if not folder_id:
             return []
@@ -591,7 +639,11 @@ class MoySkladClient:
 
         preferred = None
         for entry in entries:
-            price_type = str(entry.get('priceType') or '').lower()
+            price_type_raw = entry.get('priceType')
+            if isinstance(price_type_raw, dict):
+                price_type = str(price_type_raw.get('name') or '').lower()
+            else:
+                price_type = str(price_type_raw or '').lower()
             if 'продаж' in price_type:
                 preferred = entry
                 break
@@ -629,6 +681,7 @@ class MoySkladClient:
             seed = self._get_financial_seed(location, item_id, token=token, store_id=store_id)
 
         retail_price = seed.get('retail_price') if seed else None
+        code = (seed or {}).get('code')
         assortment_meta = None
         if seed and (seed.get('assortment_href') or seed.get('assortment_id')):
             assortment_meta = {
@@ -638,14 +691,49 @@ class MoySkladClient:
         elif item_id:
             assortment_meta = {'id': item_id}
 
-        assortment_row, _ = await self._get_assortment_row_by_meta(assortment_meta, token=token)
-        if not assortment_row:
-            return {'cost_price': None, 'retail_price': retail_price}
-
-        product_meta = assortment_row.get('product') if isinstance(assortment_row.get('product'), dict) else None
+        assortment_row, assortment_source = await self._get_assortment_row_by_meta(assortment_meta, token=token)
+        product_meta = assortment_row.get('product') if isinstance((assortment_row or {}).get('product'), dict) else None
         product_row, _ = await self._get_product_row_by_meta((product_meta or {}).get('meta') if isinstance(product_meta, dict) else None, token=token)
 
         cost_price, fallback_retail_price = self._extract_financials_from_sources(assortment_row, product_row, product_meta)
+
+        should_search_by_code = bool(code and (
+            assortment_row is None
+            or cost_price in {None, 0.0}
+            or fallback_retail_price in {None, 0.0}
+            or retail_price in {None, 0.0}
+        ))
+        if should_search_by_code:
+            search_row, search_source = await self._search_assortment_row_by_code(code, token=token)
+            search_product_meta = search_row.get('product') if isinstance((search_row or {}).get('product'), dict) else None
+            search_product_row, _ = await self._get_product_row_by_meta((search_product_meta or {}).get('meta') if isinstance(search_product_meta, dict) else None, token=token)
+            searched_cost_price, searched_retail_price = self._extract_financials_from_sources(search_row, search_product_row, search_product_meta)
+            if cost_price in {None, 0.0} and searched_cost_price not in {None, 0.0}:
+                cost_price = searched_cost_price
+                logger.info('Себестоимость для %s (%s) получена через поиск по коду %s', item_id, location, code)
+            if fallback_retail_price in {None, 0.0} and searched_retail_price not in {None, 0.0}:
+                fallback_retail_price = searched_retail_price
+            if assortment_row is None and search_row is not None:
+                assortment_row = search_row
+                assortment_source = search_source
+
+        if cost_price in {0.0}:
+            cost_price = None
+        if retail_price in {0.0}:
+            retail_price = None
+        if fallback_retail_price in {0.0}:
+            fallback_retail_price = None
+
+        if cost_price is None and code:
+            logger.warning(
+                'Не удалось определить себестоимость для товара %s (%s). seed=%s assortment_source=%s code=%s',
+                item_id,
+                location,
+                bool(seed),
+                assortment_source,
+                code,
+            )
+
         return {
             'cost_price': cost_price,
             'retail_price': retail_price if retail_price is not None else fallback_retail_price,

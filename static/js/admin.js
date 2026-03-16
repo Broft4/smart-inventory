@@ -24,6 +24,7 @@ function safeText(value) {
 }
 
 function formatMoney(value) {
+    if (value === null || value === undefined || value === '') return '—';
     const number = Number(value);
     if (!Number.isFinite(number)) return '—';
     return `${number.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`;
@@ -1230,9 +1231,9 @@ function updateSummary(report) {
     document.getElementById('completed-categories').textContent = `${completedCategories}/${totalCategories}`;
     document.getElementById('discrepancy-categories').textContent = String(discrepancyCategories);
     document.getElementById('discrepancy-items').textContent = String(discrepancyItems);
-    document.getElementById('total-cost').textContent = formatMoney(report.total_cost || 0);
-    document.getElementById('total-retail').textContent = formatMoney(report.total_retail || 0);
-    document.getElementById('total-lost-profit').textContent = formatMoney(report.total_lost_profit || 0);
+    document.getElementById('total-cost').textContent = formatMoney(report.total_cost);
+    document.getElementById('total-retail').textContent = formatMoney(report.total_retail);
+    document.getElementById('total-lost-profit').textContent = formatMoney(report.total_lost_profit);
 }
 
 function renderEmployees(report) {
