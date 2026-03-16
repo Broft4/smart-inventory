@@ -1214,7 +1214,7 @@ function updateSummary(report) {
     document.getElementById('report-location').textContent = report.location;
     document.getElementById('report-date').textContent = formatDateTime(report.date);
     document.getElementById('report-status').textContent = `${report.status || '-'}${report.report_type === 'final' ? ' · итоговая' : ''}`;
-    document.getElementById('report-id').textContent = report.report_id ?? '-';
+    document.getElementById('report-id').textContent = report.report_number ?? report.report_id ?? '-';
     document.getElementById('total-plus').textContent = `+${report.total_plus}`;
     document.getElementById('total-minus').textContent = report.total_minus;
     document.getElementById('report-status-chip').textContent = report.status || '-';
@@ -1407,7 +1407,9 @@ async function loadReportsList(location) {
         return null;
     }
 
-    select.innerHTML = data.reports.map(report => `<option value="${report.report_id}">${escapeHtml(report.label)}</option>`).join('');
+    select.innerHTML = data.reports.map(report => `
+        <option value="${report.report_id}" data-report-number="${report.report_number ?? ''}">${escapeHtml(report.label)}</option>
+    `).join('');
     select.disabled = false;
     return Number(select.value);
 }
@@ -1417,8 +1419,14 @@ async function loadAdminReport(location, reportId) {
     const employeesContainer = document.getElementById('report-employees');
     const employeeDetailsContainer = document.getElementById('report-employee-details');
 
+    const reportSelect = document.getElementById('admin-report-select');
+    const selectedOption = reportSelect?.selectedOptions?.[0] || null;
+    const selectedReportNumber = selectedOption && Number(selectedOption.value) === Number(reportId)
+        ? (selectedOption.dataset.reportNumber || '')
+        : '';
+
     setAdminReportLoading(reportId
-        ? `Загружаем ревизию №${reportId} для точки «${location}»...`
+        ? `Загружаем ревизию №${selectedReportNumber || reportId} для точки «${location}»...`
         : `Загружаем последнюю ревизию для точки «${location}»...`);
 
     try {
@@ -1426,8 +1434,16 @@ async function loadAdminReport(location, reportId) {
         if (reportId) params.set('report_id', String(reportId));
 
         const response = await fetch(`/api/report?${params.toString()}`);
-        if (!response.ok) throw new Error('Ошибка загрузки отчёта');
-        const report = await response.json();
+        let payload = null;
+        try {
+            payload = await response.json();
+        } catch {
+            payload = null;
+        }
+        if (!response.ok) {
+            throw new Error(payload?.detail || payload?.message || 'Ошибка загрузки отчёта');
+        }
+        const report = payload;
         adminState.report = report;
         adminState.selectedReportId = report.report_id || null;
 
@@ -1437,7 +1453,7 @@ async function loadAdminReport(location, reportId) {
         setAdminReportStatus('');
     } catch (error) {
         console.error(error);
-        setAdminReportStatus('Не удалось загрузить данные ревизии.', 'error');
+        setAdminReportStatus(error?.message || 'Не удалось загрузить данные ревизии.', 'error');
         employeesContainer.innerHTML = '<p class="empty-text error-text">Ошибка загрузки данных о сотрудниках.</p>';
         if (employeeDetailsContainer) {
             employeeDetailsContainer.innerHTML = '<div class="category-card"><p class="empty-text error-text">Ошибка загрузки детализации по сотрудникам.</p></div>';

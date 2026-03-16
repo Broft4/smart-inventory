@@ -1539,6 +1539,80 @@ async def _load_discrepancy_financials(location: str, results: list[CheckResult]
     return {item_id: values for item_id, values in loaded}
 
 
+def _build_report_inventory_fallback(results: list[CheckResult], targets: list[SelectionTarget]) -> dict[str, Any]:
+    categories_map: dict[str, dict[str, Any]] = {}
+
+    def ensure_category(category_id: str | None, category_name: str | None) -> dict[str, Any]:
+        key = category_id or category_name or '__unknown_category__'
+        category = categories_map.get(key)
+        if category is None:
+            category = {
+                'id': category_id or key,
+                'name': category_name or 'Без категории',
+                'subcategories': [],
+                '_sub_map': {},
+            }
+            categories_map[key] = category
+        return category
+
+    def ensure_subcategory(category: dict[str, Any], subcategory_id: str | None, subcategory_name: str | None) -> dict[str, Any]:
+        sub_key = subcategory_id or subcategory_name or f"{category['id']}::__default__"
+        sub_map = category['_sub_map']
+        subcategory = sub_map.get(sub_key)
+        if subcategory is None:
+            subcategory = {
+                'id': subcategory_id or sub_key,
+                'name': subcategory_name or 'Без подкатегории',
+                'items': [],
+                '_item_ids': set(),
+            }
+            sub_map[sub_key] = subcategory
+            category['subcategories'].append(subcategory)
+        return subcategory
+
+    def ensure_item(subcategory: dict[str, Any], item_id: str | None, item_name: str | None, expected_qty: float | None) -> None:
+        key = item_id or item_name or f"item-{len(subcategory['items']) + 1}"
+        if key in subcategory['_item_ids']:
+            return
+        subcategory['_item_ids'].add(key)
+        subcategory['items'].append({
+            'id': item_id or key,
+            'name': item_name or 'Без названия',
+            'expected_qty': float(expected_qty or 0),
+        })
+
+    for target in targets:
+        category = ensure_category(target.category_id, target.category_name)
+        if target.target_type == 'category':
+            continue
+        subcategory = ensure_subcategory(category, target.subcategory_id, target.subcategory_name)
+        if target.target_type == 'item':
+            ensure_item(subcategory, target.target_id, target.target_name, None)
+
+    for row in results:
+        category = ensure_category(row.category_id, row.category_name)
+        if row.target_type == 'category':
+            continue
+        subcategory = ensure_subcategory(category, row.subcategory_id, row.subcategory_name)
+        if row.target_type == 'item':
+            ensure_item(subcategory, row.target_id, row.target_name, row.expected_qty)
+
+    categories: list[dict[str, Any]] = []
+    for category in categories_map.values():
+        for subcategory in category['subcategories']:
+            subcategory.pop('_item_ids', None)
+        category.pop('_sub_map', None)
+        categories.append(category)
+
+    categories.sort(key=lambda item: str(item.get('name') or '').lower())
+    for category in categories:
+        category['subcategories'].sort(key=lambda item: str(item.get('name') or '').lower())
+        for subcategory in category['subcategories']:
+            subcategory['items'].sort(key=lambda item: str(item.get('name') or '').lower())
+
+    return {'location': None, 'categories': categories}
+
+
 async def get_admin_report(location: str, db: AsyncSession, report_id: int | None = None) -> AdminReport:
     normalized = _normalize_location(location)
     report: Report | None = None
@@ -1558,8 +1632,18 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
     assignments = await _load_assignments(report.location, report.cycle_version, db)
     results = await _load_results(report.id, db)
     targets = await _load_selection_targets(normalized, report.cycle_version, db)
-    inventory = await _get_inventory_for(normalized)
-    discrepancy_financials = await _load_discrepancy_financials(normalized, results)
+
+    try:
+        inventory = await _get_inventory_for(normalized)
+    except HTTPException:
+        inventory = _build_report_inventory_fallback(results, targets)
+    except Exception:
+        inventory = _build_report_inventory_fallback(results, targets)
+
+    try:
+        discrepancy_financials = await _load_discrepancy_financials(normalized, results)
+    except Exception:
+        discrepancy_financials = {}
 
     rows_by_category_target: dict[str, dict[str, CheckResult]] = defaultdict(dict)
     for row in results:
