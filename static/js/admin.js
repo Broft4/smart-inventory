@@ -10,6 +10,9 @@ const adminState = {
     searchQuery: '',
     diagnosticsRows: [],
     diagnosticsLocation: null,
+    locations: [],
+    locationModalTab: 'create',
+    editingLocationId: null,
 };
 
 function formatDateTime(value) {
@@ -18,39 +21,6 @@ function formatDateTime(value) {
 
 function safeText(value) {
     return value ?? '-';
-}
-
-function formatMoney(value) {
-    const number = Number(value ?? 0);
-    if (!Number.isFinite(number)) return '—';
-    return `${number.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`;
-}
-
-function formatQty(value) {
-    const number = Number(value ?? 0);
-    if (!Number.isFinite(number)) return '0';
-    return number.toLocaleString('ru-RU', { minimumFractionDigits: 0, maximumFractionDigits: 3 });
-}
-
-function renderMoneyCell(total, unit, quantity, { highlight = false } = {}) {
-    const totalHtml = total != null ? formatMoney(total) : '—';
-    const unitHtml = unit != null ? `${formatMoney(unit)}/шт` : '—';
-    const qtyHtml = quantity != null ? `× ${formatQty(quantity)}` : '';
-    return `
-        <div class="money-cell${highlight ? ' emphasis' : ''}">
-            <strong>${totalHtml}</strong>
-            <span class="muted-text">${unitHtml}${qtyHtml ? ` ${qtyHtml}` : ''}</span>
-        </div>
-    `;
-}
-
-function calculateDiscrepancyTotals(items = []) {
-    return items.reduce((acc, item) => {
-        acc.cost += Number(item.cost_total || 0);
-        acc.retail += Number(item.retail_total || 0);
-        acc.profit += Number(item.lost_profit || 0);
-        return acc;
-    }, { cost: 0, retail: 0, profit: 0 });
 }
 
 function escapeHtml(value) {
@@ -144,45 +114,6 @@ function isDiagnosticsCategoryName(name) {
     return normalizeSearch(name) === normalizeSearch('Без категории');
 }
 
-function setAdminTopStatus(message = '', type = 'loading') {
-    const card = document.getElementById('admin-report-loading-card');
-    const container = document.getElementById('admin-report-loading');
-    if (!card || !container) return;
-
-    if (!message) {
-        card.classList.add('hidden');
-        container.innerHTML = '';
-        return;
-    }
-
-    card.classList.remove('hidden');
-
-    if (type === 'error') {
-        container.innerHTML = `
-            <div class="inventory-status error">
-                <div class="inventory-status-row">
-                    <div class="inventory-status-text">${escapeHtml(message)}</div>
-                </div>
-            </div>
-        `;
-        return;
-    }
-
-    const spinner = '<span class="inventory-spinner" aria-hidden="true"></span>';
-    container.innerHTML = `
-        <div class="inventory-status loading">
-            <div class="inventory-status-row">
-                ${spinner}
-                <div class="inventory-status-text">${escapeHtml(message)}</div>
-            </div>
-        </div>
-    `;
-}
-
-function clearAdminTopStatus() {
-    setAdminTopStatus('');
-}
-
 function setAdminReportLoading(message = 'Загрузка данных ревизии...') {
     const spinner = '<span class="inventory-spinner" aria-hidden="true"></span>';
     const loadingHtml = `
@@ -198,7 +129,6 @@ function setAdminReportLoading(message = 'Загрузка данных реви
     const categoriesContainer = document.getElementById('report-categories');
     const employeeDetailsContainer = document.getElementById('report-employee-details');
 
-    setAdminTopStatus(message, 'loading');
     if (employeesContainer) employeesContainer.innerHTML = loadingHtml;
     if (categoriesContainer) categoriesContainer.innerHTML = loadingHtml;
     if (employeeDetailsContainer) employeeDetailsContainer.innerHTML = loadingHtml;
@@ -338,14 +268,134 @@ async function openDiagnosticsModal(location, triggerButton) {
 function renderLocationOptions(locations) {
     const locationSelect = document.getElementById('admin-location-select');
     const userLocation = document.getElementById('user-location');
+    adminState.locations = Array.isArray(locations) ? locations : [];
+
+    if (adminState.selectedLocation && !adminState.locations.some(location => location.name === adminState.selectedLocation)) {
+        adminState.selectedLocation = adminState.locations[0]?.name || '';
+    }
+    if (!adminState.selectedLocation && adminState.locations.length) {
+        adminState.selectedLocation = adminState.locations[0].name;
+    }
+
     if (locationSelect) {
-        locationSelect.innerHTML = locations.map(location => `<option value="${escapeHtml(location.name)}">${escapeHtml(location.name)}</option>`).join('');
-        if (!adminState.selectedLocation && locations.length) adminState.selectedLocation = locations[0].name;
+        locationSelect.innerHTML = adminState.locations.map(location => `<option value="${escapeHtml(location.name)}">${escapeHtml(location.name)}</option>`).join('');
         locationSelect.value = adminState.selectedLocation || '';
     }
     if (userLocation) {
-        userLocation.innerHTML = `<option value="">— не выбрано —</option>${locations.map(location => `<option value="${escapeHtml(location.name)}">${escapeHtml(location.name)}</option>`).join('')}`;
+        userLocation.innerHTML = `<option value="">— не выбрано —</option>${adminState.locations.map(location => `<option value="${escapeHtml(location.name)}">${escapeHtml(location.name)}</option>`).join('')}`;
     }
+
+    renderLocationManageList();
+
+    if (adminState.editingLocationId && !adminState.locations.some(location => location.id === adminState.editingLocationId)) {
+        adminState.editingLocationId = null;
+    }
+    if (!adminState.editingLocationId && adminState.locations.length) {
+        selectLocationForEdit(adminState.locations[0].id);
+    }
+}
+
+function getLocationById(locationId) {
+    return adminState.locations.find(location => Number(location.id) === Number(locationId)) || null;
+}
+
+function setMessage(messageEl, text = '', color = '#dc3545') {
+    if (!messageEl) return;
+    messageEl.style.color = color;
+    messageEl.textContent = text;
+}
+
+function switchLocationModalTab(tab) {
+    adminState.locationModalTab = tab;
+    document.querySelectorAll('[data-location-tab]').forEach(button => {
+        button.classList.toggle('active', button.dataset.locationTab === tab);
+    });
+    document.querySelectorAll('.location-tab-panel').forEach(panel => {
+        panel.classList.toggle('hidden', panel.id !== `location-tab-${tab}`);
+    });
+
+    if (tab === 'manage' && !adminState.editingLocationId && adminState.locations.length) {
+        selectLocationForEdit(adminState.locations[0].id);
+    }
+}
+
+function openLocationModal(tab = 'create') {
+    showModal('location-modal');
+    switchLocationModalTab(tab);
+    renderLocationManageList();
+}
+
+function fillStoreSelect(select, stores, selectedId = '', emptyLabel = 'Выберите склад') {
+    if (!select) return;
+    select.innerHTML = `<option value="">${escapeHtml(emptyLabel)}</option>${(stores || []).map(store => `<option value="${escapeHtml(store.id)}" data-store-name="${escapeHtml(store.name)}" ${store.id === selectedId ? 'selected' : ''}>${escapeHtml(store.name)}</option>`).join('')}`;
+}
+
+function renderLocationManageList() {
+    const container = document.getElementById('location-manage-list');
+    if (!container) return;
+
+    if (!adminState.locations.length) {
+        container.innerHTML = '<div class="employee-empty-state">Точек пока нет.</div>';
+        return;
+    }
+
+    container.innerHTML = adminState.locations.map(location => `
+        <button type="button" class="location-manage-row ${Number(location.id) === Number(adminState.editingLocationId) ? 'active' : ''}" data-location-edit-id="${location.id}">
+            <div>
+                <strong>${escapeHtml(location.name)}</strong>
+                <div class="muted-text">Склад: ${escapeHtml(location.ms_store_name || 'не выбран')}</div>
+            </div>
+            <span class="location-manage-row-arrow">→</span>
+        </button>
+    `).join('');
+}
+
+function selectLocationForEdit(locationId) {
+    const location = getLocationById(locationId);
+    const idInput = document.getElementById('location-edit-id');
+    const nameInput = document.getElementById('location-edit-name');
+    const tokenInput = document.getElementById('location-edit-token');
+    const storeSelect = document.getElementById('location-edit-store-select');
+    const message = document.getElementById('location-edit-form-message');
+
+    if (!location || !idInput || !nameInput || !tokenInput || !storeSelect) return;
+
+    adminState.editingLocationId = Number(location.id);
+    idInput.value = String(location.id);
+    nameInput.value = location.name || '';
+    tokenInput.value = '';
+    tokenInput.dataset.currentToken = location.ms_token || '';
+    fillStoreSelect(
+        storeSelect,
+        location.ms_store_id ? [{ id: location.ms_store_id, name: location.ms_store_name || 'Текущий склад' }] : [],
+        location.ms_store_id || '',
+        location.ms_store_id ? 'Текущий склад' : 'Сначала загрузите список'
+    );
+    setMessage(message, '');
+    renderLocationManageList();
+}
+
+async function loadStoresForSelect(token, select, message, selectedId = '') {
+    if (!token) {
+        setMessage(message, 'Введите токен.');
+        return;
+    }
+    setMessage(message, '');
+    if (select) select.innerHTML = '<option value="">Загрузка...</option>';
+
+    const response = await fetch('/api/locations/stores', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ms_token: token }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+        setMessage(message, data.detail || 'Не удалось получить список складов.');
+        if (select) select.innerHTML = '<option value="">Ошибка загрузки</option>';
+        return;
+    }
+
+    fillStoreSelect(select, data.stores || [], selectedId);
 }
 
 async function loadLocations() {
@@ -355,142 +405,20 @@ async function loadLocations() {
     renderLocationOptions(data.locations || []);
 }
 
-function renderCycleTargets(data) {
-    const meta = document.getElementById('cycle-targets-meta');
-    const container = document.getElementById('cycle-targets-list');
-    const cycleStartInput = document.getElementById('cycle-start-date');
-    if (meta) meta.textContent = `Точка: ${data.location}. Цикл №${data.cycle_version}, старт: ${data.cycle_started_at}.`;
-    if (cycleStartInput) {
-        cycleStartInput.value = parseRuDateToIso(data.cycle_started_at);
-    }
-    if (!container) return;
-    const categories = Array.isArray(data.categories) ? data.categories : [];
-    if (!categories.length) {
-        container.innerHTML = '<div class="employee-empty-state">Категории для выбора не найдены.</div>';
-        return;
-    }
-    container.innerHTML = categories.map(category => `
-        <div class="category-card" style="margin-bottom:12px;">
-            <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
-                <label class="checkbox-row" style="margin:0; flex:1;">
-                    <input type="checkbox" class="cycle-category-checkbox" value="${escapeHtml(category.id)}" ${category.selected ? 'checked' : ''}>
-                    <strong>${escapeHtml(category.name)}</strong>
-                </label>
-                <button
-                    type="button"
-                    class="btn secondary btn-inline cycle-category-toggle"
-                    data-cycle-category-toggle="${escapeHtml(category.id)}"
-                    aria-expanded="false"
-                    title="Развернуть подкатегории"
-                >+</button>
-            </div>
-            <div data-cycle-category-body="${escapeHtml(category.id)}" style="padding-left:22px; display:none; gap:8px; margin-top:10px;">
-                ${(category.subcategories || []).map(sub => `
-                    <label class="checkbox-row">
-                        <input type="checkbox" class="cycle-subcategory-checkbox" data-category-id="${escapeHtml(category.id)}" value="${escapeHtml(sub.id)}" ${sub.selected ? 'checked' : ''} ${category.selected ? 'disabled' : ''}>
-                        ${escapeHtml(sub.name)}
-                    </label>
-                `).join('')}
-            </div>
-        </div>
-    `).join('');
-
-    document.querySelectorAll('.cycle-category-checkbox').forEach(box => {
-        box.addEventListener('change', () => {
-            const categoryId = box.value;
-            document.querySelectorAll(`.cycle-subcategory-checkbox[data-category-id="${CSS.escape(categoryId)}"]`).forEach(sub => {
-                sub.disabled = box.checked;
-                if (box.checked) sub.checked = false;
-            });
-        });
-    });
-
-    document.querySelectorAll('.cycle-category-toggle').forEach(button => {
-        button.addEventListener('click', () => {
-            toggleCycleCategoryBody(button.dataset.cycleCategoryToggle || '');
-        });
-    });
-}
-
-async function openCycleTargetsModal() {
-    const location = getSelectedAdminLocation();
-    if (!location) {
-        alert('Сначала выберите точку.');
-        return;
-    }
-    showModal('cycle-targets-modal');
-    const container = document.getElementById('cycle-targets-list');
-    const message = document.getElementById('cycle-targets-message');
-    if (container) container.innerHTML = '<p>Загрузка...</p>';
-    if (message) {
-        message.textContent = '';
-        message.style.color = '#dc3545';
-    }
-    const response = await fetch(`/api/cycle-targets?location=${encodeURIComponent(location)}`);
-    if (!response.ok) throw new Error('Не удалось загрузить категории цикла');
-    const data = await response.json();
-    renderCycleTargets(data);
-}
-
-async function saveCycleTargetsSelection() {
-    const categoryIds = [...document.querySelectorAll('.cycle-category-checkbox:checked')].map(el => el.value);
-    const subcategoryIds = [...document.querySelectorAll('.cycle-subcategory-checkbox:checked')].map(el => el.value);
-    const cycleStartInput = document.getElementById('cycle-start-date');
-    const message = document.getElementById('cycle-targets-message');
-    if (message) { message.textContent = ''; message.style.color = '#dc3545'; }
-
-    const payload = {
-        location: adminState.selectedLocation,
-        category_ids: categoryIds,
-        subcategory_ids: subcategoryIds,
-    };
-    if (cycleStartInput?.value) {
-        payload.cycle_started_at = cycleStartInput.value;
-    }
-
-    const response = await fetch('/api/cycle-targets', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-    });
-    const data = await response.json();
-    if (!response.ok) {
-        if (message) message.textContent = data.detail || data.message || 'Не удалось сохранить выбор.';
-        return;
-    }
-
-    const refreshResponse = await fetch(`/api/cycle-targets?location=${encodeURIComponent(adminState.selectedLocation)}`);
-    if (refreshResponse.ok) {
-        const refreshedData = await refreshResponse.json();
-        renderCycleTargets(refreshedData);
-    }
-
-    if (message) {
-        message.style.color = '#1f9d55';
-        message.textContent = data.message || 'Сохранено.';
-    }
-    await reloadReportsSection(adminState.selectedLocation);
-}
-
 async function loadStoresByToken() {
     const token = document.getElementById('location-token').value.trim();
     const message = document.getElementById('location-form-message');
     const select = document.getElementById('location-store-select');
-    if (!token) { if (message) message.textContent = 'Введите токен.'; return; }
-    if (message) { message.textContent = ''; }
-    select.innerHTML = '<option value="">Загрузка...</option>';
-    const response = await fetch('/api/locations/stores', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ms_token: token }),
-    });
-    const data = await response.json();
-    if (!response.ok) {
-        if (message) message.textContent = data.detail || 'Не удалось получить список складов.';
-        select.innerHTML = '<option value="">Ошибка загрузки</option>';
-        return;
-    }
-    select.innerHTML = `<option value="">Выберите склад</option>${(data.stores || []).map(store => `<option value="${escapeHtml(store.id)}" data-store-name="${escapeHtml(store.name)}">${escapeHtml(store.name)}</option>`).join('')}`;
+    await loadStoresForSelect(token, select, message);
+}
+
+async function loadEditStoresByToken() {
+    const location = getLocationById(adminState.editingLocationId);
+    const tokenInput = document.getElementById('location-edit-token');
+    const select = document.getElementById('location-edit-store-select');
+    const message = document.getElementById('location-edit-form-message');
+    const token = tokenInput?.value.trim() || tokenInput?.dataset?.currentToken || location?.ms_token || '';
+    await loadStoresForSelect(token, select, message, location?.ms_store_id || '');
 }
 
 async function submitLocationForm(event) {
@@ -511,14 +439,96 @@ async function submitLocationForm(event) {
     });
     const data = await response.json();
     if (!response.ok) {
-        if (message) message.textContent = data.detail || data.message || 'Не удалось создать точку.';
+        setMessage(message, data.detail || data.message || 'Не удалось создать точку.');
         return;
     }
-    if (message) { message.style.color = '#1f9d55'; message.textContent = data.message || 'Точка создана.'; }
+    setMessage(message, data.message || 'Точка создана.', '#1f9d55');
+    document.getElementById('location-form')?.reset();
+    document.getElementById('location-store-select').innerHTML = '<option value="">Сначала загрузите список</option>';
     await loadLocations();
     adminState.selectedLocation = data.location?.name || adminState.selectedLocation;
-    document.getElementById('admin-location-select').value = adminState.selectedLocation;
+    const adminLocationSelect = document.getElementById('admin-location-select');
+    if (adminLocationSelect) adminLocationSelect.value = adminState.selectedLocation;
+    if (data.location?.id) {
+        selectLocationForEdit(data.location.id);
+        switchLocationModalTab('manage');
+    }
     await reloadReportsSection(adminState.selectedLocation);
+}
+
+async function submitLocationEditForm(event) {
+    event.preventDefault();
+    const location = getLocationById(adminState.editingLocationId);
+    const message = document.getElementById('location-edit-form-message');
+    const select = document.getElementById('location-edit-store-select');
+    if (!location) {
+        setMessage(message, 'Сначала выберите точку слева.');
+        return;
+    }
+
+    const tokenInput = document.getElementById('location-edit-token');
+    const selected = select.options[select.selectedIndex];
+    const resolvedToken = tokenInput?.value.trim() || tokenInput?.dataset?.currentToken || location.ms_token || '';
+    const payload = {
+        name: document.getElementById('location-edit-name').value.trim(),
+        ms_token: resolvedToken,
+        ms_store_id: select.value || location.ms_store_id || '',
+        ms_store_name: selected?.dataset?.storeName || selected?.textContent || location.ms_store_name || '',
+    };
+
+    const response = await fetch(`/api/locations/${location.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+        setMessage(message, data.detail || data.message || 'Не удалось обновить точку.');
+        return;
+    }
+
+    const oldName = location.name;
+    setMessage(message, data.message || 'Точка обновлена.', '#1f9d55');
+    await loadLocations();
+    adminState.editingLocationId = data.location?.id || location.id;
+    selectLocationForEdit(adminState.editingLocationId);
+
+    if (adminState.selectedLocation === oldName) {
+        adminState.selectedLocation = data.location?.name || adminState.selectedLocation;
+        const adminLocationSelect = document.getElementById('admin-location-select');
+        if (adminLocationSelect) adminLocationSelect.value = adminState.selectedLocation;
+        await reloadReportsSection(adminState.selectedLocation);
+    }
+}
+
+async function deleteSelectedLocation() {
+    const location = getLocationById(adminState.editingLocationId);
+    const message = document.getElementById('location-edit-form-message');
+    if (!location) {
+        setMessage(message, 'Сначала выберите точку слева.');
+        return;
+    }
+    if (!confirm(`Удалить точку «${location.name}»?`)) return;
+
+    const response = await fetch(`/api/locations/${location.id}`, { method: 'DELETE' });
+    const data = await response.json();
+    if (!response.ok) {
+        setMessage(message, data.detail || data.message || 'Не удалось удалить точку.');
+        return;
+    }
+
+    const deletedName = location.name;
+    setMessage(message, data.message || 'Точка удалена.', '#1f9d55');
+    await loadLocations();
+
+    if (adminState.selectedLocation === deletedName) {
+        adminState.selectedLocation = adminState.locations[0]?.name || '';
+        const adminLocationSelect = document.getElementById('admin-location-select');
+        if (adminLocationSelect) adminLocationSelect.value = adminState.selectedLocation || '';
+        if (adminState.selectedLocation) {
+            await reloadReportsSection(adminState.selectedLocation);
+        }
+    }
 }
 
 function renderUsers(users) {
@@ -809,11 +819,6 @@ function buildEmployeeDetailGroups(report) {
                 actual: item.actual,
                 diff: item.diff,
                 checked_by: item.checked_by || owner,
-                cost_price: item.cost_price,
-                retail_price: item.retail_price,
-                cost_total: item.cost_total,
-                retail_total: item.retail_total,
-                lost_profit: item.lost_profit,
             });
         });
     });
@@ -913,25 +918,10 @@ function renderEmployeeDetails(report) {
             `).join('')}</div>`
             : '<p class="empty-text">Категории по текущим фильтрам не найдены.</p>';
 
-        const discrepancyTotals = calculateDiscrepancyTotals(employee.discrepancyItems);
         const discrepanciesHtml = employee.discrepancyItems.length
             ? `
-                <div class="employee-detail-economics">
-                    <div class="employee-detail-economics-card">
-                        <span class="summary-label">Себестоимость</span>
-                        <strong>${formatMoney(discrepancyTotals.cost)}</strong>
-                    </div>
-                    <div class="employee-detail-economics-card">
-                        <span class="summary-label">По рознице</span>
-                        <strong>${formatMoney(discrepancyTotals.retail)}</strong>
-                    </div>
-                    <div class="employee-detail-economics-card accent">
-                        <span class="summary-label">Упущенная прибыль</span>
-                        <strong>${formatMoney(discrepancyTotals.profit)}</strong>
-                    </div>
-                </div>
                 <div class="table-scroll">
-                    <table class="admin-table discrepancy-table">
+                    <table class="admin-table">
                         <thead>
                             <tr>
                                 <th>Категория</th>
@@ -939,9 +929,6 @@ function renderEmployeeDetails(report) {
                                 <th>План</th>
                                 <th>Факт</th>
                                 <th>Разница</th>
-                                <th>Себестоимость</th>
-                                <th>Розница</th>
-                                <th>Упущенная прибыль</th>
                                 <th>Сотрудник</th>
                             </tr>
                         </thead>
@@ -949,17 +936,13 @@ function renderEmployeeDetails(report) {
                             ${employee.discrepancyItems.map(item => {
                                 const diffSign = item.diff > 0 ? '+' : '';
                                 const diffClass = item.diff > 0 ? 'diff-plus' : 'diff-minus';
-                                const diffQty = Math.abs(Number(item.diff || 0));
                                 return `
                                     <tr>
                                         <td>${highlightMatch(item.category_name, adminState.searchQuery)}</td>
                                         <td>${highlightMatch(item.name, adminState.searchQuery)}</td>
-                                        <td class="num-cell">${formatQty(item.expected)}</td>
-                                        <td class="num-cell">${formatQty(item.actual)}</td>
-                                        <td class="num-cell ${diffClass}">${diffSign}${formatQty(item.diff)}</td>
-                                        <td>${renderMoneyCell(item.cost_total, item.cost_price, diffQty)}</td>
-                                        <td>${renderMoneyCell(item.retail_total, item.retail_price, diffQty)}</td>
-                                        <td>${renderMoneyCell(item.lost_profit, item.retail_price != null && item.cost_price != null ? Number(item.retail_price) - Number(item.cost_price) : null, diffQty, { highlight: true })}</td>
+                                        <td class="num-cell">${item.expected}</td>
+                                        <td class="num-cell">${item.actual}</td>
+                                        <td class="num-cell ${diffClass}">${diffSign}${item.diff}</td>
                                         <td><span class="employee-pill">${highlightMatch(item.checked_by, adminState.searchQuery)}</span></td>
                                     </tr>
                                 `;
@@ -980,7 +963,6 @@ function renderEmployeeDetails(report) {
                     <div class="employee-detail-kpis">
                         <div><span class="summary-label">Категорий</span><strong>${employee.categories.length}</strong></div>
                         <div><span class="summary-label">Расхождений</span><strong>${employee.discrepancyItems.length}</strong></div>
-                        <div><span class="summary-label">Упущенная прибыль</span><strong>${formatMoney(discrepancyTotals.profit)}</strong></div>
                     </div>
                 </div>
                 <div class="employee-detail-section">
@@ -1013,7 +995,7 @@ function updateSummary(report) {
     document.getElementById('report-location').textContent = report.location;
     document.getElementById('report-date').textContent = formatDateTime(report.date);
     document.getElementById('report-status').textContent = `${report.status || '-'}${report.report_type === 'final' ? ' · итоговая' : ''}`;
-    document.getElementById('report-id').textContent = report.report_number ?? report.report_id ?? '-';
+    document.getElementById('report-id').textContent = report.report_id ?? '-';
     document.getElementById('total-plus').textContent = `+${report.total_plus}`;
     document.getElementById('total-minus').textContent = report.total_minus;
     document.getElementById('report-status-chip').textContent = report.status || '-';
@@ -1029,9 +1011,6 @@ function updateSummary(report) {
     document.getElementById('completed-categories').textContent = `${completedCategories}/${totalCategories}`;
     document.getElementById('discrepancy-categories').textContent = String(discrepancyCategories);
     document.getElementById('discrepancy-items').textContent = String(discrepancyItems);
-    document.getElementById('total-cost').textContent = formatMoney(report.total_cost || 0);
-    document.getElementById('total-retail').textContent = formatMoney(report.total_retail || 0);
-    document.getElementById('total-lost-profit').textContent = formatMoney(report.total_lost_profit || 0);
 }
 
 function renderEmployees(report) {
@@ -1091,7 +1070,6 @@ function renderCategories(report) {
         const isDiagnostic = isDiagnosticsCategoryName(cat.name);
         const isOpen = adminState.expandedCategories.has(key) || (!isDiagnostic && index === 0);
         const problemItems = cat.problem_items || [];
-        const categoryTotals = calculateDiscrepancyTotals(problemItems);
         const summaryText = isDiagnostic
             ? 'Служебная ветка. Не входит в общую ревизию.'
             : (problemItems.length
@@ -1100,24 +1078,6 @@ function renderCategories(report) {
         const statusClass = getCategoryStatusClass(cat.status, cat);
         const statusLabel = getCategoryStatusLabel(cat.status, cat);
         const articleStatusClass = isDiagnostic ? 'status-grey' : `status-${cat.status}`;
-        const economicsStrip = problemItems.length
-            ? `
-                <div class="admin-category-economics">
-                    <div class="admin-category-economics-card">
-                        <span class="summary-label">Себестоимость</span>
-                        <strong>${formatMoney(categoryTotals.cost)}</strong>
-                    </div>
-                    <div class="admin-category-economics-card">
-                        <span class="summary-label">По рознице</span>
-                        <strong>${formatMoney(categoryTotals.retail)}</strong>
-                    </div>
-                    <div class="admin-category-economics-card accent">
-                        <span class="summary-label">Упущенная прибыль</span>
-                        <strong>${formatMoney(categoryTotals.profit)}</strong>
-                    </div>
-                </div>
-            `
-            : '';
 
         return `
             <article class="category-card admin-category-card ${articleStatusClass}">
@@ -1137,18 +1097,14 @@ function renderCategories(report) {
                 <div class="admin-category-body ${isOpen ? '' : 'hidden'}">
                     ${problemItems.length ? `
                         ${isDiagnostic ? '' : '<div class="discrepancy-banner">⚠️ Зафиксированы расхождения</div>'}
-                        ${economicsStrip}
                         <div class="table-scroll">
-                            <table class="admin-table discrepancy-table">
+                            <table class="admin-table">
                                 <thead>
                                     <tr>
                                         <th>Товар</th>
                                         <th>План</th>
                                         <th>Факт</th>
                                         <th>Разница</th>
-                                        <th>Себестоимость</th>
-                                        <th>Розница</th>
-                                        <th>Упущенная прибыль</th>
                                         <th>Сотрудник</th>
                                     </tr>
                                 </thead>
@@ -1156,16 +1112,12 @@ function renderCategories(report) {
                                     ${problemItems.map(item => {
                                         const diffSign = item.diff > 0 ? '+' : '';
                                         const diffClass = item.diff > 0 ? 'diff-plus' : 'diff-minus';
-                                        const diffQty = Math.abs(Number(item.diff || 0));
                                         return `
                                             <tr>
                                                 <td>${highlightMatch(item.name, adminState.searchQuery)}</td>
-                                                <td class="num-cell">${formatQty(item.expected)}</td>
-                                                <td class="num-cell">${formatQty(item.actual)}</td>
-                                                <td class="num-cell ${diffClass}">${diffSign}${formatQty(item.diff)}</td>
-                                                <td>${renderMoneyCell(item.cost_total, item.cost_price, diffQty)}</td>
-                                                <td>${renderMoneyCell(item.retail_total, item.retail_price, diffQty)}</td>
-                                                <td>${renderMoneyCell(item.lost_profit, item.retail_price != null && item.cost_price != null ? Number(item.retail_price) - Number(item.cost_price) : null, diffQty, { highlight: true })}</td>
+                                                <td class="num-cell">${item.expected}</td>
+                                                <td class="num-cell">${item.actual}</td>
+                                                <td class="num-cell ${diffClass}">${diffSign}${item.diff}</td>
                                                 <td><span class="employee-pill">${highlightMatch(item.checked_by || '-', adminState.searchQuery)}</span></td>
                                             </tr>
                                         `;
@@ -1238,7 +1190,7 @@ async function loadAdminReport(location, reportId) {
     const employeeDetailsContainer = document.getElementById('report-employee-details');
 
     setAdminReportLoading(reportId
-        ? `Загружаем выбранную ревизию для точки «${location}»...`
+        ? `Загружаем ревизию №${reportId} для точки «${location}»...`
         : `Загружаем последнюю ревизию для точки «${location}»...`);
 
     try {
@@ -1254,7 +1206,6 @@ async function loadAdminReport(location, reportId) {
         updateSummary(report);
         populateEmployeeFilter(report);
         renderAllReportViews(report);
-        clearAdminTopStatus();
     } catch (error) {
         console.error(error);
         employeesContainer.innerHTML = '<p class="empty-text error-text">Ошибка загрузки данных о сотрудниках.</p>';
@@ -1262,7 +1213,6 @@ async function loadAdminReport(location, reportId) {
             employeeDetailsContainer.innerHTML = '<div class="category-card"><p class="empty-text error-text">Ошибка загрузки детализации по сотрудникам.</p></div>';
         }
         categoriesContainer.innerHTML = '<div class="category-card"><p class="empty-text error-text">Ошибка загрузки данных ревизии.</p></div>';
-        setAdminTopStatus('Не удалось загрузить ревизию. Проверьте соединение и повторите попытку.', 'error');
     }
 }
 
@@ -1293,6 +1243,15 @@ async function reloadReportsSection(location) {
     }
 
     const reportSelect = document.getElementById('admin-report-select');
+    if (!location) {
+        if (reportSelect) {
+            reportSelect.innerHTML = '<option value="">Нет точек</option>';
+            reportSelect.disabled = true;
+            reportSelect.onchange = null;
+        }
+        return;
+    }
+
     const reportId = await loadReportsList(location);
     await loadAdminReport(location, reportId);
 
@@ -1337,7 +1296,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         showModal('users-modal');
         await loadUsers();
     });
-    document.getElementById('open-create-location-btn')?.addEventListener('click', () => showModal('location-modal'));
+    document.getElementById('open-create-location-btn')?.addEventListener('click', () => openLocationModal('create'));
     document.getElementById('open-cycle-targets-btn')?.addEventListener('click', async () => {
         try {
             await openCycleTargetsModal();
@@ -1348,7 +1307,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     document.getElementById('close-location-modal-btn')?.addEventListener('click', () => hideModal('location-modal'));
     document.getElementById('load-stores-btn')?.addEventListener('click', loadStoresByToken);
+    document.getElementById('load-edit-stores-btn')?.addEventListener('click', loadEditStoresByToken);
     document.getElementById('location-form')?.addEventListener('submit', submitLocationForm);
+    document.getElementById('location-edit-form')?.addEventListener('submit', submitLocationEditForm);
+    document.getElementById('delete-location-btn')?.addEventListener('click', deleteSelectedLocation);
+    document.querySelectorAll('[data-location-tab]').forEach(button => {
+        button.addEventListener('click', () => switchLocationModalTab(button.dataset.locationTab || 'create'));
+    });
+    document.getElementById('location-manage-list')?.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-location-edit-id]');
+        if (!button) return;
+        selectLocationForEdit(Number(button.dataset.locationEditId));
+    });
     document.getElementById('close-cycle-targets-modal-btn')?.addEventListener('click', () => hideModal('cycle-targets-modal'));
     document.getElementById('save-cycle-targets-btn')?.addEventListener('click', saveCycleTargetsSelection);
     document.getElementById('close-users-modal-btn').addEventListener('click', () => hideModal('users-modal'));
@@ -1381,7 +1351,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!actionButton) return;
 
         if (actionButton.dataset.openModalAction === 'location') {
-            showModal('location-modal');
+            openLocationModal('create');
             return;
         }
 
@@ -1430,5 +1400,5 @@ document.addEventListener('DOMContentLoaded', async () => {
     initModalCloseBehavior();
     setViewMode('categories');
     await loadLocations();
-    await reloadReportsSection(document.getElementById('admin-location-select').value);
+    await reloadReportsSection(adminState.selectedLocation || document.getElementById('admin-location-select').value);
 });

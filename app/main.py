@@ -19,6 +19,8 @@ from app.database import engine, get_db
 from app.logic import (
     assign_selection_to_user,
     create_location_point,
+    update_location_point,
+    delete_location_point,
     get_cycle_targets,
     authenticate_user,
     bootstrap_schema_and_admin,
@@ -47,6 +49,8 @@ from app.schemas import (
     AssignSelectionRequest,
     CreateLocationRequest,
     CreateLocationResponse,
+    UpdateLocationRequest,
+    UpdateLocationResponse,
     AssignSelectionResponse,
     DeleteResponse,
     FinishReportRequest,
@@ -183,6 +187,16 @@ async def api_list_location_stores(payload: dict, admin: User = Depends(require_
 @app.post('/api/locations', response_model=CreateLocationResponse)
 async def api_create_location(payload: CreateLocationRequest, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     return await create_location_point(payload, db)
+
+
+@app.patch('/api/locations/{location_id}', response_model=UpdateLocationResponse)
+async def api_update_location(location_id: int, payload: UpdateLocationRequest, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    return await update_location_point(location_id, payload, db)
+
+
+@app.delete('/api/locations/{location_id}', response_model=DeleteResponse)
+async def api_delete_location(location_id: int, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    return await delete_location_point(location_id, db)
 
 
 @app.get('/api/cycle-targets', response_model=AdminCycleTargetsResponse)

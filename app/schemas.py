@@ -208,11 +208,6 @@ class DiscrepancyItem(BaseModel):
     actual: float
     diff: float
     checked_by: Optional[str] = None
-    cost_price: Optional[float] = None
-    retail_price: Optional[float] = None
-    cost_total: Optional[float] = None
-    retail_total: Optional[float] = None
-    lost_profit: Optional[float] = None
 
 
 class CategoryResult(BaseModel):
@@ -238,9 +233,6 @@ class AdminReport(BaseModel):
     categories: list[CategoryResult]
     total_plus: float
     total_minus: float
-    total_cost: float = 0.0
-    total_retail: float = 0.0
-    total_lost_profit: float = 0.0
     employees: list[EmployeeReportSummary] = Field(default_factory=list)
 
 
@@ -265,6 +257,7 @@ class StoreOption(BaseModel):
 class LocationPointModel(BaseModel):
     id: int
     name: str
+    ms_token: Optional[str] = None
     ms_store_id: Optional[str] = None
     ms_store_name: Optional[str] = None
 
@@ -283,6 +276,19 @@ class CreateLocationRequest(BaseModel):
 
 
 class CreateLocationResponse(BaseModel):
+    success: bool
+    message: str
+    location: Optional[LocationPointModel] = None
+
+
+class UpdateLocationRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=100)
+    ms_token: str = Field(..., min_length=10, max_length=255)
+    ms_store_id: str = Field(..., min_length=3, max_length=100)
+    ms_store_name: str = Field(..., min_length=1, max_length=255)
+
+
+class UpdateLocationResponse(BaseModel):
     success: bool
     message: str
     location: Optional[LocationPointModel] = None
