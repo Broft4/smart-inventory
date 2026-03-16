@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import httpx
 import hmac
@@ -13,7 +14,6 @@ from sqlalchemy import and_, delete, func, inspect, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.database import AsyncSessionLocal
 from app.moysklad import DEFAULT_CATEGORY_NAME, DEFAULT_SUBCATEGORY_NAME, ms_client
 from app.models import CategoryAssignment, CheckResult, LocationPoint, Report, SelectionCycle, SelectionTarget, User
 from app.schemas import (
@@ -26,8 +26,6 @@ from app.schemas import (
     CategoryResult,
     CreateLocationRequest,
     CreateLocationResponse,
-    UpdateLocationRequest,
-    UpdateLocationResponse,
     DeleteResponse,
     DiscrepancyItem,
     EmployeeReportSummary,
@@ -44,6 +42,8 @@ from app.schemas import (
     RoleEnum,
     StatusEnum,
     StoreListResponse,
+    UpdateLocationRequest,
+    UpdateLocationResponse,
     StoreOption,
     SubcategoryModel,
     UserActionResponse,
@@ -175,6 +175,39 @@ def _normalize_location(location: str) -> str:
     return location.strip().title()
 
 
+async def _ensure_default_location_points(db: AsyncSession) -> None:
+    existing_count = await db.scalar(select(func.count()).select_from(LocationPoint))
+    if (existing_count or 0) > 0:
+        return
+
+    candidates: list[tuple[str, str | None]] = []
+    seen: set[str] = set()
+    for name, store_id in [
+        (settings.store_dubna, settings.store_dubna_id),
+        (settings.store_dmitrov, settings.store_dmitrov_id),
+    ]:
+        normalized = _normalize_location(name or '') if name else ''
+        if normalized and normalized not in seen:
+            candidates.append((normalized, store_id))
+            seen.add(normalized)
+
+    if not candidates:
+        for name in sorted(MOCK_INVENTORY.keys()):
+            normalized = _normalize_location(name)
+            if normalized not in seen:
+                candidates.append((normalized, None))
+                seen.add(normalized)
+
+    for name, store_id in candidates:
+        db.add(LocationPoint(
+            name=name,
+            ms_token=(settings.moysklad_token or '').strip() or None,
+            ms_store_id=store_id,
+            ms_store_name=name,
+        ))
+    await db.commit()
+
+
 def _format_moscow_datetime(dt: datetime | None) -> str:
     if not dt:
         return '-'
@@ -297,18 +330,8 @@ async def prewarm_inventory_cache(location: str | None) -> None:
     if not location:
         return
     normalized = _normalize_location(location)
-    point = await _get_location_point(normalized)
-    if point and point.ms_token and point.ms_store_id:
-        await ms_client.prewarm_inventory(normalized, token=point.ms_token, store_id=point.ms_store_id)
-        return
     if ms_client.enabled:
         await ms_client.prewarm_inventory(normalized)
-
-
-async def _get_location_point(location: str) -> LocationPoint | None:
-    normalized = _normalize_location(location)
-    async with AsyncSessionLocal() as session:
-        return await session.scalar(select(LocationPoint).where(LocationPoint.name == normalized).limit(1))
 
 
 async def list_users(db: AsyncSession) -> UserListResponse:
@@ -389,16 +412,6 @@ async def delete_user(user_id: int, db: AsyncSession, current_admin_id: int | No
 
 async def _get_inventory_for(location: str) -> dict[str, Any]:
     normalized = _normalize_location(location)
-    point = await _get_location_point(normalized)
-
-    if point and point.ms_token and point.ms_store_id:
-        try:
-            return await ms_client.get_inventory(normalized, token=point.ms_token, store_id=point.ms_store_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail='Не удалось получить данные из МойСклад. Попробуйте ещё раз.') from exc
-
     if ms_client.enabled:
         try:
             return await ms_client.get_inventory(normalized)
@@ -618,7 +631,7 @@ async def get_or_create_daily_report(location: str, cycle_version: int, db: Asyn
         await db.commit()
         return report
 
-    report = Report(location=normalized, report_date=today, cycle_version=cycle_version, report_type='daily', status='created')
+    report = Report(location=normalized, report_date=today, cycle_version=cycle_version, status='created')
     db.add(report)
     await _complete_previous_reports(normalized, today, db)
     await db.commit()
@@ -682,86 +695,10 @@ def _filter_inventory_by_targets(inventory: dict[str, Any], selected_category_id
     return {'location': inventory.get('location'), 'categories': categories}
 
 
-async def _backfill_legacy_location_points(db: AsyncSession) -> None:
-    legacy_names: set[str] = set()
-
-    def _add_legacy(values: list[str | None]) -> None:
-        for value in values:
-            if value and value.strip():
-                legacy_names.add(_normalize_location(value))
-
-    _add_legacy((await db.scalars(select(User.location).where(User.location.is_not(None)))).all())
-    _add_legacy((await db.scalars(select(Report.location))).all())
-    _add_legacy((await db.scalars(select(SelectionCycle.location))).all())
-    _add_legacy((await db.scalars(select(SelectionTarget.location))).all())
-    _add_legacy((await db.scalars(select(CategoryAssignment.location))).all())
-    legacy_names.update(sorted(MOCK_INVENTORY.keys()))
-
-    configured_defaults: list[tuple[str, str | None, str | None, str | None]] = []
-    if settings.store_dubna:
-        configured_defaults.append((
-            _normalize_location(settings.store_dubna),
-            settings.moysklad_token or None,
-            settings.store_dubna_id or None,
-            settings.store_dubna or None,
-        ))
-    if settings.store_dmitrov:
-        configured_defaults.append((
-            _normalize_location(settings.store_dmitrov),
-            settings.moysklad_token or None,
-            settings.store_dmitrov_id or None,
-            settings.store_dmitrov or None,
-        ))
-
-    for name, _token, _store_id, _store_name in configured_defaults:
-        if name:
-            legacy_names.add(name)
-
-    if not legacy_names:
-        return
-
-    existing_rows = (await db.scalars(select(LocationPoint).where(LocationPoint.name.in_(legacy_names)))).all()
-    existing_by_name = {row.name: row for row in existing_rows}
-    changed = False
-
-    defaults_by_name = {name: (token, store_id, store_name) for name, token, store_id, store_name in configured_defaults}
-
-    for name in sorted(legacy_names):
-        row = existing_by_name.get(name)
-        default_token, default_store_id, default_store_name = defaults_by_name.get(name, (None, None, name))
-        if row is None:
-            db.add(LocationPoint(
-                name=name,
-                ms_token=default_token,
-                ms_store_id=default_store_id,
-                ms_store_name=default_store_name or name,
-            ))
-            changed = True
-            continue
-
-        row_updated = False
-        if not row.ms_token and default_token:
-            row.ms_token = default_token
-            row_updated = True
-        if not row.ms_store_id and default_store_id:
-            row.ms_store_id = default_store_id
-            row_updated = True
-        if (not row.ms_store_name) and (default_store_name or name):
-            row.ms_store_name = default_store_name or name
-            row_updated = True
-        changed = changed or row_updated
-
-    if changed:
-        await db.commit()
-
-
 async def list_locations(db: AsyncSession) -> LocationListResponse:
-    await _backfill_legacy_location_points(db)
+    await _ensure_default_location_points(db)
     rows = (await db.scalars(select(LocationPoint).order_by(LocationPoint.name.asc()))).all()
     locations = [LocationPointModel.model_validate(row) for row in rows]
-    if not locations:
-        fallback = sorted(MOCK_INVENTORY.keys())
-        locations = [LocationPointModel(id=idx + 1, name=name, ms_store_name=name) for idx, name in enumerate(fallback)]
     return LocationListResponse(locations=locations)
 
 
@@ -799,6 +736,7 @@ async def create_location_point(payload: CreateLocationRequest, db: AsyncSession
     db.add(point)
     await db.commit()
     await db.refresh(point)
+    ms_client.invalidate_inventory(point.name)
     return CreateLocationResponse(success=True, message='Точка создана.', location=LocationPointModel.model_validate(point))
 
 
@@ -1473,7 +1411,10 @@ async def get_reports_history(location: str, db: AsyncSession) -> ReportHistoryR
                 report_number=report_numbers.get(report.id),
                 date=_format_moscow_datetime(report.date_created),
                 status=report.status,
-                label=f"№{report_numbers.get(report.id, '-')} · {_format_moscow_datetime(report.date_created)} — {_report_status_label(report.status)}",
+                label=(
+                    f"Цикл {report.cycle_version} · №{report_numbers.get(report.id, '-')} · "
+                    f"{_format_moscow_datetime(report.date_created)} — {_report_status_label(report.status)}"
+                ),
             )
             for report in reports
         ],
@@ -1493,8 +1434,16 @@ def _category_assignment_label(category_id: str, report_assignments: list[Catego
 
 
 def _build_report_numbers(reports: list[Report]) -> dict[int, int]:
-    ordered = sorted(reports, key=lambda item: (item.date_created, item.id))
-    return {report.id: index + 1 for index, report in enumerate(ordered)}
+    ordered = sorted(reports, key=lambda item: (item.cycle_version, item.date_created, item.id))
+    counters: dict[int, int] = defaultdict(int)
+    numbers: dict[int, int] = {}
+
+    for report in ordered:
+        cycle_key = int(report.cycle_version or 0)
+        counters[cycle_key] += 1
+        numbers[report.id] = counters[cycle_key]
+
+    return numbers
 
 
 async def _get_report_number(report: Report, db: AsyncSession) -> int:
@@ -1503,6 +1452,7 @@ async def _get_report_number(report: Report, db: AsyncSession) -> int:
         .select_from(Report)
         .where(
             Report.location == report.location,
+            Report.cycle_version == report.cycle_version,
             or_(
                 Report.date_created < report.date_created,
                 and_(Report.date_created == report.date_created, Report.id <= report.id),
@@ -1513,11 +1463,7 @@ async def _get_report_number(report: Report, db: AsyncSession) -> int:
 
 
 async def _load_discrepancy_financials(location: str, results: list[CheckResult]) -> dict[str, dict[str, float | None]]:
-    point = await _get_location_point(location)
-    token = point.ms_token if point and point.ms_token and point.ms_store_id else None
-    store_id = point.ms_store_id if point and point.ms_token and point.ms_store_id else None
-
-    if not token and not ms_client.enabled:
+    if not ms_client.enabled:
         return {}
 
     unique_item_ids = sorted({
@@ -1528,102 +1474,15 @@ async def _load_discrepancy_financials(location: str, results: list[CheckResult]
     if not unique_item_ids:
         return {}
 
-    red_rows_by_id = {
-        row.target_id: row
-        for row in results
-        if row.target_type == 'item' and row.status == 'red' and row.target_id
-    }
-
     async def fetch(item_id: str) -> tuple[str, dict[str, float | None]]:
-        row = red_rows_by_id.get(item_id)
         try:
-            values = await ms_client.get_item_financials(
-                location,
-                item_id,
-                item_name=row.target_name if row else None,
-                token=token,
-                store_id=store_id,
-            )
+            values = await ms_client.get_item_financials(location, item_id)
         except Exception:
             return item_id, {'cost_price': None, 'retail_price': None}
         return item_id, values
 
     loaded = await asyncio.gather(*(fetch(item_id) for item_id in unique_item_ids))
     return {item_id: values for item_id, values in loaded}
-
-
-def _build_report_inventory_fallback(results: list[CheckResult], targets: list[SelectionTarget]) -> dict[str, Any]:
-    categories_map: dict[str, dict[str, Any]] = {}
-
-    def ensure_category(category_id: str | None, category_name: str | None) -> dict[str, Any]:
-        key = category_id or category_name or '__unknown_category__'
-        category = categories_map.get(key)
-        if category is None:
-            category = {
-                'id': category_id or key,
-                'name': category_name or 'Без категории',
-                'subcategories': [],
-                '_sub_map': {},
-            }
-            categories_map[key] = category
-        return category
-
-    def ensure_subcategory(category: dict[str, Any], subcategory_id: str | None, subcategory_name: str | None) -> dict[str, Any]:
-        sub_key = subcategory_id or subcategory_name or f"{category['id']}::__default__"
-        sub_map = category['_sub_map']
-        subcategory = sub_map.get(sub_key)
-        if subcategory is None:
-            subcategory = {
-                'id': subcategory_id or sub_key,
-                'name': subcategory_name or 'Без подкатегории',
-                'items': [],
-                '_item_ids': set(),
-            }
-            sub_map[sub_key] = subcategory
-            category['subcategories'].append(subcategory)
-        return subcategory
-
-    def ensure_item(subcategory: dict[str, Any], item_id: str | None, item_name: str | None, expected_qty: float | None) -> None:
-        key = item_id or item_name or f"item-{len(subcategory['items']) + 1}"
-        if key in subcategory['_item_ids']:
-            return
-        subcategory['_item_ids'].add(key)
-        subcategory['items'].append({
-            'id': item_id or key,
-            'name': item_name or 'Без названия',
-            'expected_qty': float(expected_qty or 0),
-        })
-
-    for target in targets:
-        category = ensure_category(target.category_id, target.category_name)
-        if target.target_type == 'category':
-            continue
-        subcategory = ensure_subcategory(category, target.subcategory_id, target.subcategory_name)
-        if target.target_type == 'item':
-            ensure_item(subcategory, target.target_id, target.target_name, None)
-
-    for row in results:
-        category = ensure_category(row.category_id, row.category_name)
-        if row.target_type == 'category':
-            continue
-        subcategory = ensure_subcategory(category, row.subcategory_id, row.subcategory_name)
-        if row.target_type == 'item':
-            ensure_item(subcategory, row.target_id, row.target_name, row.expected_qty)
-
-    categories: list[dict[str, Any]] = []
-    for category in categories_map.values():
-        for subcategory in category['subcategories']:
-            subcategory.pop('_item_ids', None)
-        category.pop('_sub_map', None)
-        categories.append(category)
-
-    categories.sort(key=lambda item: str(item.get('name') or '').lower())
-    for category in categories:
-        category['subcategories'].sort(key=lambda item: str(item.get('name') or '').lower())
-        for subcategory in category['subcategories']:
-            subcategory['items'].sort(key=lambda item: str(item.get('name') or '').lower())
-
-    return {'location': None, 'categories': categories}
 
 
 async def get_admin_report(location: str, db: AsyncSession, report_id: int | None = None) -> AdminReport:
@@ -1645,18 +1504,8 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
     assignments = await _load_assignments(report.location, report.cycle_version, db)
     results = await _load_results(report.id, db)
     targets = await _load_selection_targets(normalized, report.cycle_version, db)
-
-    try:
-        inventory = await _get_inventory_for(normalized)
-    except HTTPException:
-        inventory = _build_report_inventory_fallback(results, targets)
-    except Exception:
-        inventory = _build_report_inventory_fallback(results, targets)
-
-    try:
-        discrepancy_financials = await _load_discrepancy_financials(normalized, results)
-    except Exception:
-        discrepancy_financials = {}
+    inventory = await _get_inventory_for(normalized)
+    discrepancy_financials = await _load_discrepancy_financials(normalized, results)
 
     rows_by_category_target: dict[str, dict[str, CheckResult]] = defaultdict(dict)
     for row in results:
@@ -1742,14 +1591,9 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
 
     total_plus = sum(max(float(item.diff), 0.0) for items in grouped_problem_items.values() for item in items)
     total_minus = abs(sum(min(float(item.diff), 0.0) for items in grouped_problem_items.values() for item in items))
-
-    known_costs = [float(item.cost_total) for items in grouped_problem_items.values() for item in items if item.cost_total is not None]
-    known_retails = [float(item.retail_total) for items in grouped_problem_items.values() for item in items if item.retail_total is not None]
-    known_lost_profits = [float(item.lost_profit) for items in grouped_problem_items.values() for item in items if item.lost_profit is not None]
-
-    total_cost = round(sum(known_costs), 2) if known_costs else None
-    total_retail = round(sum(known_retails), 2) if known_retails else None
-    total_lost_profit = round(sum(known_lost_profits), 2) if known_lost_profits else None
+    total_cost = sum(float(item.cost_total or 0.0) for items in grouped_problem_items.values() for item in items)
+    total_retail = sum(float(item.retail_total or 0.0) for items in grouped_problem_items.values() for item in items)
+    total_lost_profit = sum(float(item.lost_profit or 0.0) for items in grouped_problem_items.values() for item in items)
 
     report_number = await _get_report_number(report, db)
 
@@ -1762,9 +1606,9 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         categories=categories,
         total_plus=float(total_plus),
         total_minus=float(total_minus),
-        total_cost=total_cost,
-        total_retail=total_retail,
-        total_lost_profit=total_lost_profit,
+        total_cost=float(round(total_cost, 2)),
+        total_retail=float(round(total_retail, 2)),
+        total_lost_profit=float(round(total_lost_profit, 2)),
         employees=sorted(employee_bucket.values(), key=lambda item: item.full_name.lower()),
     )
 

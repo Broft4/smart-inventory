@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
-import re
 from dataclasses import dataclass
 from time import monotonic
 from typing import Any
@@ -45,19 +43,19 @@ class MoySkladClient:
         self._inventory_cache: dict[str, CacheEntry] = {}
         self._inventory_locks: dict[str, asyncio.Lock] = {}
 
-        self._folders_cache: dict[str, CacheEntry] = {}
-        self._folders_locks: dict[str, asyncio.Lock] = {}
+        self._folders_cache: CacheEntry | None = None
+        self._folders_lock = asyncio.Lock()
 
         self._assortment_cache: dict[str, CacheEntry] = {}
         self._assortment_locks: dict[str, asyncio.Lock] = {}
 
-        self._stores_cache: dict[str, CacheEntry] = {}
-        self._stores_locks: dict[str, asyncio.Lock] = {}
+        self._stores_cache: CacheEntry | None = None
+        self._stores_lock = asyncio.Lock()
 
         self._product_cache: dict[str, CacheEntry] = {}
         self._product_locks: dict[str, asyncio.Lock] = {}
 
-        self._financials_cache: dict[str, CacheEntry] = {}
+        self._financials_by_location_cache: dict[str, CacheEntry] = {}
 
         self._assortment_search_cache: dict[str, CacheEntry] = {}
         self._assortment_search_locks: dict[str, asyncio.Lock] = {}
@@ -66,21 +64,15 @@ class MoySkladClient:
     def enabled(self) -> bool:
         return bool(settings.moysklad_token)
 
-    def _headers_for_token(self, token: str | None = None) -> dict[str, str]:
-        access_token = (token or settings.moysklad_token or '').strip()
-        if not access_token:
+    @property
+    def headers(self) -> dict[str, str]:
+        if not self.enabled:
             raise RuntimeError('MOYSKLAD_TOKEN не задан. Клиент МоегоСклада недоступен.')
         return {
-            'Authorization': f'Bearer {access_token}',
+            'Authorization': f'Bearer {settings.moysklad_token}',
             'Accept-Encoding': 'gzip',
             'Content-Type': 'application/json',
         }
-
-    def _token_key(self, token: str | None = None) -> str:
-        access_token = (token or settings.moysklad_token or '').strip()
-        if not access_token:
-            return 'default'
-        return hashlib.sha1(access_token.encode('utf-8')).hexdigest()[:12]
 
     def _build_timeout(self) -> httpx.Timeout:
         connect_timeout = min(10.0, self.request_timeout)
@@ -102,13 +94,6 @@ class MoySkladClient:
             return None
         return path.split('/')[-1]
 
-    def _looks_like_uuid(self, value: str | None) -> bool:
-        normalized = str(value or '').strip()
-        return bool(re.fullmatch(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', normalized))
-
-    def _normalize_lookup_value(self, value: Any) -> str:
-        return str(value or '').strip().lower()
-
     def _get_retry_delay(self, response: httpx.Response, attempt: int) -> float:
         retry_after = response.headers.get('X-Lognex-Retry-TimeInterval') or response.headers.get('X-Lognex-Retry-After')
         if retry_after:
@@ -127,7 +112,6 @@ class MoySkladClient:
         *,
         params: dict[str, Any] | None = None,
         absolute: bool = False,
-        token: str | None = None,
     ) -> dict[str, Any]:
         url = url_or_endpoint if absolute else f"{self.base_url}/{url_or_endpoint.lstrip('/')}"
         limits = httpx.Limits(max_connections=4, max_keepalive_connections=2)
@@ -138,7 +122,7 @@ class MoySkladClient:
         async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
             for attempt in range(1, self.retry_attempts + 1):
                 try:
-                    response = await client.get(url, headers=self._headers_for_token(token), params=params)
+                    response = await client.get(url, headers=self.headers, params=params)
 
                     if response.status_code == 429:
                         delay = self._get_retry_delay(response, attempt)
@@ -218,20 +202,20 @@ class MoySkladClient:
             raise last_error
         raise RuntimeError('Не удалось выполнить запрос к МойСклад.')
 
-    async def get(self, endpoint: str, params: dict[str, Any] | None = None, token: str | None = None) -> dict[str, Any]:
-        return await self._request_json(endpoint, params=params, absolute=False, token=token)
+    async def get(self, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return await self._request_json(endpoint, params=params, absolute=False)
 
-    async def get_absolute(self, url: str, params: dict[str, Any] | None = None, token: str | None = None) -> dict[str, Any]:
-        return await self._request_json(url, params=params, absolute=True, token=token)
+    async def get_absolute(self, url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return await self._request_json(url, params=params, absolute=True)
 
-    async def get_all_pages(self, endpoint: str, params: dict[str, Any] | None = None, token: str | None = None) -> list[dict[str, Any]]:
+    async def get_all_pages(self, endpoint: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         params = dict(params or {})
         params['limit'] = 1000
         params['offset'] = 0
         all_rows: list[dict[str, Any]] = []
 
         while True:
-            data = await self.get(endpoint, params=params, token=token)
+            data = await self.get(endpoint, params=params)
             rows = data.get('rows', [])
             all_rows.extend(rows)
             if len(rows) < 1000:
@@ -241,19 +225,15 @@ class MoySkladClient:
         logger.info('Получено %s записей из %s', len(all_rows), endpoint)
         return all_rows
 
-    async def get_stores_ids(self, token: str | None = None) -> dict[str, str]:
-        token_key = self._token_key(token)
-        cached = self._stores_cache.get(token_key)
-        if self._cache_alive(cached):
-            return cached.value
+    async def get_stores_ids(self) -> dict[str, str]:
+        if self._cache_alive(self._stores_cache):
+            return self._stores_cache.value
 
-        lock = self._stores_locks.setdefault(token_key, asyncio.Lock())
-        async with lock:
-            cached = self._stores_cache.get(token_key)
-            if self._cache_alive(cached):
-                return cached.value
+        async with self._stores_lock:
+            if self._cache_alive(self._stores_cache):
+                return self._stores_cache.value
 
-            data = await self.get('entity/store', token=token)
+            data = await self.get('entity/store')
             stores_mapping: dict[str, str] = {}
             target_names = {
                 (settings.store_dmitrov or '').strip().lower(),
@@ -262,22 +242,19 @@ class MoySkladClient:
 
             for store in data.get('rows', []):
                 store_name = (store.get('name') or '').strip()
-                store_id = store.get('id')
-                if not store_name or not store_id:
-                    continue
-                if not target_names or store_name.lower() in target_names:
-                    stores_mapping[store_name] = store_id
+                if store_name.lower() in target_names:
+                    store_id = store.get('id')
+                    if store_id:
+                        stores_mapping[store_name] = store_id
 
-            self._stores_cache[token_key] = CacheEntry(
+            self._stores_cache = CacheEntry(
                 value=stores_mapping,
                 expires_at=monotonic() + 3600,
             )
             return stores_mapping
 
-    async def _resolve_store(self, location: str, token: str | None = None, explicit_store_id: str | None = None) -> tuple[str, str]:
+    async def _resolve_store(self, location: str) -> tuple[str, str]:
         normalized = location.strip().title()
-        if explicit_store_id:
-            return normalized, explicit_store_id
 
         if normalized.lower() == (settings.store_dmitrov or '').lower():
             if settings.store_dmitrov_id:
@@ -288,26 +265,22 @@ class MoySkladClient:
         else:
             raise ValueError(f'Неизвестная точка: {location}')
 
-        stores = await self.get_stores_ids(token=token)
+        stores = await self.get_stores_ids()
         for name, store_id in stores.items():
             if name.lower() == normalized.lower():
                 return normalized, store_id
 
         raise ValueError(f'Для точки {location} не найден склад в МойСклад.')
 
-    async def _get_folder_map(self, token: str | None = None) -> dict[str, dict[str, Any]]:
-        token_key = self._token_key(token)
-        cached = self._folders_cache.get(token_key)
-        if self._cache_alive(cached):
-            return cached.value
+    async def _get_folder_map(self) -> dict[str, dict[str, Any]]:
+        if self._cache_alive(self._folders_cache):
+            return self._folders_cache.value
 
-        lock = self._folders_locks.setdefault(token_key, asyncio.Lock())
-        async with lock:
-            cached = self._folders_cache.get(token_key)
-            if self._cache_alive(cached):
-                return cached.value
+        async with self._folders_lock:
+            if self._cache_alive(self._folders_cache):
+                return self._folders_cache.value
 
-            rows = await self.get_all_pages('entity/productfolder', token=token)
+            rows = await self.get_all_pages('entity/productfolder')
             folder_by_id: dict[str, dict[str, Any]] = {}
 
             for folder in rows:
@@ -315,20 +288,20 @@ class MoySkladClient:
                 if folder_id:
                     folder_by_id[folder_id] = folder
 
-            self._folders_cache[token_key] = CacheEntry(
+            self._folders_cache = CacheEntry(
                 value=folder_by_id,
                 expires_at=monotonic() + self.folder_cache_ttl,
             )
             logger.info('Закешировано %s папок МоегоСклада', len(folder_by_id))
             return folder_by_id
 
-    async def _get_assortment_row_by_meta(self, assortment_meta: dict[str, Any] | None, token: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
+    async def _get_assortment_row_by_meta(self, assortment_meta: dict[str, Any] | None) -> tuple[dict[str, Any] | None, str | None]:
         if not assortment_meta:
             return None, None
 
         href = assortment_meta.get('href')
         assortment_id = assortment_meta.get('id') or self._extract_id_from_href(href)
-        cache_key = f"{self._token_key(token)}::{href or assortment_id}"
+        cache_key = href or assortment_id
         if not cache_key:
             return None, None
 
@@ -344,10 +317,10 @@ class MoySkladClient:
 
             try:
                 if href:
-                    row = await self.get_absolute(href, token=token)
+                    row = await self.get_absolute(href)
                     source = 'assortment.meta.href'
                 elif assortment_id:
-                    row = await self.get(f'entity/assortment/{assortment_id}', token=token)
+                    row = await self.get(f'entity/assortment/{assortment_id}')
                     source = 'assortment.id'
                 else:
                     return None, None
@@ -360,118 +333,6 @@ class MoySkladClient:
                 expires_at=monotonic() + self.assortment_item_cache_ttl,
             )
             return row, source
-
-    async def _get_entity_by_meta(
-        self,
-        meta: dict[str, Any] | None,
-        *,
-        cache: dict[str, CacheEntry],
-        locks: dict[str, asyncio.Lock],
-        entity_name: str,
-        token: str | None = None,
-    ) -> tuple[dict[str, Any] | None, str | None]:
-        if not meta:
-            return None, None
-
-        href = meta.get('href')
-        entity_id = meta.get('id') or self._extract_id_from_href(href)
-        cache_key = f"{self._token_key(token)}::{href or entity_id}"
-        if not cache_key:
-            return None, None
-
-        cached = cache.get(cache_key)
-        if self._cache_alive(cached):
-            return cached.value, 'cache'
-
-        lock = locks.setdefault(cache_key, asyncio.Lock())
-        async with lock:
-            cached = cache.get(cache_key)
-            if self._cache_alive(cached):
-                return cached.value, 'cache'
-
-            try:
-                if href:
-                    row = await self.get_absolute(href, token=token)
-                    source = f'{entity_name}.meta.href'
-                elif entity_id:
-                    row = await self.get(f'entity/{entity_name}/{entity_id}', token=token)
-                    source = f'{entity_name}.id'
-                else:
-                    return None, None
-            except httpx.HTTPError:
-                logger.warning('Не удалось получить карточку %s для %s', entity_name, cache_key)
-                return None, None
-
-            cache[cache_key] = CacheEntry(
-                value=row,
-                expires_at=monotonic() + self.assortment_item_cache_ttl,
-            )
-            return row, source
-
-    async def _get_product_row_by_meta(self, product_meta: dict[str, Any] | None, token: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
-        return await self._get_entity_by_meta(product_meta, cache=self._product_cache, locks=self._product_locks, entity_name='product', token=token)
-
-    async def _search_assortment_row(
-        self,
-        *,
-        field: str,
-        value: str | None,
-        token: str | None = None,
-        exact_field: str | None = None,
-    ) -> tuple[dict[str, Any] | None, str | None]:
-        normalized_value = (value or '').strip()
-        if not normalized_value:
-            return None, None
-
-        lookup_field = exact_field or field
-        cache_key = f"{self._token_key(token)}::{field}:{normalized_value.lower()}"
-        cached = self._assortment_search_cache.get(cache_key)
-        if self._cache_alive(cached):
-            return cached.value, 'cache'
-
-        lock = self._assortment_search_locks.setdefault(cache_key, asyncio.Lock())
-        async with lock:
-            cached = self._assortment_search_cache.get(cache_key)
-            if self._cache_alive(cached):
-                return cached.value, 'cache'
-
-            row = None
-            try:
-                data = await self.get(
-                    'entity/assortment',
-                    params={
-                        'filter': f'{field}={normalized_value}',
-                        'limit': 100,
-                    },
-                    token=token,
-                )
-                rows = data.get('rows') or []
-                normalized_value_lower = normalized_value.lower()
-                for candidate in rows:
-                    candidate_value = str(candidate.get(lookup_field) or '').strip().lower()
-                    if candidate_value == normalized_value_lower:
-                        row = candidate
-                        break
-                if row is None and rows:
-                    row = rows[0]
-            except httpx.HTTPError:
-                logger.warning('Не удалось найти ассортимент по полю %s=%s', field, normalized_value)
-                return None, None
-
-            self._assortment_search_cache[cache_key] = CacheEntry(
-                value=row,
-                expires_at=monotonic() + self.assortment_item_cache_ttl,
-            )
-            return row, f'assortment.{field}'
-
-    async def _search_assortment_row_by_code(self, code: str | None, token: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
-        return await self._search_assortment_row(field='code', value=code, token=token)
-
-    async def _search_assortment_row_by_article(self, article: str | None, token: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
-        return await self._search_assortment_row(field='article', value=article, token=token)
-
-    async def _search_assortment_row_by_name(self, name: str | None, token: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
-        return await self._search_assortment_row(field='name', value=name, token=token)
 
     def _resolve_folder_chain(self, folder_id: str | None, folder_by_id: dict[str, dict[str, Any]]) -> list[dict[str, str]]:
         if not folder_id:
@@ -504,7 +365,6 @@ class MoySkladClient:
         self,
         stock_row: dict[str, Any],
         folder_by_id: dict[str, dict[str, Any]],
-        token: str | None = None,
     ) -> tuple[str | None, dict[str, Any]]:
         diagnostics: dict[str, Any] = {
             'folder_source': None,
@@ -523,7 +383,7 @@ class MoySkladClient:
                     return folder_id, diagnostics
 
         assortment_meta = (stock_row.get('assortment') or {}).get('meta') or {}
-        assortment_row, lookup_source = await self._get_assortment_row_by_meta(assortment_meta, token=token)
+        assortment_row, lookup_source = await self._get_assortment_row_by_meta(assortment_meta)
         diagnostics['assortment_lookup'] = lookup_source or 'не найдено'
         diagnostics['assortment_found'] = bool(assortment_row)
 
@@ -614,81 +474,111 @@ class MoySkladClient:
         except (TypeError, ValueError):
             return 0.0
 
+    async def _get_entity_by_meta(self, meta: dict[str, Any] | None, *, cache: dict[str, CacheEntry], locks: dict[str, asyncio.Lock], entity_name: str) -> tuple[dict[str, Any] | None, str | None]:
+        if not meta:
+            return None, None
+
+        href = meta.get('href')
+        entity_id = meta.get('id') or self._extract_id_from_href(href)
+        cache_key = href or entity_id
+        if not cache_key:
+            return None, None
+
+        cached = cache.get(cache_key)
+        if self._cache_alive(cached):
+            return cached.value, 'cache'
+
+        lock = locks.setdefault(cache_key, asyncio.Lock())
+        async with lock:
+            cached = cache.get(cache_key)
+            if self._cache_alive(cached):
+                return cached.value, 'cache'
+
+            try:
+                if href:
+                    row = await self.get_absolute(href)
+                    source = f'{entity_name}.meta.href'
+                elif entity_id:
+                    row = await self.get(f'entity/{entity_name}/{entity_id}')
+                    source = f'{entity_name}.id'
+                else:
+                    return None, None
+            except httpx.HTTPError:
+                logger.warning('Не удалось получить карточку %s для %s', entity_name, cache_key)
+                return None, None
+
+            cache[cache_key] = CacheEntry(
+                value=row,
+                expires_at=monotonic() + self.assortment_item_cache_ttl,
+            )
+            return row, source
+
+    async def _get_product_row_by_meta(self, product_meta: dict[str, Any] | None) -> tuple[dict[str, Any] | None, str | None]:
+        return await self._get_entity_by_meta(product_meta, cache=self._product_cache, locks=self._product_locks, entity_name='product')
+
+    async def _search_assortment_row_by_code(self, code: str | None) -> tuple[dict[str, Any] | None, str | None]:
+        normalized_code = (code or '').strip()
+        if not normalized_code:
+            return None, None
+
+        cache_key = f'code:{normalized_code.lower()}'
+        cached = self._assortment_search_cache.get(cache_key)
+        if self._cache_alive(cached):
+            return cached.value, 'cache'
+
+        lock = self._assortment_search_locks.setdefault(cache_key, asyncio.Lock())
+        async with lock:
+            cached = self._assortment_search_cache.get(cache_key)
+            if self._cache_alive(cached):
+                return cached.value, 'cache'
+
+            row = None
+            try:
+                data = await self.get(
+                    'entity/assortment',
+                    params={
+                        'filter': f'code={normalized_code}',
+                        'limit': 100,
+                    },
+                )
+                rows = data.get('rows') or []
+                normalized_code_lower = normalized_code.lower()
+                for candidate in rows:
+                    candidate_code = str(candidate.get('code') or '').strip().lower()
+                    if candidate_code == normalized_code_lower:
+                        row = candidate
+                        break
+                if row is None and rows:
+                    row = rows[0]
+            except httpx.HTTPError:
+                logger.warning('Не удалось найти ассортимент по коду %s', normalized_code)
+                return None, None
+
+            self._assortment_search_cache[cache_key] = CacheEntry(
+                value=row,
+                expires_at=monotonic() + self.assortment_item_cache_ttl,
+            )
+            return row, 'assortment.code'
+
     def _extract_stock_retail_price(self, stock_row: dict[str, Any]) -> float | None:
         return self._normalize_money_value(stock_row.get('salePrice'))
 
     def _build_financial_seed(self, stock_row: dict[str, Any], item_id: str) -> dict[str, Any]:
-        assortment = stock_row.get('assortment') if isinstance(stock_row.get('assortment'), dict) else {}
-        assortment_meta = assortment.get('meta') or {}
+        assortment_meta = (stock_row.get('assortment') or {}).get('meta') or {}
         code = (stock_row.get('code') or '').strip() or None
-        article = (stock_row.get('article') or '').strip() or None
-        item_name = (stock_row.get('name') or '').strip() or None
-        assortment_id = (
-            assortment.get('id')
-            or assortment_meta.get('id')
-            or self._extract_id_from_href(assortment_meta.get('href'))
-        )
         return {
             'item_id': item_id,
             'code': code,
-            'article': article,
-            'name': item_name,
             'retail_price': self._extract_stock_retail_price(stock_row),
-            'assortment_id': assortment_id,
+            'assortment_id': assortment_meta.get('id') or self._extract_id_from_href(assortment_meta.get('href')),
             'assortment_href': assortment_meta.get('href'),
         }
 
-    def _financial_cache_key(self, location: str, token: str | None = None, store_id: str | None = None) -> str:
+    def _get_financial_seed(self, location: str, item_id: str) -> dict[str, Any] | None:
         normalized = location.strip().title()
-        return f"{normalized}::{self._token_key(token)}::{store_id or 'auto'}"
-
-    def _get_financial_seed(
-        self,
-        location: str,
-        item_id: str,
-        token: str | None = None,
-        store_id: str | None = None,
-        item_name: str | None = None,
-    ) -> dict[str, Any] | None:
-        exact_key = self._financial_cache_key(location, token=token, store_id=store_id)
-        cached = self._financials_cache.get(exact_key)
-
-        lookup_values = {self._normalize_lookup_value(item_id)}
-        normalized_name = self._normalize_lookup_value(item_name)
-        if normalized_name:
-            lookup_values.add(normalized_name)
-
-        def find_seed(financial_index: dict[str, Any]) -> dict[str, Any] | None:
-            direct = financial_index.get(item_id)
-            if isinstance(direct, dict):
-                return direct
-
-            for seed in financial_index.values():
-                if not isinstance(seed, dict):
-                    continue
-                candidates = {
-                    self._normalize_lookup_value(seed.get('item_id')),
-                    self._normalize_lookup_value(seed.get('code')),
-                    self._normalize_lookup_value(seed.get('article')),
-                    self._normalize_lookup_value(seed.get('assortment_id')),
-                    self._normalize_lookup_value(seed.get('name')),
-                }
-                if lookup_values.intersection(candidate for candidate in candidates if candidate):
-                    return seed
-            return None
-
+        cached = self._financials_by_location_cache.get(normalized)
         if self._cache_alive(cached):
-            found = find_seed(cached.value or {})
-            if found:
-                return found
-
-        prefix = f"{location.strip().title()}::{self._token_key(token)}::"
-        for cache_key, entry in self._financials_cache.items():
-            if not cache_key.startswith(prefix) or not self._cache_alive(entry):
-                continue
-            found = find_seed(entry.value or {})
-            if found:
-                return found
+            return (cached.value or {}).get(item_id)
         return None
 
     def _normalize_money_value(self, value: Any) -> float | None:
@@ -717,11 +607,7 @@ class MoySkladClient:
 
         preferred = None
         for entry in entries:
-            price_type_raw = entry.get('priceType')
-            if isinstance(price_type_raw, dict):
-                price_type = str(price_type_raw.get('name') or '').lower()
-            else:
-                price_type = str(price_type_raw or '').lower()
+            price_type = str(entry.get('priceType') or '').lower()
             if 'продаж' in price_type:
                 preferred = entry
                 break
@@ -746,34 +632,20 @@ class MoySkladClient:
                 break
         return cost_price, retail_price
 
-    async def _get_item_financials_once(
-        self,
-        location: str,
-        item_id: str,
-        *,
-        item_name: str | None = None,
-        token: str | None = None,
-        store_id: str | None = None,
-    ) -> dict[str, float | None]:
-        if not item_id and not item_name:
+    async def get_item_financials(self, location: str, item_id: str) -> dict[str, float | None]:
+        if not item_id:
             return {'cost_price': None, 'retail_price': None}
 
-        seed = self._get_financial_seed(location, item_id, token=token, store_id=store_id, item_name=item_name)
+        seed = self._get_financial_seed(location, item_id)
         if seed is None:
             try:
-                await self.get_inventory(location, token=token, store_id=store_id)
+                await self.get_inventory(location)
             except Exception:
-                logger.exception('Не удалось прогреть инвентарь для финансов товара %s (%s)', item_id or item_name, location)
-            seed = self._get_financial_seed(location, item_id, token=token, store_id=store_id, item_name=item_name)
+                logger.exception('Не удалось прогреть инвентарь для финансов товара %s (%s)', item_id, location)
+            seed = self._get_financial_seed(location, item_id)
 
         retail_price = seed.get('retail_price') if seed else None
         code = (seed or {}).get('code')
-        article = (seed or {}).get('article')
-        item_name = (seed or {}).get('name') or item_name
-
-        normalized_item_id = str(item_id or '').strip()
-        if not code and normalized_item_id and not self._looks_like_uuid(normalized_item_id):
-            code = normalized_item_id
 
         assortment_meta = None
         if seed and (seed.get('assortment_href') or seed.get('assortment_id')):
@@ -781,70 +653,37 @@ class MoySkladClient:
                 'href': seed.get('assortment_href'),
                 'id': seed.get('assortment_id'),
             }
-        elif normalized_item_id and self._looks_like_uuid(normalized_item_id):
-            assortment_meta = {'id': normalized_item_id}
+        elif item_id:
+            assortment_meta = {'id': item_id}
 
-        assortment_row, assortment_source = await self._get_assortment_row_by_meta(assortment_meta, token=token)
+        assortment_row, assortment_source = await self._get_assortment_row_by_meta(assortment_meta)
         product_meta = assortment_row.get('product') if isinstance((assortment_row or {}).get('product'), dict) else None
-        product_row, _ = await self._get_product_row_by_meta((product_meta or {}).get('meta') if isinstance(product_meta, dict) else None, token=token)
+        product_row, _ = await self._get_product_row_by_meta((product_meta or {}).get('meta') if isinstance(product_meta, dict) else None)
 
         cost_price, fallback_retail_price = self._extract_financials_from_sources(assortment_row, product_row, product_meta)
 
-        search_candidates = []
-        if code:
-            search_candidates.append(('code', code, self._search_assortment_row_by_code))
-        if article:
-            search_candidates.append(('article', article, self._search_assortment_row_by_article))
-        if item_name:
-            search_candidates.append(('name', item_name, self._search_assortment_row_by_name))
+        if cost_price is None and code:
+            search_row, search_source = await self._search_assortment_row_by_code(code)
+            search_product_meta = search_row.get('product') if isinstance((search_row or {}).get('product'), dict) else None
+            search_product_row, _ = await self._get_product_row_by_meta((search_product_meta or {}).get('meta') if isinstance(search_product_meta, dict) else None)
+            searched_cost_price, searched_retail_price = self._extract_financials_from_sources(search_row, search_product_row, search_product_meta)
+            if searched_cost_price is not None:
+                cost_price = searched_cost_price
+                logger.info('Себестоимость для %s (%s) получена через поиск по коду %s', item_id, location, code)
+            if fallback_retail_price is None and searched_retail_price is not None:
+                fallback_retail_price = searched_retail_price
+            if assortment_row is None and search_row is not None:
+                assortment_row = search_row
+                assortment_source = search_source
 
-        needs_search = (
-            assortment_row is None
-            or cost_price in {None, 0.0}
-            or fallback_retail_price in {None, 0.0}
-            or retail_price in {None, 0.0}
-        )
-
-        if needs_search:
-            for search_kind, search_value, search_func in search_candidates:
-                search_row, search_source = await search_func(search_value, token=token)
-                if search_row is None:
-                    continue
-
-                search_product_meta = search_row.get('product') if isinstance((search_row or {}).get('product'), dict) else None
-                search_product_row, _ = await self._get_product_row_by_meta((search_product_meta or {}).get('meta') if isinstance(search_product_meta, dict) else None, token=token)
-                searched_cost_price, searched_retail_price = self._extract_financials_from_sources(search_row, search_product_row, search_product_meta)
-
-                if cost_price in {None, 0.0} and searched_cost_price not in {None, 0.0}:
-                    cost_price = searched_cost_price
-                    logger.info('Себестоимость для %s (%s) получена через поиск %s=%s', item_id, location, search_kind, search_value)
-                if fallback_retail_price in {None, 0.0} and searched_retail_price not in {None, 0.0}:
-                    fallback_retail_price = searched_retail_price
-                if assortment_row is None and search_row is not None:
-                    assortment_row = search_row
-                    assortment_source = search_source
-
-                if cost_price not in {None, 0.0} and (retail_price not in {None, 0.0} or fallback_retail_price not in {None, 0.0}):
-                    break
-
-        if cost_price in {0.0}:
-            cost_price = None
-        if retail_price in {0.0}:
-            retail_price = None
-        if fallback_retail_price in {0.0}:
-            fallback_retail_price = None
-
-        if cost_price is None and (code or article or item_name):
+        if cost_price is None:
             logger.warning(
-                'Не удалось определить себестоимость для товара %s (%s). seed=%s assortment_source=%s code=%s article=%s name=%s token=%s',
+                'Не удалось определить себестоимость для товара %s (%s). seed=%s assortment_source=%s code=%s',
                 item_id,
                 location,
                 bool(seed),
                 assortment_source,
                 code,
-                article,
-                item_name,
-                'custom' if token else 'default',
             )
 
         return {
@@ -852,43 +691,15 @@ class MoySkladClient:
             'retail_price': retail_price if retail_price is not None else fallback_retail_price,
         }
 
-    async def get_item_financials(
-        self,
-        location: str,
-        item_id: str,
-        *,
-        item_name: str | None = None,
-        token: str | None = None,
-        store_id: str | None = None,
-    ) -> dict[str, float | None]:
-        primary = await self._get_item_financials_once(location, item_id, item_name=item_name, token=token, store_id=store_id)
-        if primary.get('cost_price') is not None or primary.get('retail_price') is not None:
-            return primary
-
-        explicit_token = (token or '').strip()
-        default_token = (settings.moysklad_token or '').strip()
-        if explicit_token and default_token and explicit_token != default_token:
-            logger.warning(
-                'Для товара %s (%s) цены не найдены через токен точки. Пробуем глобальный токен как fallback.',
-                item_id or item_name,
-                location,
-            )
-            fallback = await self._get_item_financials_once(location, item_id, item_name=item_name, token=None, store_id=store_id)
-            if fallback.get('cost_price') is not None or fallback.get('retail_price') is not None:
-                return fallback
-
-        return primary
-
-    async def _build_inventory(self, location: str, token: str | None = None, store_id: str | None = None) -> dict[str, Any]:
-        normalized, store_id = await self._resolve_store(location, token=token, explicit_store_id=store_id)
+    async def _build_inventory(self, location: str) -> dict[str, Any]:
+        normalized, store_id = await self._resolve_store(location)
         store_href = f'{self.base_url}/entity/store/{store_id}'
 
         folder_by_id, stock_rows = await asyncio.gather(
-            self._get_folder_map(token=token),
+            self._get_folder_map(),
             self.get_all_pages(
                 'report/stock/all',
                 params={'filter': f'stockMode=all;quantityMode=all;store={store_href}'},
-                token=token,
             ),
         )
 
@@ -898,18 +709,9 @@ class MoySkladClient:
         for stock_row in stock_rows:
             item_id, item_name = self._extract_item_identity(normalized, stock_row)
             expected_qty = self._extract_expected_qty(stock_row)
-            seed = self._build_financial_seed(stock_row, item_id)
-            for lookup_key in (
-                item_id,
-                seed.get('assortment_id'),
-                seed.get('code'),
-                seed.get('article'),
-            ):
-                normalized_lookup = str(lookup_key or '').strip()
-                if normalized_lookup and normalized_lookup not in financial_index:
-                    financial_index[normalized_lookup] = seed
+            financial_index[item_id] = self._build_financial_seed(stock_row, item_id)
 
-            folder_id, diagnostics = await self._extract_folder_id(stock_row, folder_by_id, token=token)
+            folder_id, diagnostics = await self._extract_folder_id(stock_row, folder_by_id)
             folder_chain = self._resolve_folder_chain(folder_id, folder_by_id)
             item_diagnostics = self._build_item_diagnostics(stock_row, diagnostics, folder_id, folder_chain)
 
@@ -962,34 +764,28 @@ class MoySkladClient:
                 'subcategories': subcategories,
             })
 
-        cache_value = CacheEntry(
+        self._financials_by_location_cache[normalized] = CacheEntry(
             value=financial_index,
             expires_at=monotonic() + self.inventory_cache_ttl,
         )
-        cache_key = self._financial_cache_key(normalized, token=token, store_id=store_id)
-        self._financials_cache[cache_key] = cache_value
-
-        auto_cache_key = self._financial_cache_key(normalized, token=token, store_id=None)
-        self._financials_cache[auto_cache_key] = cache_value
 
         logger.info('Для точки %s собрано %s категорий и %s товаров', normalized, len(categories), len(stock_rows))
         return {'location': normalized, 'categories': categories}
 
-    async def get_inventory(self, location: str, token: str | None = None, store_id: str | None = None) -> dict[str, Any]:
+    async def get_inventory(self, location: str) -> dict[str, Any]:
         normalized = location.strip().title()
-        cache_key = f"{normalized}::{self._token_key(token)}::{store_id or 'auto'}"
-        cached = self._inventory_cache.get(cache_key)
+        cached = self._inventory_cache.get(normalized)
         if self._cache_alive(cached):
             return cached.value
 
-        lock = self._inventory_locks.setdefault(cache_key, asyncio.Lock())
+        lock = self._inventory_locks.setdefault(normalized, asyncio.Lock())
         async with lock:
-            cached = self._inventory_cache.get(cache_key)
+            cached = self._inventory_cache.get(normalized)
             if self._cache_alive(cached):
                 return cached.value
 
-            inventory = await self._build_inventory(normalized, token=token, store_id=store_id)
-            self._inventory_cache[cache_key] = CacheEntry(
+            inventory = await self._build_inventory(normalized)
+            self._inventory_cache[normalized] = CacheEntry(
                 value=inventory,
                 expires_at=monotonic() + self.inventory_cache_ttl,
             )
@@ -999,22 +795,19 @@ class MoySkladClient:
         if not location:
             self._inventory_cache.clear()
             self._inventory_locks.clear()
-            self._financials_cache.clear()
+            self._financials_by_location_cache.clear()
             return
-        normalized = location.strip().title()
-        prefix = f"{normalized}::"
-        for key in [key for key in self._inventory_cache if key.startswith(prefix)]:
-            self._inventory_cache.pop(key, None)
-        for key in [key for key in self._inventory_locks if key.startswith(prefix)]:
-            self._inventory_locks.pop(key, None)
-        for key in [key for key in self._financials_cache if key.startswith(prefix)]:
-            self._financials_cache.pop(key, None)
 
-    async def prewarm_inventory(self, location: str, token: str | None = None, store_id: str | None = None) -> None:
-        if not location or (not token and not self.enabled):
+        normalized = location.strip().title()
+        self._inventory_cache.pop(normalized, None)
+        self._inventory_locks.pop(normalized, None)
+        self._financials_by_location_cache.pop(normalized, None)
+
+    async def prewarm_inventory(self, location: str) -> None:
+        if not self.enabled or not location:
             return
         try:
-            await self.get_inventory(location, token=token, store_id=store_id)
+            await self.get_inventory(location)
         except Exception:
             logger.exception('Не удалось прогреть кеш МоегоСклада для точки %s', location)
 
