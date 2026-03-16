@@ -671,6 +671,178 @@ window.deleteUser = async function (userId) {
     await loadUsers();
 };
 
+
+function updateCycleTargetDependencyState() {
+    document.querySelectorAll('[data-cycle-category-id]').forEach(categoryCheckbox => {
+        const categoryId = categoryCheckbox.dataset.cycleCategoryId;
+        const subCheckboxes = document.querySelectorAll(`[data-cycle-subcategory-for="${CSS.escape(categoryId)}"]`);
+        const categorySelected = Boolean(categoryCheckbox.checked);
+
+        subCheckboxes.forEach(subCheckbox => {
+            const wasChecked = subCheckbox.checked;
+            subCheckbox.disabled = categorySelected;
+            if (categorySelected && wasChecked) {
+                subCheckbox.checked = false;
+            }
+        });
+    });
+}
+
+function renderCycleTargets(data) {
+    const container = document.getElementById('cycle-targets-list');
+    const meta = document.getElementById('cycle-targets-meta');
+    const dateInput = document.getElementById('cycle-start-date');
+    if (!container) return;
+
+    const categories = Array.isArray(data?.categories) ? data.categories : [];
+    if (meta) {
+        meta.textContent = `Точка: ${data?.location || '-'} · Версия цикла: ${data?.cycle_version || '-'} · Старт: ${data?.cycle_started_at || '-'}`;
+    }
+    if (dateInput) {
+        dateInput.value = parseRuDateToIso(data?.cycle_started_at || '');
+    }
+
+    if (!categories.length) {
+        container.innerHTML = '<div class="category-card"><p class="empty-text">Нет доступных категорий для настройки цикла.</p></div>';
+        return;
+    }
+
+    container.innerHTML = categories.map(category => {
+        const subcategories = Array.isArray(category.subcategories) ? category.subcategories : [];
+        const hasSubcategories = subcategories.length > 0;
+        const expanded = category.selected || subcategories.some(sub => sub.selected);
+        return `
+            <article class="category-card admin-category-card status-grey">
+                <div class="admin-category-header">
+                    <label class="checkbox-row" style="display:flex;align-items:flex-start;gap:10px;flex:1;cursor:pointer;">
+                        <input
+                            type="checkbox"
+                            data-cycle-category-id="${escapeHtml(category.id)}"
+                            ${category.selected ? 'checked' : ''}
+                        >
+                        <div>
+                            <strong>${escapeHtml(category.name)}</strong>
+                            <div class="muted-text">Выбрать всю категорию на цикл</div>
+                        </div>
+                    </label>
+                    ${hasSubcategories ? `
+                        <button
+                            type="button"
+                            class="chip-button"
+                            data-cycle-category-toggle="${escapeHtml(category.id)}"
+                            aria-expanded="${expanded ? 'true' : 'false'}"
+                            onclick="toggleCycleCategoryBody('${escapeHtml(category.id)}')"
+                        >${expanded ? '−' : '+'}</button>
+                    ` : ''}
+                </div>
+                ${hasSubcategories ? `
+                    <div class="admin-category-body ${expanded ? '' : 'hidden'}" data-cycle-category-body="${escapeHtml(category.id)}">
+                        <div style="display:grid;gap:8px;">
+                            ${subcategories.map(subcategory => `
+                                <label class="checkbox-row" style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;">
+                                    <input
+                                        type="checkbox"
+                                        data-cycle-subcategory-id="${escapeHtml(subcategory.id)}"
+                                        data-cycle-subcategory-for="${escapeHtml(category.id)}"
+                                        ${subcategory.selected ? 'checked' : ''}
+                                        ${category.selected ? 'disabled' : ''}
+                                    >
+                                    <div>
+                                        <strong>${escapeHtml(subcategory.name)}</strong>
+                                        <div class="muted-text">Выбрать отдельно только эту подкатегорию</div>
+                                    </div>
+                                </label>
+                            `).join('')}
+                        </div>
+                    </div>
+                ` : ''}
+            </article>
+        `;
+    }).join('');
+
+    updateCycleTargetDependencyState();
+
+    container.querySelectorAll('[data-cycle-category-id]').forEach(checkbox => {
+        checkbox.addEventListener('change', () => {
+            updateCycleTargetDependencyState();
+        });
+    });
+}
+
+async function openCycleTargetsModal() {
+    const location = getSelectedAdminLocation();
+    const container = document.getElementById('cycle-targets-list');
+    const message = document.getElementById('cycle-targets-message');
+    const meta = document.getElementById('cycle-targets-meta');
+
+    if (!location) {
+        alert('Сначала выберите точку.');
+        return;
+    }
+
+    if (container) container.innerHTML = '<p>Загрузка...</p>';
+    if (meta) meta.textContent = '';
+    setMessage(message, '');
+    showModal('cycle-targets-modal');
+
+    const response = await fetch(`/api/cycle-targets?location=${encodeURIComponent(location)}`);
+    let data = null;
+    try {
+        data = await response.json();
+    } catch {
+        data = null;
+    }
+
+    if (!response.ok) {
+        throw new Error(data?.detail || data?.message || 'Не удалось загрузить категории цикла.');
+    }
+
+    renderCycleTargets(data);
+}
+
+async function saveCycleTargetsSelection() {
+    const location = getSelectedAdminLocation();
+    const message = document.getElementById('cycle-targets-message');
+    const dateInput = document.getElementById('cycle-start-date');
+
+    if (!location) {
+        setMessage(message, 'Сначала выберите точку.');
+        return;
+    }
+
+    const categoryIds = [...document.querySelectorAll('[data-cycle-category-id]:checked')].map(node => node.dataset.cycleCategoryId).filter(Boolean);
+    const subcategoryIds = [...document.querySelectorAll('[data-cycle-subcategory-id]:checked')].map(node => node.dataset.cycleSubcategoryId).filter(Boolean);
+
+    setMessage(message, 'Сохраняем...', '#6b7280');
+
+    const response = await fetch('/api/cycle-targets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            location,
+            cycle_started_at: dateInput?.value || null,
+            category_ids: categoryIds,
+            subcategory_ids: subcategoryIds,
+        }),
+    });
+
+    let data = null;
+    try {
+        data = await response.json();
+    } catch {
+        data = null;
+    }
+
+    if (!response.ok) {
+        setMessage(message, data?.detail || data?.message || 'Не удалось сохранить категории цикла.');
+        return;
+    }
+
+    setMessage(message, data?.message || 'Категории цикла сохранены.', '#1f9d55');
+    await openCycleTargetsModal();
+    await reloadReportsSection(location);
+}
+
 function getCategoryStatusLabel(status, category = null) {
     const name = typeof category === 'string' ? category : (category?.name || '');
     if (isDiagnosticsCategoryName(name)) return 'Не входит в ревизию';

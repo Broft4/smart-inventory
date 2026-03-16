@@ -33,6 +33,7 @@ from app.logic import (
     get_inventory_data,
     list_locations,
     list_moysklad_stores_by_token,
+    get_inventory_diagnostics_details,
     get_inventory_diagnostics_rows,
     get_me_response,
     get_reports_history,
@@ -274,6 +275,12 @@ async def api_get_report(location: str | None = None, report_id: int | None = No
 @app.delete('/api/report/{report_id}', response_model=DeleteResponse)
 async def api_delete_report(report_id: int, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     return await delete_report(report_id, db)
+
+
+@app.get('/api/inventory-diagnostics')
+async def api_inventory_diagnostics(location: str, admin: User = Depends(require_admin)):
+    rows = await get_inventory_diagnostics_details(location)
+    return {'location': location, 'rows': rows}
 
 
 @app.get('/api/inventory-diagnostics/export')

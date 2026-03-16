@@ -697,19 +697,62 @@ async def _backfill_legacy_location_points(db: AsyncSession) -> None:
     _add_legacy((await db.scalars(select(CategoryAssignment.location))).all())
     legacy_names.update(sorted(MOCK_INVENTORY.keys()))
 
+    configured_defaults: list[tuple[str, str | None, str | None, str | None]] = []
+    if settings.store_dubna:
+        configured_defaults.append((
+            _normalize_location(settings.store_dubna),
+            settings.moysklad_token or None,
+            settings.store_dubna_id or None,
+            settings.store_dubna or None,
+        ))
+    if settings.store_dmitrov:
+        configured_defaults.append((
+            _normalize_location(settings.store_dmitrov),
+            settings.moysklad_token or None,
+            settings.store_dmitrov_id or None,
+            settings.store_dmitrov or None,
+        ))
+
+    for name, _token, _store_id, _store_name in configured_defaults:
+        if name:
+            legacy_names.add(name)
+
     if not legacy_names:
         return
 
-    existing_names = set(
-        (await db.scalars(select(LocationPoint.name).where(LocationPoint.name.in_(legacy_names)))).all()
-    )
-    missing_names = sorted(name for name in legacy_names if name not in existing_names)
-    if not missing_names:
-        return
+    existing_rows = (await db.scalars(select(LocationPoint).where(LocationPoint.name.in_(legacy_names)))).all()
+    existing_by_name = {row.name: row for row in existing_rows}
+    changed = False
 
-    for name in missing_names:
-        db.add(LocationPoint(name=name, ms_store_name=name))
-    await db.commit()
+    defaults_by_name = {name: (token, store_id, store_name) for name, token, store_id, store_name in configured_defaults}
+
+    for name in sorted(legacy_names):
+        row = existing_by_name.get(name)
+        default_token, default_store_id, default_store_name = defaults_by_name.get(name, (None, None, name))
+        if row is None:
+            db.add(LocationPoint(
+                name=name,
+                ms_token=default_token,
+                ms_store_id=default_store_id,
+                ms_store_name=default_store_name or name,
+            ))
+            changed = True
+            continue
+
+        row_updated = False
+        if not row.ms_token and default_token:
+            row.ms_token = default_token
+            row_updated = True
+        if not row.ms_store_id and default_store_id:
+            row.ms_store_id = default_store_id
+            row_updated = True
+        if (not row.ms_store_name) and (default_store_name or name):
+            row.ms_store_name = default_store_name or name
+            row_updated = True
+        changed = changed or row_updated
+
+    if changed:
+        await db.commit()
 
 
 async def list_locations(db: AsyncSession) -> LocationListResponse:
