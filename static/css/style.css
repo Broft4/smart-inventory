@@ -994,3 +994,21 @@ body.modal-open {
         text-align: left;
     }
 }
+
+
+.money-breakdown {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    align-items: flex-end;
+}
+
+.money-breakdown-unit {
+    font-weight: 700;
+    color: #111827;
+}
+
+.money-breakdown-total {
+    font-size: 12px;
+    white-space: nowrap;
+}

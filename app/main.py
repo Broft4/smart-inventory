@@ -8,7 +8,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -143,8 +143,12 @@ async def inventory_page(request: Request, user: User | None = Depends(get_curre
 
 
 @app.get('/admin')
-async def admin_page(request: Request, admin: User = Depends(require_admin)):
-    return templates.TemplateResponse('admin.html', {'request': request, 'user': admin})
+async def admin_page(request: Request, response: Response, admin: User = Depends(require_admin)):
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    asset_version = str(int((BASE_DIR / 'static' / 'js' / 'admin.js').stat().st_mtime))
+    return templates.TemplateResponse('admin.html', {'request': request, 'user': admin, 'asset_version': asset_version}, headers=response.headers)
 
 
 @app.post('/api/login', response_model=LoginResponse)

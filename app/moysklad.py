@@ -629,9 +629,21 @@ class MoySkladClient:
         return f"{normalized}::{self._token_key(token)}::{store_id or 'auto'}"
 
     def _get_financial_seed(self, location: str, item_id: str, token: str | None = None, store_id: str | None = None) -> dict[str, Any] | None:
-        cached = self._financials_cache.get(self._financial_cache_key(location, token=token, store_id=store_id))
+        token_key = self._token_key(token)
+        primary_key = self._financial_cache_key(location, token=token, store_id=store_id)
+        cached = self._financials_cache.get(primary_key)
         if self._cache_alive(cached):
-            return (cached.value or {}).get(item_id)
+            seed = (cached.value or {}).get(item_id)
+            if seed is not None:
+                return seed
+
+        prefix = f"{location.strip().title()}::{token_key}::"
+        for cache_key, entry in self._financials_cache.items():
+            if cache_key == primary_key or not cache_key.startswith(prefix) or not self._cache_alive(entry):
+                continue
+            seed = (entry.value or {}).get(item_id)
+            if seed is not None:
+                return seed
         return None
 
     def _normalize_money_value(self, value: Any) -> float | None:
@@ -875,11 +887,16 @@ class MoySkladClient:
                 'subcategories': subcategories,
             })
 
-        cache_key = self._financial_cache_key(normalized, token=token, store_id=store_id)
-        self._financials_cache[cache_key] = CacheEntry(
-            value=financial_index,
-            expires_at=monotonic() + self.inventory_cache_ttl,
-        )
+        expires_at = monotonic() + self.inventory_cache_ttl
+        cache_keys = {
+            self._financial_cache_key(normalized, token=token, store_id=store_id),
+            self._financial_cache_key(normalized, token=token, store_id='auto'),
+        }
+        for cache_key in cache_keys:
+            self._financials_cache[cache_key] = CacheEntry(
+                value=financial_index,
+                expires_at=expires_at,
+            )
 
         logger.info('Для точки %s собрано %s категорий и %s товаров', normalized, len(categories), len(stock_rows))
         return {'location': normalized, 'categories': categories}

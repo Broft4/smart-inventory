@@ -30,6 +30,25 @@ function formatMoney(value) {
     return `${number.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`;
 }
 
+function formatSignedQuantity(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return '—';
+    if (number > 0) return `+${number}`;
+    return `${number}`;
+}
+
+function renderMoneyBreakdown(unitValue, totalValue, quantity) {
+    const unitText = formatMoney(unitValue);
+    const totalText = formatMoney(totalValue);
+    const quantityText = formatSignedQuantity(quantity);
+    return `
+        <div class="money-breakdown">
+            <div class="money-breakdown-unit">${unitText}</div>
+            <div class="money-breakdown-total muted-text">${totalText} × ${escapeHtml(quantityText)}</div>
+        </div>
+    `;
+}
+
 function escapeHtml(value) {
     return String(value ?? '')
         .replaceAll('&', '&amp;')
@@ -1160,9 +1179,9 @@ function renderEmployeeDetails(report) {
                                         <td class="num-cell">${item.expected}</td>
                                         <td class="num-cell">${item.actual}</td>
                                         <td class="num-cell ${diffClass}">${diffSign}${item.diff}</td>
-                                        <td class="num-cell">${formatMoney(item.cost_total)}</td>
-                                        <td class="num-cell">${formatMoney(item.retail_total)}</td>
-                                        <td class="num-cell">${formatMoney(item.lost_profit)}</td>
+                                        <td class="num-cell">${renderMoneyBreakdown(item.cost_price, item.cost_total, item.diff)}</td>
+                                        <td class="num-cell">${renderMoneyBreakdown(item.retail_price, item.retail_total, item.diff)}</td>
+                                        <td class="num-cell">${renderMoneyBreakdown((item.retail_price !== null && item.retail_price !== undefined && item.cost_price !== null && item.cost_price !== undefined) ? Number(item.retail_price) - Number(item.cost_price) : null, item.lost_profit, item.diff)}</td>
                                         <td><span class="employee-pill">${highlightMatch(item.checked_by, adminState.searchQuery)}</span></td>
                                     </tr>
                                 `;
@@ -1344,9 +1363,9 @@ function renderCategories(report) {
                                                 <td class="num-cell">${item.expected}</td>
                                                 <td class="num-cell">${item.actual}</td>
                                                 <td class="num-cell ${diffClass}">${diffSign}${item.diff}</td>
-                                                <td class="num-cell">${formatMoney(item.cost_total)}</td>
-                                                <td class="num-cell">${formatMoney(item.retail_total)}</td>
-                                                <td class="num-cell">${formatMoney(item.lost_profit)}</td>
+                                                <td class="num-cell">${renderMoneyBreakdown(item.cost_price, item.cost_total, item.diff)}</td>
+                                                <td class="num-cell">${renderMoneyBreakdown(item.retail_price, item.retail_total, item.diff)}</td>
+                                                <td class="num-cell">${renderMoneyBreakdown((item.retail_price !== null && item.retail_price !== undefined && item.cost_price !== null && item.cost_price !== undefined) ? Number(item.retail_price) - Number(item.cost_price) : null, item.lost_profit, item.diff)}</td>
                                                 <td><span class="employee-pill">${highlightMatch(item.checked_by || '-', adminState.searchQuery)}</span></td>
                                             </tr>
                                         `;
