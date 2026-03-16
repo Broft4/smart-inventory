@@ -23,6 +23,12 @@ function safeText(value) {
     return value ?? '-';
 }
 
+function formatMoney(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return '—';
+    return `${number.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`;
+}
+
 function escapeHtml(value) {
     return String(value ?? '')
         .replaceAll('&', '&amp;')
@@ -114,24 +120,56 @@ function isDiagnosticsCategoryName(name) {
     return normalizeSearch(name) === normalizeSearch('Без категории');
 }
 
-function setAdminReportLoading(message = 'Загрузка данных ревизии...') {
-    const spinner = '<span class="inventory-spinner" aria-hidden="true"></span>';
-    const loadingHtml = `
-        <div class="inventory-status loading">
+function setAdminReportStatus(message = '', type = 'loading') {
+    const container = document.getElementById('admin-report-loading');
+    if (!container) return;
+
+    if (!message) {
+        container.innerHTML = '';
+        return;
+    }
+
+    const spinner = type === 'loading' ? '<span class="inventory-spinner" aria-hidden="true"></span>' : '';
+    container.innerHTML = `
+        <div class="inventory-status ${escapeHtml(type)}">
             <div class="inventory-status-row">
                 ${spinner}
                 <div class="inventory-status-text">${escapeHtml(message)}</div>
             </div>
         </div>
     `;
+}
 
+function resetSummary() {
+    document.getElementById('report-location').textContent = '-';
+    document.getElementById('report-date').textContent = '-';
+    document.getElementById('report-status').textContent = '-';
+    document.getElementById('report-id').textContent = '-';
+    document.getElementById('total-plus').textContent = '+0';
+    document.getElementById('total-minus').textContent = '0';
+    document.getElementById('report-status-chip').textContent = '—';
+    document.getElementById('report-status-chip').className = 'report-status-chip';
+    document.getElementById('employees-count').textContent = '0';
+    document.getElementById('completed-categories').textContent = '0/0';
+    document.getElementById('discrepancy-categories').textContent = '0';
+    document.getElementById('discrepancy-items').textContent = '0';
+    document.getElementById('total-cost').textContent = '0 ₽';
+    document.getElementById('total-retail').textContent = '0 ₽';
+    document.getElementById('total-lost-profit').textContent = '0 ₽';
+}
+
+function setAdminReportLoading(message = 'Загрузка данных ревизии...') {
+    setAdminReportStatus(message, 'loading');
+
+    const loadingCardHtml = `<div class="category-card"><p class="empty-text">${escapeHtml(message)}</p></div>`;
     const employeesContainer = document.getElementById('report-employees');
     const categoriesContainer = document.getElementById('report-categories');
     const employeeDetailsContainer = document.getElementById('report-employee-details');
 
-    if (employeesContainer) employeesContainer.innerHTML = loadingHtml;
-    if (categoriesContainer) categoriesContainer.innerHTML = loadingHtml;
-    if (employeeDetailsContainer) employeeDetailsContainer.innerHTML = loadingHtml;
+    resetSummary();
+    if (employeesContainer) employeesContainer.innerHTML = loadingCardHtml;
+    if (categoriesContainer) categoriesContainer.innerHTML = loadingCardHtml;
+    if (employeeDetailsContainer) employeeDetailsContainer.innerHTML = loadingCardHtml;
 }
 
 function renderDiagnostics(rows, location) {
@@ -991,6 +1029,9 @@ function buildEmployeeDetailGroups(report) {
                 actual: item.actual,
                 diff: item.diff,
                 checked_by: item.checked_by || owner,
+                cost_total: item.cost_total,
+                retail_total: item.retail_total,
+                lost_profit: item.lost_profit,
             });
         });
     });
@@ -1101,6 +1142,9 @@ function renderEmployeeDetails(report) {
                                 <th>План</th>
                                 <th>Факт</th>
                                 <th>Разница</th>
+                                <th>Себестоимость</th>
+                                <th>Розница</th>
+                                <th>Утерянная прибыль</th>
                                 <th>Сотрудник</th>
                             </tr>
                         </thead>
@@ -1115,6 +1159,9 @@ function renderEmployeeDetails(report) {
                                         <td class="num-cell">${item.expected}</td>
                                         <td class="num-cell">${item.actual}</td>
                                         <td class="num-cell ${diffClass}">${diffSign}${item.diff}</td>
+                                        <td class="num-cell">${formatMoney(item.cost_total)}</td>
+                                        <td class="num-cell">${formatMoney(item.retail_total)}</td>
+                                        <td class="num-cell">${formatMoney(item.lost_profit)}</td>
                                         <td><span class="employee-pill">${highlightMatch(item.checked_by, adminState.searchQuery)}</span></td>
                                     </tr>
                                 `;
@@ -1183,6 +1230,9 @@ function updateSummary(report) {
     document.getElementById('completed-categories').textContent = `${completedCategories}/${totalCategories}`;
     document.getElementById('discrepancy-categories').textContent = String(discrepancyCategories);
     document.getElementById('discrepancy-items').textContent = String(discrepancyItems);
+    document.getElementById('total-cost').textContent = formatMoney(report.total_cost || 0);
+    document.getElementById('total-retail').textContent = formatMoney(report.total_retail || 0);
+    document.getElementById('total-lost-profit').textContent = formatMoney(report.total_lost_profit || 0);
 }
 
 function renderEmployees(report) {
@@ -1277,6 +1327,9 @@ function renderCategories(report) {
                                         <th>План</th>
                                         <th>Факт</th>
                                         <th>Разница</th>
+                                        <th>Себестоимость</th>
+                                        <th>Розница</th>
+                                        <th>Утерянная прибыль</th>
                                         <th>Сотрудник</th>
                                     </tr>
                                 </thead>
@@ -1290,6 +1343,9 @@ function renderCategories(report) {
                                                 <td class="num-cell">${item.expected}</td>
                                                 <td class="num-cell">${item.actual}</td>
                                                 <td class="num-cell ${diffClass}">${diffSign}${item.diff}</td>
+                                                <td class="num-cell">${formatMoney(item.cost_total)}</td>
+                                                <td class="num-cell">${formatMoney(item.retail_total)}</td>
+                                                <td class="num-cell">${formatMoney(item.lost_profit)}</td>
                                                 <td><span class="employee-pill">${highlightMatch(item.checked_by || '-', adminState.searchQuery)}</span></td>
                                             </tr>
                                         `;
@@ -1378,8 +1434,10 @@ async function loadAdminReport(location, reportId) {
         updateSummary(report);
         populateEmployeeFilter(report);
         renderAllReportViews(report);
+        setAdminReportStatus('');
     } catch (error) {
         console.error(error);
+        setAdminReportStatus('Не удалось загрузить данные ревизии.', 'error');
         employeesContainer.innerHTML = '<p class="empty-text error-text">Ошибка загрузки данных о сотрудниках.</p>';
         if (employeeDetailsContainer) {
             employeeDetailsContainer.innerHTML = '<div class="category-card"><p class="empty-text error-text">Ошибка загрузки детализации по сотрудникам.</p></div>';
