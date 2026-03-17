@@ -111,8 +111,14 @@ function toggleCycleCategoryBody(categoryId) {
     const button = document.querySelector(`[data-cycle-category-toggle="${CSS.escape(categoryId)}"]`);
     if (!body || !button) return;
 
-    const isHidden = body.style.display === 'none';
-    body.style.display = isHidden ? 'grid' : 'none';
+    const isHidden = body.classList.contains('hidden') || getComputedStyle(body).display === 'none';
+    if (isHidden) {
+        body.classList.remove('hidden');
+        body.style.display = 'grid';
+    } else {
+        body.classList.add('hidden');
+        body.style.display = 'none';
+    }
     button.textContent = isHidden ? '−' : '+';
     button.setAttribute('aria-expanded', isHidden ? 'true' : 'false');
 }
