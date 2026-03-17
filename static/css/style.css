@@ -1065,3 +1065,53 @@ body.modal-open {
 @media (max-width: 768px) {
     .location-manage-grid { grid-template-columns: 1fr; }
 }
+
+
+.cycle-targets-toolbar {
+    display: grid;
+    grid-template-columns: minmax(220px, 260px) minmax(260px, 1fr) auto;
+    gap: 12px;
+    margin-bottom: 12px;
+    align-items: end;
+}
+.cycle-targets-toolbar-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+.cycle-targets-status-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+}
+.cycle-target-card {
+    margin-bottom: 12px;
+}
+.cycle-target-header {
+    align-items: center;
+}
+.cycle-target-checkbox-row,
+.cycle-target-subcategory-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    cursor: pointer;
+}
+.cycle-target-checkbox-row {
+    flex: 1;
+}
+.cycle-target-subcategory-list {
+    display: grid;
+    gap: 8px;
+}
+@media (max-width: 900px) {
+    .cycle-targets-toolbar {
+        grid-template-columns: 1fr;
+    }
+    .cycle-targets-toolbar-actions {
+        justify-content: flex-start;
+    }
+}

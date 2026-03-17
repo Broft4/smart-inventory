@@ -350,14 +350,22 @@
                 <button id="close-cycle-targets-modal-btn" class="btn secondary btn-inline" type="button">Закрыть</button>
             </div>
         </div>
-        <div style="display:grid; gap:8px; margin-bottom:12px;">
+        <div class="cycle-targets-toolbar">
             <label>
                 Дата начала цикла
                 <input type="date" id="cycle-start-date">
             </label>
-            <p class="muted-text" style="margin:0;">Можно выбрать дату в пределах последних 15 дней. Ревизии сохраняются: текущими будут считаться те, что попадают в этот интервал.</p>
+            <label>
+                Поиск по категориям
+                <input type="text" id="cycle-targets-search" placeholder="Начните вводить категорию или подкатегорию..." autocomplete="off">
+            </label>
         </div>
-        <div id="cycle-targets-meta" class="muted-text" style="margin-bottom:12px;"></div>
+        <p class="muted-text" style="margin:0 0 12px;">Можно выбрать дату в пределах последних 15 дней. Ниже — полный список категорий: можно выбрать всю категорию целиком или раскрыть её и отметить только нужные подкатегории.</p>
+        <div id="cycle-targets-meta" class="muted-text" style="margin-bottom:6px;"></div>
+        <div class="cycle-targets-status-row muted-text">
+            <span id="cycle-targets-selected-count">Выбрано категорий: 0. Подкатегорий: 0.</span>
+            <span id="cycle-targets-filtered-count">Показано категорий: 0.</span>
+        </div>
         <div id="cycle-targets-list" class="modal-users-list"><p>Загрузка...</p></div>
         <div id="cycle-targets-message" class="message"></div>
     </div>
