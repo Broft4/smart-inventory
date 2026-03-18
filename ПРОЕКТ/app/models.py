@@ -18,8 +18,6 @@ class LocationPoint(Base):
     ms_store_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
-    admin_accesses: Mapped[list['AdminLocationAccess']] = relationship(back_populates='location_point', cascade='all, delete-orphan')
-
 
 class User(Base):
     __tablename__ = 'users'
@@ -36,32 +34,6 @@ class User(Base):
 
     check_results: Mapped[list['CheckResult']] = relationship(back_populates='checked_by_user')
     selection_assignments: Mapped[list['CategoryAssignment']] = relationship(back_populates='user')
-    admin_location_accesses: Mapped[list['AdminLocationAccess']] = relationship(
-        back_populates='admin_user',
-        foreign_keys='AdminLocationAccess.admin_user_id',
-        cascade='all, delete-orphan',
-    )
-    granted_location_accesses: Mapped[list['AdminLocationAccess']] = relationship(
-        back_populates='granted_by_user',
-        foreign_keys='AdminLocationAccess.granted_by_user_id',
-    )
-
-
-class AdminLocationAccess(Base):
-    __tablename__ = 'admin_location_access'
-    __table_args__ = (
-        UniqueConstraint('admin_user_id', 'location_point_id', name='uq_admin_location_access_admin_location'),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    admin_user_id: Mapped[int] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
-    location_point_id: Mapped[int] = mapped_column(ForeignKey('location_points.id', ondelete='CASCADE'), nullable=False, index=True)
-    granted_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
-
-    admin_user: Mapped[User] = relationship(back_populates='admin_location_accesses', foreign_keys=[admin_user_id])
-    granted_by_user: Mapped[User | None] = relationship(back_populates='granted_location_accesses', foreign_keys=[granted_by_user_id])
-    location_point: Mapped[LocationPoint] = relationship(back_populates='admin_accesses')
 
 
 class SelectionCycle(Base):

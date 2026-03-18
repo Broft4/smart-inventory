@@ -78,65 +78,6 @@ function encodeUser(user) {
     return encodeURIComponent(JSON.stringify(user));
 }
 
-
-function isSuperadmin() {
-    return Boolean(window.currentAdmin?.is_superadmin || window.currentAdmin?.role === 'superadmin');
-}
-
-function setMultiSelectValues(select, values) {
-    if (!select) return;
-    const wanted = new Set((values || []).map(value => String(value)));
-    [...select.options].forEach(option => {
-        option.selected = wanted.has(String(option.value));
-    });
-}
-
-function getSelectedMultiSelectValues(select) {
-    if (!select) return [];
-    return [...select.selectedOptions].map(option => Number(option.value)).filter(Number.isFinite);
-}
-
-function updateUserFormByRole({ editingUser = null } = {}) {
-    const roleSelect = document.getElementById('user-role');
-    const locationRow = document.getElementById('user-location-row');
-    const adminLocationsRow = document.getElementById('user-admin-locations-row');
-    const locationSelect = document.getElementById('user-location');
-    const adminLocationsSelect = document.getElementById('user-admin-locations');
-    if (!roleSelect || !locationRow || !adminLocationsRow || !locationSelect || !adminLocationsSelect) return;
-
-    const selectedRole = roleSelect.value;
-    const editingCurrentAdmin = Boolean(editingUser && Number(editingUser.id) === Number(window.currentAdmin?.id));
-    const currentIsSuperadmin = isSuperadmin();
-
-    [...roleSelect.options].forEach(option => {
-        if (option.value === 'superadmin') {
-            option.hidden = !currentIsSuperadmin && !(editingUser && editingUser.role === 'superadmin');
-        }
-        if (option.value === 'admin') {
-            option.hidden = !currentIsSuperadmin && !(editingUser && editingUser.role === 'admin');
-        }
-    });
-
-    if (!currentIsSuperadmin && selectedRole !== 'employee') {
-        roleSelect.value = editingCurrentAdmin ? 'admin' : 'employee';
-    }
-
-    const roleValue = roleSelect.value;
-    const isEmployee = roleValue === 'employee';
-    const isAdmin = roleValue === 'admin';
-
-    locationRow.classList.toggle('hidden', !isEmployee);
-    adminLocationsRow.classList.toggle('hidden', !isAdmin || !currentIsSuperadmin);
-
-    roleSelect.disabled = !currentIsSuperadmin && editingCurrentAdmin;
-    if (!isEmployee) {
-        locationSelect.value = '';
-    }
-    if (!(isAdmin && currentIsSuperadmin)) {
-        setMultiSelectValues(adminLocationsSelect, []);
-    }
-}
-
 function showModal(modalId) {
     const modal = document.getElementById(modalId);
     if (!modal) return;
@@ -388,7 +329,6 @@ async function openDiagnosticsModal(location, triggerButton) {
 function renderLocationOptions(locations) {
     const locationSelect = document.getElementById('admin-location-select');
     const userLocation = document.getElementById('user-location');
-    const adminLocations = document.getElementById('user-admin-locations');
     adminState.locations = Array.isArray(locations) ? locations : [];
 
     if (adminState.selectedLocation && !adminState.locations.some(location => location.name === adminState.selectedLocation)) {
@@ -399,16 +339,11 @@ function renderLocationOptions(locations) {
     }
 
     if (locationSelect) {
-        locationSelect.innerHTML = adminState.locations.length
-            ? adminState.locations.map(location => `<option value="${escapeHtml(location.name)}">${escapeHtml(location.name)}</option>`).join('')
-            : '<option value="">Нет доступных точек</option>';
+        locationSelect.innerHTML = adminState.locations.map(location => `<option value="${escapeHtml(location.name)}">${escapeHtml(location.name)}</option>`).join('');
         locationSelect.value = adminState.selectedLocation || '';
     }
     if (userLocation) {
         userLocation.innerHTML = `<option value="">— не выбрано —</option>${adminState.locations.map(location => `<option value="${escapeHtml(location.name)}">${escapeHtml(location.name)}</option>`).join('')}`;
-    }
-    if (adminLocations) {
-        adminLocations.innerHTML = adminState.locations.map(location => `<option value="${escapeHtml(location.id)}">${escapeHtml(location.name)}</option>`).join('');
     }
 
     renderLocationManageList();
@@ -664,29 +599,24 @@ function renderUsers(users) {
         return;
     }
 
-    container.innerHTML = users.map(user => {
-        const locationInfo = user.role === 'admin'
-            ? (Array.isArray(user.admin_locations) && user.admin_locations.length ? `точки: ${escapeHtml(user.admin_locations.join(', '))}` : 'точки не назначены')
-            : escapeHtml(user.location || 'без точки');
-        return `
-            <div class="user-row">
-                <div>
-                    <strong>${escapeHtml(user.full_name)}</strong>
-                    <div class="muted-text">${escapeHtml(user.username)} · ${escapeHtml(user.role)} · ${locationInfo}</div>
-                    <div class="muted-text">Дата рождения: ${escapeHtml(user.birth_date)} · ${user.is_active ? 'активен' : 'выключен'}</div>
-                </div>
-                <div class="user-row-actions">
-                    <button class="btn secondary btn-inline" data-user="${encodeUser(user)}" onclick="editUserFromEncoded(this.dataset.user)">Редактировать</button>
-                    <button class="btn danger btn-inline" onclick="deleteUser(${user.id})">Удалить</button>
-                </div>
+    container.innerHTML = users.map(user => `
+        <div class="user-row">
+            <div>
+                <strong>${escapeHtml(user.full_name)}</strong>
+                <div class="muted-text">${escapeHtml(user.username)} · ${escapeHtml(user.role)} · ${escapeHtml(user.location || 'без точки')}</div>
+                <div class="muted-text">Дата рождения: ${escapeHtml(user.birth_date)} · ${user.is_active ? 'активен' : 'выключен'}</div>
             </div>
-        `;
-    }).join('');
+            <div class="user-row-actions">
+                <button class="btn secondary btn-inline" data-user="${encodeUser(user)}" onclick="editUserFromEncoded(this.dataset.user)">Редактировать</button>
+                <button class="btn danger btn-inline" onclick="deleteUser(${user.id})">Удалить</button>
+            </div>
+        </div>
+    `).join('');
 }
 
 window.editUserFromEncoded = function (encodedUser) {
     const user = JSON.parse(decodeURIComponent(encodedUser));
-    document.getElementById('user-form-title').textContent = 'Редактировать пользователя';
+    document.getElementById('user-form-title').textContent = 'Редактировать сотрудника';
     document.getElementById('user-id').value = user.id;
     document.getElementById('user-full-name').value = user.full_name;
     document.getElementById('user-birth-date').value = user.birth_date;
@@ -694,33 +624,25 @@ window.editUserFromEncoded = function (encodedUser) {
     document.getElementById('user-password').value = '';
     document.getElementById('user-role').value = user.role;
     document.getElementById('user-location').value = user.location || '';
-    setMultiSelectValues(document.getElementById('user-admin-locations'), user.admin_location_ids || []);
     document.getElementById('user-active').checked = Boolean(user.is_active);
     document.getElementById('user-form-message').textContent = '';
     document.getElementById('user-form-message').style.color = '#dc3545';
-    updateUserFormByRole({ editingUser: user });
     showModal('users-modal');
     showModal('user-form-modal');
 };
 
 function resetUserForm() {
-    document.getElementById('user-form-title').textContent = 'Создать пользователя';
+    document.getElementById('user-form-title').textContent = 'Создать сотрудника';
     document.getElementById('user-id').value = '';
     document.getElementById('user-form').reset();
     document.getElementById('user-active').checked = true;
     document.getElementById('user-form-message').textContent = '';
     document.getElementById('user-form-message').style.color = '#dc3545';
     document.getElementById('user-location').value = '';
-    setMultiSelectValues(document.getElementById('user-admin-locations'), []);
-    if (!isSuperadmin()) {
-        document.getElementById('user-role').value = 'employee';
-    }
-    updateUserFormByRole();
 }
 
 function openCreateUserModal() {
     resetUserForm();
-    updateUserFormByRole();
     showModal('users-modal');
     showModal('user-form-modal');
 }
@@ -754,14 +676,12 @@ async function submitUserForm(event) {
     message.style.color = '#dc3545';
 
     const password = document.getElementById('user-password').value;
-    const selectedRole = document.getElementById('user-role').value;
     const payload = {
         full_name: document.getElementById('user-full-name').value.trim(),
         birth_date: document.getElementById('user-birth-date').value,
         username: document.getElementById('user-username').value.trim(),
-        role: selectedRole,
-        location: selectedRole === 'employee' ? (document.getElementById('user-location').value || null) : null,
-        admin_location_ids: selectedRole === 'admin' ? getSelectedMultiSelectValues(document.getElementById('user-admin-locations')) : [],
+        role: document.getElementById('user-role').value,
+        location: document.getElementById('user-location').value || null,
         is_active: document.getElementById('user-active').checked,
     };
 
@@ -1641,7 +1561,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     const discrepancyOnly = document.getElementById('admin-discrepancy-only');
     const completedOnly = document.getElementById('admin-completed-only');
     const searchInput = document.getElementById('admin-search-input');
-    const userRoleSelect = document.getElementById('user-role');
 
     document.getElementById('logout-btn').addEventListener('click', logout);
     document.getElementById('open-users-btn').addEventListener('click', async () => {
@@ -1674,14 +1593,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('close-cycle-targets-modal-btn')?.addEventListener('click', () => hideModal('cycle-targets-modal'));
     document.getElementById('save-cycle-targets-btn')?.addEventListener('click', saveCycleTargetsSelection);
     document.getElementById('close-users-modal-btn').addEventListener('click', () => hideModal('users-modal'));
-    document.getElementById('open-create-user-btn').textContent = isSuperadmin() ? 'Добавить пользователя' : 'Добавить сотрудника';
     document.getElementById('open-create-user-btn').addEventListener('click', openCreateUserModal);
     document.getElementById('close-user-form-modal-btn').addEventListener('click', () => {
         hideModal('user-form-modal');
         resetUserForm();
     });
     document.getElementById('user-form').addEventListener('submit', submitUserForm);
-    userRoleSelect?.addEventListener('change', () => updateUserFormByRole());
     document.getElementById('user-form-reset').addEventListener('click', resetUserForm);
     document.getElementById('delete-report-btn').addEventListener('click', deleteSelectedReport);
     document.getElementById('download-diagnostics-btn')?.addEventListener('click', async () => {
@@ -1753,7 +1670,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     initModalCloseBehavior();
     setViewMode('categories');
-    updateUserFormByRole();
     await loadLocations();
     await reloadReportsSection(adminState.selectedLocation || document.getElementById('admin-location-select').value);
 });

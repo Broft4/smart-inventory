@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.moysklad import DEFAULT_CATEGORY_NAME, DEFAULT_SUBCATEGORY_NAME, ms_client
-from app.models import AdminLocationAccess, CategoryAssignment, CheckResult, LocationPoint, Report, SelectionCycle, SelectionTarget, User
+from app.models import CategoryAssignment, CheckResult, LocationPoint, Report, SelectionCycle, SelectionTarget, User
 from app.schemas import (
     AdminCycleTargetCategory,
     AdminCycleTargetItem,
@@ -271,12 +271,6 @@ def bootstrap_schema_and_admin(sync_conn) -> None:
         if not required.issubset(cols):
             sync_conn.execute(text('DROP TABLE IF EXISTS location_points'))
 
-    if 'admin_location_access' in tables:
-        cols = {c['name'] for c in inspector.get_columns('admin_location_access')}
-        required = {'id', 'admin_user_id', 'location_point_id', 'granted_by_user_id', 'created_at'}
-        if not required.issubset(cols):
-            sync_conn.execute(text('DROP TABLE IF EXISTS admin_location_access'))
-
     if reset_reports:
         sync_conn.execute(text('DROP TABLE IF EXISTS check_results'))
         sync_conn.execute(text('DROP TABLE IF EXISTS reports'))
@@ -289,151 +283,22 @@ def bootstrap_schema_and_admin(sync_conn) -> None:
     Base.metadata.create_all(sync_conn)
 
 
-async def _assign_admin_location_access_by_ids(admin_user_id: int, location_ids: list[int], db: AsyncSession, granted_by_user_id: int | None = None) -> None:
-    await db.execute(delete(AdminLocationAccess).where(AdminLocationAccess.admin_user_id == admin_user_id))
-    unique_ids: list[int] = []
-    seen: set[int] = set()
-    for location_id in location_ids:
-        normalized_id = int(location_id)
-        if normalized_id not in seen:
-            unique_ids.append(normalized_id)
-            seen.add(normalized_id)
-    for location_id in unique_ids:
-        db.add(AdminLocationAccess(
-            admin_user_id=admin_user_id,
-            location_point_id=location_id,
-            granted_by_user_id=granted_by_user_id,
-        ))
-
-
-async def _get_admin_location_rows(admin_user_id: int, db: AsyncSession) -> list[LocationPoint]:
-    return (
-        await db.scalars(
-            select(LocationPoint)
-            .join(AdminLocationAccess, AdminLocationAccess.location_point_id == LocationPoint.id)
-            .where(AdminLocationAccess.admin_user_id == admin_user_id)
-            .order_by(LocationPoint.name.asc())
-        )
-    ).all()
-
-
-async def get_user_accessible_locations(user: User, db: AsyncSession) -> list[str]:
-    if user.role == RoleEnum.SUPERADMIN.value:
-        rows = (await db.scalars(select(LocationPoint).order_by(LocationPoint.name.asc()))).all()
-        return [row.name for row in rows]
-    if user.role == RoleEnum.ADMIN.value:
-        return [row.name for row in await _get_admin_location_rows(user.id, db)]
-    if user.location:
-        return [_normalize_location(user.location)]
-    return []
-
-
-async def get_user_accessible_location_ids(user: User, db: AsyncSession) -> list[int]:
-    if user.role == RoleEnum.SUPERADMIN.value:
-        rows = (await db.scalars(select(LocationPoint.id).order_by(LocationPoint.name.asc()))).all()
-        return [int(row) for row in rows]
-    if user.role == RoleEnum.ADMIN.value:
-        rows = (await db.scalars(
-            select(AdminLocationAccess.location_point_id)
-            .where(AdminLocationAccess.admin_user_id == user.id)
-            .order_by(AdminLocationAccess.location_point_id.asc())
-        )).all()
-        return [int(row) for row in rows]
-    if not user.location:
-        return []
-    location_id = await db.scalar(select(LocationPoint.id).where(LocationPoint.name == _normalize_location(user.location)).limit(1))
-    return [int(location_id)] if location_id else []
-
-
-async def user_has_location_access(user: User, location: str, db: AsyncSession) -> bool:
-    normalized = _normalize_location(location)
-    if user.role == RoleEnum.SUPERADMIN.value:
-        return True
-    if user.role == RoleEnum.ADMIN.value:
-        return normalized in set(await get_user_accessible_locations(user, db))
-    return normalized == _normalize_location(user.location or '')
-
-
-async def ensure_user_can_access_location(user: User, location: str, db: AsyncSession) -> None:
-    if not await user_has_location_access(user, location, db):
-        raise HTTPException(status_code=403, detail='Нет доступа к выбранной точке.')
-
-
-async def _validate_location_ids(location_ids: list[int], db: AsyncSession) -> list[LocationPoint]:
-    unique_ids = sorted({int(location_id) for location_id in location_ids})
-    if not unique_ids:
-        return []
-    rows = (await db.scalars(select(LocationPoint).where(LocationPoint.id.in_(unique_ids)).order_by(LocationPoint.name.asc()))).all()
-    if len(rows) != len(unique_ids):
-        raise HTTPException(status_code=400, detail='Выбраны несуществующие точки.')
-    return rows
-
-
-async def _build_user_response(user: User, db: AsyncSession) -> UserResponse:
-    admin_rows = await _get_admin_location_rows(user.id, db) if user.role == RoleEnum.ADMIN.value else []
-    return UserResponse(
-        id=user.id,
-        full_name=user.full_name,
-        birth_date=user.birth_date,
-        username=user.username,
-        role=RoleEnum(user.role),
-        location=user.location,
-        is_active=user.is_active,
-        admin_location_ids=[row.id for row in admin_rows],
-        admin_locations=[row.name for row in admin_rows],
-    )
-
-
-async def _migrate_admin_location_access(db: AsyncSession) -> None:
-    admins = (await db.scalars(select(User).where(User.role == RoleEnum.ADMIN.value))).all()
-    changed = False
-    for admin in admins:
-        access_count = await db.scalar(select(func.count()).select_from(AdminLocationAccess).where(AdminLocationAccess.admin_user_id == admin.id))
-        if (access_count or 0) > 0:
-            continue
-        if not admin.location:
-            continue
-        point = await db.scalar(select(LocationPoint).where(LocationPoint.name == _normalize_location(admin.location)).limit(1))
-        if not point:
-            continue
-        db.add(AdminLocationAccess(admin_user_id=admin.id, location_point_id=point.id, granted_by_user_id=None))
-        changed = True
-    if changed:
-        await db.commit()
-
-
 async def ensure_default_admin(db: AsyncSession) -> None:
-    await _ensure_default_location_points(db)
+    admin = await db.scalar(select(User).where(User.role == RoleEnum.ADMIN.value).limit(1))
+    if admin:
+        return
 
-    superadmin = await db.scalar(select(User).where(User.role == RoleEnum.SUPERADMIN.value).limit(1))
-    if not superadmin:
-        default_user = await db.scalar(select(User).where(User.username == settings.default_admin_username).limit(1))
-        if default_user:
-            default_user.role = RoleEnum.SUPERADMIN.value
-            default_user.location = None
-            default_user.is_active = True
-            await db.commit()
-        else:
-            existing_admin = await db.scalar(select(User).where(User.role == RoleEnum.ADMIN.value).order_by(User.id.asc()).limit(1))
-            if existing_admin:
-                existing_admin.role = RoleEnum.SUPERADMIN.value
-                existing_admin.location = None
-                existing_admin.is_active = True
-                await db.commit()
-            else:
-                admin_user = User(
-                    full_name=settings.default_admin_full_name,
-                    birth_date=date.fromisoformat(settings.default_admin_birth_date),
-                    username=settings.default_admin_username,
-                    password_hash=hash_password(settings.default_admin_password),
-                    role=RoleEnum.SUPERADMIN.value,
-                    location=None,
-                    is_active=True,
-                )
-                db.add(admin_user)
-                await db.commit()
-
-    await _migrate_admin_location_access(db)
+    admin_user = User(
+        full_name=settings.default_admin_full_name,
+        birth_date=date.fromisoformat(settings.default_admin_birth_date),
+        username=settings.default_admin_username,
+        password_hash=hash_password(settings.default_admin_password),
+        role=RoleEnum.ADMIN.value,
+        location=None,
+        is_active=True,
+    )
+    db.add(admin_user)
+    await db.commit()
 
 
 def user_to_schema(user: User) -> UserInfo:
@@ -445,8 +310,6 @@ def user_to_schema(user: User) -> UserInfo:
         role=RoleEnum(user.role),
         location=user.location,
         is_active=user.is_active,
-        admin_location_ids=[],
-        admin_locations=[],
     )
 
 
@@ -471,80 +334,32 @@ async def prewarm_inventory_cache(location: str | None) -> None:
         await ms_client.prewarm_inventory(normalized)
 
 
-async def list_users(db: AsyncSession, current_user: User) -> UserListResponse:
-    accessible_locations = set(await get_user_accessible_locations(current_user, db))
-
-    if current_user.role == RoleEnum.SUPERADMIN.value:
-        users = (await db.scalars(select(User))).all()
-    else:
-        conditions = [User.id == current_user.id]
-        if accessible_locations:
-            conditions.append(and_(User.role == RoleEnum.EMPLOYEE.value, User.location.in_(accessible_locations)))
-        users = (await db.scalars(select(User).where(or_(*conditions)))).all()
-
-    role_order = {
-        RoleEnum.SUPERADMIN.value: 0,
-        RoleEnum.ADMIN.value: 1,
-        RoleEnum.EMPLOYEE.value: 2,
-    }
-    ordered_users = sorted(users, key=lambda item: (role_order.get(item.role, 99), item.full_name.lower()))
-    return UserListResponse(users=[await _build_user_response(user, db) for user in ordered_users])
+async def list_users(db: AsyncSession) -> UserListResponse:
+    rows = await db.scalars(select(User).order_by(User.role.desc(), User.full_name.asc()))
+    return UserListResponse(users=[UserResponse.model_validate(user) for user in rows.all()])
 
 
-async def create_user(payload: UserCreateRequest, db: AsyncSession, current_user: User) -> UserActionResponse:
+async def create_user(payload: UserCreateRequest, db: AsyncSession) -> UserActionResponse:
     existing = await db.scalar(select(User).where(User.username == payload.username).limit(1))
     if existing:
         raise HTTPException(status_code=400, detail='Пользователь с таким логином уже существует.')
-
-    requested_role = payload.role.value
-    normalized_location = _normalize_location(payload.location) if payload.location else None
-    requested_access_ids = sorted({int(location_id) for location_id in payload.admin_location_ids})
-
-    if current_user.role == RoleEnum.ADMIN.value and requested_role != RoleEnum.EMPLOYEE.value:
-        raise HTTPException(status_code=403, detail='Обычный администратор может создавать только сотрудников.')
-    if requested_role == RoleEnum.SUPERADMIN.value and current_user.role != RoleEnum.SUPERADMIN.value:
-        raise HTTPException(status_code=403, detail='Создавать главного администратора может только главный администратор.')
-    if requested_role == RoleEnum.ADMIN.value and current_user.role != RoleEnum.SUPERADMIN.value:
-        raise HTTPException(status_code=403, detail='Создавать администраторов может только главный администратор.')
-
-    if requested_role == RoleEnum.EMPLOYEE.value:
-        if not normalized_location:
-            raise HTTPException(status_code=400, detail='Сотруднику нужно назначить точку.')
-        location_point = await db.scalar(select(LocationPoint).where(LocationPoint.name == normalized_location).limit(1))
-        if not location_point:
-            raise HTTPException(status_code=400, detail='Выбрана несуществующая точка.')
-        if current_user.role == RoleEnum.ADMIN.value:
-            await ensure_user_can_access_location(current_user, normalized_location, db)
-    else:
-        normalized_location = None
-
-    admin_location_rows: list[LocationPoint] = []
-    if requested_role == RoleEnum.ADMIN.value:
-        admin_location_rows = await _validate_location_ids(requested_access_ids, db)
-        if not admin_location_rows:
-            raise HTTPException(status_code=400, detail='Администратору нужно назначить хотя бы одну точку.')
 
     user = User(
         full_name=payload.full_name.strip(),
         birth_date=payload.birth_date,
         username=payload.username.strip(),
         password_hash=hash_password(payload.password),
-        role=requested_role,
-        location=normalized_location,
+        role=payload.role.value,
+        location=payload.location or None,
         is_active=payload.is_active,
     )
     db.add(user)
-    await db.flush()
-
-    if requested_role == RoleEnum.ADMIN.value:
-        await _assign_admin_location_access_by_ids(user.id, [row.id for row in admin_location_rows], db, granted_by_user_id=current_user.id)
-
     await db.commit()
     await db.refresh(user)
-    return UserActionResponse(success=True, message='Пользователь создан.', user=await _build_user_response(user, db))
+    return UserActionResponse(success=True, message='Пользователь создан.', user=UserResponse.model_validate(user))
 
 
-async def update_user(user_id: int, payload: UserUpdateRequest, db: AsyncSession, current_user: User) -> UserActionResponse:
+async def update_user(user_id: int, payload: UserUpdateRequest, db: AsyncSession, current_admin_id: int | None = None) -> UserActionResponse:
     user = await db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail='Пользователь не найден.')
@@ -553,59 +368,15 @@ async def update_user(user_id: int, payload: UserUpdateRequest, db: AsyncSession
     if duplicate:
         raise HTTPException(status_code=400, detail='Пользователь с таким логином уже существует.')
 
-    requested_role = payload.role.value
-    normalized_location = _normalize_location(payload.location) if payload.location else None
-    requested_access_ids = sorted({int(location_id) for location_id in payload.admin_location_ids})
-
-    if current_user.role == RoleEnum.ADMIN.value:
-        accessible_locations = set(await get_user_accessible_locations(current_user, db))
-        if user.id == current_user.id:
-            if user.role != RoleEnum.ADMIN.value or requested_role != RoleEnum.ADMIN.value:
-                raise HTTPException(status_code=400, detail='Нельзя снять роль admin у своего аккаунта.')
-        else:
-            if user.role != RoleEnum.EMPLOYEE.value:
-                raise HTTPException(status_code=403, detail='Обычный администратор может редактировать только сотрудников.')
-            if user.location and _normalize_location(user.location) not in accessible_locations:
-                raise HTTPException(status_code=403, detail='Нет доступа к пользователю из другой точки.')
-            if requested_role != RoleEnum.EMPLOYEE.value:
-                raise HTTPException(status_code=403, detail='Обычный администратор не может менять роль сотрудника.')
-            if not normalized_location:
-                raise HTTPException(status_code=400, detail='Сотруднику нужно назначить точку.')
-            if normalized_location not in accessible_locations:
-                raise HTTPException(status_code=403, detail='Нельзя назначить сотруднику чужую точку.')
-
-    if requested_role == RoleEnum.SUPERADMIN.value and current_user.role != RoleEnum.SUPERADMIN.value:
-        raise HTTPException(status_code=403, detail='Назначать роль главного администратора может только главный администратор.')
-    if requested_role == RoleEnum.ADMIN.value and current_user.role != RoleEnum.SUPERADMIN.value and user.id != current_user.id:
-        raise HTTPException(status_code=403, detail='Назначать роль администратора может только главный администратор.')
-
-    if user.id == current_user.id and user.role == RoleEnum.SUPERADMIN.value and requested_role != RoleEnum.SUPERADMIN.value:
-        raise HTTPException(status_code=400, detail='Нельзя снять роль главного администратора у своего аккаунта.')
-
-    old_superadmin = user.role == RoleEnum.SUPERADMIN.value
-
-    admin_location_rows: list[LocationPoint] = []
-    if requested_role == RoleEnum.ADMIN.value:
-        if current_user.role == RoleEnum.SUPERADMIN.value:
-            admin_location_rows = await _validate_location_ids(requested_access_ids, db)
-            if user.id != current_user.id and not admin_location_rows:
-                raise HTTPException(status_code=400, detail='Администратору нужно назначить хотя бы одну точку.')
-        normalized_location = None
-    elif requested_role == RoleEnum.EMPLOYEE.value:
-        if not normalized_location:
-            raise HTTPException(status_code=400, detail='Сотруднику нужно назначить точку.')
-        location_point = await db.scalar(select(LocationPoint).where(LocationPoint.name == normalized_location).limit(1))
-        if not location_point:
-            raise HTTPException(status_code=400, detail='Выбрана несуществующая точка.')
-    else:
-        normalized_location = None
+    if user.id == current_admin_id and payload.role != RoleEnum.ADMIN:
+        raise HTTPException(status_code=400, detail='Нельзя снять роль admin у своего аккаунта.')
 
     old_name = user.full_name
     user.full_name = payload.full_name.strip()
     user.birth_date = payload.birth_date
     user.username = payload.username.strip()
-    user.role = requested_role
-    user.location = normalized_location
+    user.role = payload.role.value
+    user.location = payload.location or None
     user.is_active = payload.is_active
     if payload.password:
         user.password_hash = hash_password(payload.password)
@@ -614,49 +385,26 @@ async def update_user(user_id: int, payload: UserUpdateRequest, db: AsyncSession
         await db.execute(update(CategoryAssignment).where(CategoryAssignment.user_id == user.id).values(user_full_name_snapshot=user.full_name))
         await db.execute(update(CheckResult).where(CheckResult.checked_by_user_id == user.id).values(checked_by_name_snapshot=user.full_name))
 
-    if requested_role == RoleEnum.ADMIN.value:
-        if current_user.role == RoleEnum.SUPERADMIN.value:
-            if admin_location_rows:
-                await _assign_admin_location_access_by_ids(user.id, [row.id for row in admin_location_rows], db, granted_by_user_id=current_user.id)
-            elif user.id != current_user.id:
-                await _assign_admin_location_access_by_ids(user.id, [], db, granted_by_user_id=current_user.id)
-        user.location = None
-    else:
-        await db.execute(delete(AdminLocationAccess).where(AdminLocationAccess.admin_user_id == user.id))
-
-    if old_superadmin and requested_role != RoleEnum.SUPERADMIN.value:
-        superadmin_count = await db.scalar(select(func.count()).select_from(User).where(User.role == RoleEnum.SUPERADMIN.value))
-        if (superadmin_count or 0) <= 1:
-            raise HTTPException(status_code=400, detail='Нельзя снять роль у последнего главного администратора.')
-
     await db.commit()
     await db.refresh(user)
-    return UserActionResponse(success=True, message='Пользователь обновлён.', user=await _build_user_response(user, db))
+    return UserActionResponse(success=True, message='Пользователь обновлён.', user=UserResponse.model_validate(user))
 
 
-async def delete_user(user_id: int, db: AsyncSession, current_user: User) -> DeleteResponse:
+async def delete_user(user_id: int, db: AsyncSession, current_admin_id: int | None = None) -> DeleteResponse:
     user = await db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail='Пользователь не найден.')
 
-    if user.id == current_user.id:
+    if user.id == current_admin_id:
         raise HTTPException(status_code=400, detail='Нельзя удалить собственный аккаунт.')
 
-    if current_user.role == RoleEnum.ADMIN.value:
-        accessible_locations = set(await get_user_accessible_locations(current_user, db))
-        if user.role != RoleEnum.EMPLOYEE.value:
-            raise HTTPException(status_code=403, detail='Обычный администратор может удалять только сотрудников.')
-        if not user.location or _normalize_location(user.location) not in accessible_locations:
-            raise HTTPException(status_code=403, detail='Нет доступа к пользователю из другой точки.')
-
-    if user.role == RoleEnum.SUPERADMIN.value:
-        superadmin_count = await db.scalar(select(func.count()).select_from(User).where(User.role == RoleEnum.SUPERADMIN.value))
-        if (superadmin_count or 0) <= 1:
-            raise HTTPException(status_code=400, detail='Нельзя удалить последнего главного администратора.')
+    if user.role == RoleEnum.ADMIN.value:
+        admin_count = await db.scalar(select(func.count()).select_from(User).where(User.role == RoleEnum.ADMIN.value))
+        if (admin_count or 0) <= 1:
+            raise HTTPException(status_code=400, detail='Нельзя удалить последнего администратора.')
 
     await db.execute(update(CategoryAssignment).where(CategoryAssignment.user_id == user.id).values(user_id=None))
     await db.execute(update(CheckResult).where(CheckResult.checked_by_user_id == user.id).values(checked_by_user_id=None))
-    await db.execute(delete(AdminLocationAccess).where(AdminLocationAccess.admin_user_id == user.id))
     await db.delete(user)
     await db.commit()
     return DeleteResponse(success=True, message='Пользователь удалён.')
@@ -947,21 +695,9 @@ def _filter_inventory_by_targets(inventory: dict[str, Any], selected_category_id
     return {'location': inventory.get('location'), 'categories': categories}
 
 
-async def list_locations(db: AsyncSession, current_user: User) -> LocationListResponse:
+async def list_locations(db: AsyncSession) -> LocationListResponse:
     await _ensure_default_location_points(db)
-    if current_user.role == RoleEnum.SUPERADMIN.value:
-        rows = (await db.scalars(select(LocationPoint).order_by(LocationPoint.name.asc()))).all()
-    elif current_user.role == RoleEnum.ADMIN.value:
-        rows = (
-            await db.scalars(
-                select(LocationPoint)
-                .join(AdminLocationAccess, AdminLocationAccess.location_point_id == LocationPoint.id)
-                .where(AdminLocationAccess.admin_user_id == current_user.id)
-                .order_by(LocationPoint.name.asc())
-            )
-        ).all()
-    else:
-        rows = []
+    rows = (await db.scalars(select(LocationPoint).order_by(LocationPoint.name.asc()))).all()
     locations = [LocationPointModel.model_validate(row) for row in rows]
     return LocationListResponse(locations=locations)
 
@@ -1051,10 +787,6 @@ async def delete_location_point(location_id: int, db: AsyncSession) -> DeleteRes
         count = await db.scalar(select(func.count()).select_from(model).where(model.location == point.name))
         if (count or 0) > 0:
             linked_entities.append(label)
-
-    access_count = await db.scalar(select(func.count()).select_from(AdminLocationAccess).where(AdminLocationAccess.location_point_id == point.id))
-    if (access_count or 0) > 0:
-        linked_entities.append('доступы администраторов')
 
     if linked_entities:
         raise HTTPException(
@@ -1881,12 +1613,10 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
     )
 
 
-async def delete_report(report_id: int, db: AsyncSession, current_user: User | None = None) -> DeleteResponse:
+async def delete_report(report_id: int, db: AsyncSession) -> DeleteResponse:
     report = await db.get(Report, report_id)
     if not report:
         raise HTTPException(status_code=404, detail='Ревизия не найдена.')
-    if current_user is not None:
-        await ensure_user_can_access_location(current_user, report.location, db)
     await db.delete(report)
     await db.commit()
     return DeleteResponse(success=True, message='Ревизия удалена.')

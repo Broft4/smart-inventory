@@ -15,7 +15,6 @@ class StatusEnum(str, Enum):
 
 
 class RoleEnum(str, Enum):
-    SUPERADMIN = 'superadmin'
     ADMIN = 'admin'
     EMPLOYEE = 'employee'
 
@@ -28,8 +27,6 @@ class UserInfo(BaseModel):
     role: RoleEnum
     location: Optional[str] = None
     is_active: bool
-    admin_location_ids: list[int] = Field(default_factory=list)
-    admin_locations: list[str] = Field(default_factory=list)
 
 
 class LoginRequest(BaseModel):
@@ -61,7 +58,6 @@ class UserCreateRequest(BaseModel):
     password: str
     role: RoleEnum = RoleEnum.EMPLOYEE
     location: Optional[str] = None
-    admin_location_ids: list[int] = Field(default_factory=list)
     is_active: bool = True
 
 
@@ -72,7 +68,6 @@ class UserUpdateRequest(BaseModel):
     password: Optional[str] = None
     role: RoleEnum = RoleEnum.EMPLOYEE
     location: Optional[str] = None
-    admin_location_ids: list[int] = Field(default_factory=list)
     is_active: bool = True
 
 
@@ -84,8 +79,6 @@ class UserResponse(BaseModel):
     role: RoleEnum
     location: Optional[str] = None
     is_active: bool
-    admin_location_ids: list[int] = Field(default_factory=list)
-    admin_locations: list[str] = Field(default_factory=list)
 
     model_config = {'from_attributes': True}
 

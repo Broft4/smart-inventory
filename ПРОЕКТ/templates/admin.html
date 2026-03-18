@@ -15,9 +15,7 @@
         </div>
         <div class="header-actions">
             <button id="open-cycle-targets-btn" class="btn secondary btn-inline" type="button" data-open-modal-action="cycle-targets">Категории цикла</button>
-            {% if user.role == 'superadmin' %}
             <button id="open-create-location-btn" class="btn secondary btn-inline" type="button" data-open-modal-action="location">Точки</button>
-            {% endif %}
             <button id="open-users-btn" class="btn secondary btn-inline" type="button">Сотрудники</button>
             <button id="logout-btn" class="btn secondary btn-inline" type="button">Выйти</button>
         </div>
@@ -183,11 +181,11 @@
     <div class="modal-card users-modal-card">
         <div class="modal-header">
             <div>
-                <h2>Пользователи</h2>
+                <h2>Сотрудники</h2>
                 <p class="muted-text">Создание, редактирование и удаление учётных записей.</p>
             </div>
             <div class="modal-header-actions">
-                <button id="open-create-user-btn" class="btn primary btn-inline" type="button">Добавить пользователя</button>
+                <button id="open-create-user-btn" class="btn primary btn-inline" type="button">Добавить сотрудника</button>
                 <button id="close-users-modal-btn" class="btn secondary btn-inline" type="button">Закрыть</button>
             </div>
         </div>
@@ -225,17 +223,14 @@
                 <select id="user-role">
                     <option value="employee">employee</option>
                     <option value="admin">admin</option>
-                    <option value="superadmin">superadmin</option>
                 </select>
             </label>
-            <label id="user-location-row">Точка сотрудника
+            <label>Точка
                 <select id="user-location">
                     <option value="">— не выбрано —</option>
+                    <option value="Дубна">Дубна</option>
+                    <option value="Дмитров">Дмитров</option>
                 </select>
-            </label>
-            <label id="user-admin-locations-row" class="hidden">Доступные точки администратора
-                <select id="user-admin-locations" multiple size="6"></select>
-                <span class="muted-text">Для администратора можно выбрать несколько точек. Удерживайте Ctrl/Cmd для множественного выбора.</span>
             </label>
             <label class="checkbox-row">
                 <input type="checkbox" id="user-active" checked>
@@ -376,14 +371,6 @@
     </div>
 </div>
 
-<script>
-    window.currentAdmin = {{ {
-        'id': user.id,
-        'role': user.role,
-        'full_name': user.full_name,
-        'is_superadmin': user.role == 'superadmin'
-    } | tojson }};
-</script>
 <script src="/static/js/admin.js?v={{ asset_version }}"></script>
 
 </body>

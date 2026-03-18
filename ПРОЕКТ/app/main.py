@@ -18,27 +18,26 @@ from app.config import settings
 from app.database import engine, get_db
 from app.logic import (
     assign_selection_to_user,
+    create_location_point,
+    update_location_point,
+    delete_location_point,
+    get_cycle_targets,
     authenticate_user,
     bootstrap_schema_and_admin,
-    create_location_point,
     create_user,
-    delete_location_point,
     delete_report,
     delete_user,
     ensure_default_admin,
-    ensure_user_can_access_location,
     finish_report,
     get_admin_report,
-    get_cycle_targets,
     get_inventory_data,
+    list_locations,
+    list_moysklad_stores_by_token,
     get_inventory_diagnostics_rows,
     get_me_response,
     get_reports_history,
-    list_locations,
-    list_moysklad_stores_by_token,
     list_users,
     save_cycle_targets,
-    update_location_point,
     update_user,
     user_to_schema,
     verify_item_or_category,
@@ -48,24 +47,24 @@ from app.schemas import (
     AdminCycleTargetsResponse,
     AdminReport,
     AssignSelectionRequest,
-    AssignSelectionResponse,
     CreateLocationRequest,
     CreateLocationResponse,
+    UpdateLocationRequest,
+    UpdateLocationResponse,
+    AssignSelectionResponse,
     DeleteResponse,
     FinishReportRequest,
     FinishReportResponse,
     InventoryStructureResponse,
-    LocationListResponse,
     LoginRequest,
     LoginResponse,
+    LocationListResponse,
     LogoutResponse,
     MeResponse,
     ReportHistoryResponse,
     SaveCycleTargetsRequest,
     SaveCycleTargetsResponse,
     StoreListResponse,
-    UpdateLocationRequest,
-    UpdateLocationResponse,
     UserActionResponse,
     UserCreateRequest,
     UserListResponse,
@@ -98,7 +97,6 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260318-role-hierarchy'
 
 
 async def get_current_user(request: Request, db: AsyncSession = Depends(get_db)) -> User | None:
@@ -118,22 +116,16 @@ async def require_user(user: User | None = Depends(get_current_user)) -> User:
     return user
 
 
-async def require_admin_or_superadmin(user: User = Depends(require_user)) -> User:
-    if user.role not in {'admin', 'superadmin'}:
+async def require_admin(user: User = Depends(require_user)) -> User:
+    if user.role != 'admin':
         raise HTTPException(status_code=403, detail='Доступ только для администратора.')
-    return user
-
-
-async def require_superadmin(user: User = Depends(require_user)) -> User:
-    if user.role != 'superadmin':
-        raise HTTPException(status_code=403, detail='Доступ только для главного администратора.')
     return user
 
 
 @app.get('/login')
 async def login_page(request: Request, user: User | None = Depends(get_current_user)):
     if user:
-        return RedirectResponse(url='/admin' if user.role in {'admin', 'superadmin'} else '/', status_code=302)
+        return RedirectResponse(url='/admin' if user.role == 'admin' else '/', status_code=302)
     return templates.TemplateResponse('login.html', {'request': request})
 
 
@@ -141,7 +133,7 @@ async def login_page(request: Request, user: User | None = Depends(get_current_u
 async def inventory_page(request: Request, user: User | None = Depends(get_current_user)):
     if not user:
         return RedirectResponse(url='/login', status_code=302)
-    if user.role in {'admin', 'superadmin'}:
+    if user.role == 'admin':
         return RedirectResponse(url='/admin', status_code=302)
     return templates.TemplateResponse(
         'index.html',
@@ -150,7 +142,7 @@ async def inventory_page(request: Request, user: User | None = Depends(get_curre
 
 
 @app.get('/admin')
-async def admin_page(request: Request, admin: User = Depends(require_admin_or_superadmin)):
+async def admin_page(request: Request, admin: User = Depends(require_admin)):
     return templates.TemplateResponse('admin.html', {'request': request, 'user': admin})
 
 
@@ -164,7 +156,7 @@ async def api_login(payload: LoginRequest, request: Request, db: AsyncSession = 
         success=True,
         message='Вход выполнен.',
         user=user_to_schema(user),
-        redirect_to='/admin' if user.role in {'admin', 'superadmin'} else '/',
+        redirect_to='/admin' if user.role == 'admin' else '/',
     )
 
 
@@ -180,12 +172,12 @@ async def api_me(user: User | None = Depends(get_current_user)):
 
 
 @app.get('/api/locations', response_model=LocationListResponse)
-async def api_list_locations(admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
-    return await list_locations(db, admin)
+async def api_list_locations(admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    return await list_locations(db)
 
 
 @app.post('/api/locations/stores', response_model=StoreListResponse)
-async def api_list_location_stores(payload: dict, admin: User = Depends(require_superadmin)):
+async def api_list_location_stores(payload: dict, admin: User = Depends(require_admin)):
     token = str(payload.get('ms_token') or '').strip()
     if not token:
         raise HTTPException(status_code=400, detail='Нужно передать токен МойСклад.')
@@ -193,50 +185,48 @@ async def api_list_location_stores(payload: dict, admin: User = Depends(require_
 
 
 @app.post('/api/locations', response_model=CreateLocationResponse)
-async def api_create_location(payload: CreateLocationRequest, admin: User = Depends(require_superadmin), db: AsyncSession = Depends(get_db)):
+async def api_create_location(payload: CreateLocationRequest, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     return await create_location_point(payload, db)
 
 
 @app.patch('/api/locations/{location_id}', response_model=UpdateLocationResponse)
-async def api_update_location(location_id: int, payload: UpdateLocationRequest, admin: User = Depends(require_superadmin), db: AsyncSession = Depends(get_db)):
+async def api_update_location(location_id: int, payload: UpdateLocationRequest, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     return await update_location_point(location_id, payload, db)
 
 
 @app.delete('/api/locations/{location_id}', response_model=DeleteResponse)
-async def api_delete_location(location_id: int, admin: User = Depends(require_superadmin), db: AsyncSession = Depends(get_db)):
+async def api_delete_location(location_id: int, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     return await delete_location_point(location_id, db)
 
 
 @app.get('/api/cycle-targets', response_model=AdminCycleTargetsResponse)
-async def api_get_cycle_targets(location: str, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
-    await ensure_user_can_access_location(admin, location, db)
+async def api_get_cycle_targets(location: str, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     return await get_cycle_targets(location, db)
 
 
 @app.post('/api/cycle-targets', response_model=SaveCycleTargetsResponse)
-async def api_save_cycle_targets(payload: SaveCycleTargetsRequest, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
-    await ensure_user_can_access_location(admin, payload.location, db)
+async def api_save_cycle_targets(payload: SaveCycleTargetsRequest, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     return await save_cycle_targets(payload, db)
 
 
 @app.get('/api/users', response_model=UserListResponse)
-async def api_list_users(admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
-    return await list_users(db, admin)
+async def api_list_users(admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    return await list_users(db)
 
 
 @app.post('/api/users', response_model=UserActionResponse)
-async def api_create_user(payload: UserCreateRequest, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
-    return await create_user(payload, db, current_user=admin)
+async def api_create_user(payload: UserCreateRequest, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    return await create_user(payload, db)
 
 
 @app.put('/api/users/{user_id}', response_model=UserActionResponse)
-async def api_update_user(user_id: int, payload: UserUpdateRequest, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
-    return await update_user(user_id, payload, db, current_user=admin)
+async def api_update_user(user_id: int, payload: UserUpdateRequest, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    return await update_user(user_id, payload, db, current_admin_id=admin.id)
 
 
 @app.delete('/api/users/{user_id}', response_model=DeleteResponse)
-async def api_delete_user(user_id: int, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
-    return await delete_user(user_id, db, current_user=admin)
+async def api_delete_user(user_id: int, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    return await delete_user(user_id, db, current_admin_id=admin.id)
 
 
 @app.get('/get-structure', response_model=InventoryStructureResponse)
@@ -267,40 +257,27 @@ async def complete_report(req: FinishReportRequest, user: User = Depends(require
 @app.get('/api/reports', response_model=ReportHistoryResponse)
 async def api_get_reports(location: str | None = None, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
     target_location = location or user.location
+    if user.role != 'admin' and target_location != user.location:
+        raise HTTPException(status_code=403, detail='Нельзя смотреть чужую точку.')
     if not target_location:
         raise HTTPException(status_code=400, detail='Точка не указана.')
-
-    if user.role == 'employee':
-        if target_location != user.location:
-            raise HTTPException(status_code=403, detail='Нельзя смотреть чужую точку.')
-    else:
-        await ensure_user_can_access_location(user, target_location, db)
-
     return await get_reports_history(target_location, db)
 
 
 @app.get('/api/report', response_model=AdminReport)
-async def api_get_report(location: str | None = None, report_id: int | None = None, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+async def api_get_report(location: str | None = None, report_id: int | None = None, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     if not location:
         raise HTTPException(status_code=400, detail='Нужно указать точку.')
-    await ensure_user_can_access_location(admin, location, db)
     return await get_admin_report(location, db, report_id)
 
 
 @app.delete('/api/report/{report_id}', response_model=DeleteResponse)
-async def api_delete_report(report_id: int, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
-    return await delete_report(report_id, db, current_user=admin)
-
-
-@app.get('/api/inventory-diagnostics')
-async def api_inventory_diagnostics(location: str, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
-    await ensure_user_can_access_location(admin, location, db)
-    return await get_inventory_diagnostics_rows(location)
+async def api_delete_report(report_id: int, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    return await delete_report(report_id, db)
 
 
 @app.get('/api/inventory-diagnostics/export')
-async def api_export_inventory_diagnostics(location: str, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
-    await ensure_user_can_access_location(admin, location, db)
+async def api_export_inventory_diagnostics(location: str, admin: User = Depends(require_admin)):
     rows = await get_inventory_diagnostics_rows(location)
 
     output = io.StringIO()
