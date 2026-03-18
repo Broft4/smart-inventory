@@ -1,6 +1,4 @@
 let inventoryState = null;
-let subcategoryAttempts = {};
-let itemAttempts = {};
 let inventoryLoading = false;
 
 function getInventoryStatusElement() {
@@ -775,18 +773,17 @@ window.verifySubcategory = async function (subId) {
     const msgElement = document.getElementById(`msg-${subId}`);
     const inputValue = parseFloat(inputElement.value);
     if (Number.isNaN(inputValue)) return;
-    subcategoryAttempts[subId] = (subcategoryAttempts[subId] || 0) + 1;
 
     try {
         const response = await fetch('/verify', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ report_id: inventoryState.report_id, target_id: subId, is_category: true, quantity: inputValue, attempt_number: subcategoryAttempts[subId] }),
+            body: JSON.stringify({ report_id: inventoryState.report_id, target_id: subId, is_category: true, quantity: inputValue }),
         });
         const result = await response.json();
         msgElement.textContent = result.message;
         msgElement.style.color = result.is_correct ? 'green' : 'red';
-        if (result.expand_category || result.is_correct) {
+        if (result.expand_category || result.is_correct || result.attempts_left === 0) {
             await loadInventory();
         } else {
             inputElement.value = '';
@@ -806,18 +803,16 @@ window.verifyItem = async function (itemId) {
     const msgElement = document.getElementById(`msg-${itemId}`);
     const inputValue = parseFloat(inputElement.value);
     if (Number.isNaN(inputValue)) return;
-    itemAttempts[itemId] = (itemAttempts[itemId] || 0) + 1;
     try {
         const response = await fetch('/verify', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ report_id: inventoryState.report_id, target_id: itemId, is_category: false, quantity: inputValue, attempt_number: itemAttempts[itemId] }),
+            body: JSON.stringify({ report_id: inventoryState.report_id, target_id: itemId, is_category: false, quantity: inputValue }),
         });
         const result = await response.json();
         msgElement.textContent = result.message;
         msgElement.style.color = result.is_correct ? 'green' : 'red';
         if (result.is_correct || result.attempts_left === 0) {
-            itemAttempts[itemId] = 0;
             await loadInventory();
         } else {
             inputElement.value = '';

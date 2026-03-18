@@ -192,7 +192,6 @@ class VerifyRequest(BaseModel):
     target_id: str
     is_category: bool
     quantity: float
-    attempt_number: int
 
 
 class VerifyResponse(BaseModel):

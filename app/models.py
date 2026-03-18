@@ -134,6 +134,22 @@ class CategoryAssignment(Base):
     user: Mapped[User | None] = relationship(back_populates='selection_assignments')
 
 
+class VerifyAttemptProgress(Base):
+    __tablename__ = 'verify_attempt_progress'
+    __table_args__ = (
+        UniqueConstraint('report_id', 'target_type', 'target_id', 'checked_by_user_id', name='uq_verify_attempt_progress_per_target_user'),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    report_id: Mapped[int] = mapped_column(ForeignKey('reports.id', ondelete='CASCADE'), nullable=False, index=True)
+    target_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    target_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    checked_by_user_id: Mapped[int] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    attempts_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class CheckResult(Base):
     __tablename__ = 'check_results'
 

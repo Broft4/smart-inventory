@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.moysklad import DEFAULT_CATEGORY_NAME, DEFAULT_SUBCATEGORY_NAME, ms_client
-from app.models import AdminLocationAccess, CategoryAssignment, CheckResult, LocationPoint, Report, SelectionCycle, SelectionTarget, User
+from app.models import AdminLocationAccess, CategoryAssignment, CheckResult, LocationPoint, Report, SelectionCycle, SelectionTarget, User, VerifyAttemptProgress
 from app.schemas import (
     AdminCycleTargetCategory,
     AdminCycleTargetItem,
@@ -276,6 +276,12 @@ def bootstrap_schema_and_admin(sync_conn) -> None:
         required = {'id', 'admin_user_id', 'location_point_id', 'granted_by_user_id', 'created_at'}
         if not required.issubset(cols):
             sync_conn.execute(text('DROP TABLE IF EXISTS admin_location_access'))
+
+    if 'verify_attempt_progress' in tables:
+        cols = {c['name'] for c in inspector.get_columns('verify_attempt_progress')}
+        required = {'id', 'report_id', 'target_type', 'target_id', 'checked_by_user_id', 'attempts_used', 'created_at', 'updated_at'}
+        if not required.issubset(cols):
+            sync_conn.execute(text('DROP TABLE IF EXISTS verify_attempt_progress'))
 
     if reset_reports:
         sync_conn.execute(text('DROP TABLE IF EXISTS check_results'))
@@ -1604,6 +1610,59 @@ async def _upsert_check_result(
         ))
 
 
+async def _get_or_increment_attempt_count(
+    *,
+    report_id: int,
+    target_type: str,
+    target_id: str,
+    checked_by_user_id: int,
+    db: AsyncSession,
+) -> int:
+    progress = await db.scalar(
+        select(VerifyAttemptProgress)
+        .where(VerifyAttemptProgress.report_id == report_id)
+        .where(VerifyAttemptProgress.target_type == target_type)
+        .where(VerifyAttemptProgress.target_id == target_id)
+        .where(VerifyAttemptProgress.checked_by_user_id == checked_by_user_id)
+        .limit(1)
+    )
+    now = datetime.utcnow()
+    if progress:
+        progress.attempts_used += 1
+        progress.updated_at = now
+        return progress.attempts_used
+
+    progress = VerifyAttemptProgress(
+        report_id=report_id,
+        target_type=target_type,
+        target_id=target_id,
+        checked_by_user_id=checked_by_user_id,
+        attempts_used=1,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(progress)
+    await db.flush()
+    return progress.attempts_used
+
+
+async def _clear_attempt_count(
+    *,
+    report_id: int,
+    target_type: str,
+    target_id: str,
+    checked_by_user_id: int,
+    db: AsyncSession,
+) -> None:
+    await db.execute(
+        delete(VerifyAttemptProgress)
+        .where(VerifyAttemptProgress.report_id == report_id)
+        .where(VerifyAttemptProgress.target_type == target_type)
+        .where(VerifyAttemptProgress.target_id == target_id)
+        .where(VerifyAttemptProgress.checked_by_user_id == checked_by_user_id)
+    )
+
+
 async def verify_item_or_category(data: VerifyRequest, db: AsyncSession, checked_by_user: User) -> VerifyResponse:
     report = await db.get(Report, data.report_id)
     if not report:
@@ -1615,6 +1674,14 @@ async def verify_item_or_category(data: VerifyRequest, db: AsyncSession, checked
     assignments = await _load_assignments(report.location, report.cycle_version, db)
     if not _user_can_verify_target(checked_by_user, report, category_id, subcategory_id, data.target_id, target_type, assignments):
         raise HTTPException(status_code=403, detail='Эта категория, подкатегория или товар не закреплены за вами.')
+
+    attempt_number = await _get_or_increment_attempt_count(
+        report_id=report.id,
+        target_type=target_type,
+        target_id=data.target_id,
+        checked_by_user_id=checked_by_user.id,
+        db=db,
+    )
 
     is_correct = abs(data.quantity - expected_qty) < 1e-9
     if is_correct:
@@ -1631,17 +1698,25 @@ async def verify_item_or_category(data: VerifyRequest, db: AsyncSession, checked
             actual_qty=data.quantity,
             diff=0.0,
             status_value='green',
-            attempts_used=data.attempt_number,
+            attempts_used=attempt_number,
             checked_by_user_id=checked_by_user.id,
             checked_by_name_snapshot=checked_by_user.full_name,
+            db=db,
+        )
+        await _clear_attempt_count(
+            report_id=report.id,
+            target_type=target_type,
+            target_id=data.target_id,
+            checked_by_user_id=checked_by_user.id,
             db=db,
         )
         await db.commit()
         await _refresh_report_status(report, db)
         return VerifyResponse(is_correct=True, attempts_left=0, message='Верно!', expand_category=False)
 
-    attempts_left = max(0, 3 - data.attempt_number)
+    attempts_left = max(0, 3 - attempt_number)
     if attempts_left > 0:
+        await db.commit()
         return VerifyResponse(is_correct=False, attempts_left=attempts_left, message=f'Неверно. Осталось {attempts_left} попытк(и).', expand_category=False)
 
     status_value = 'orange' if data.is_category else 'red'
@@ -1658,9 +1733,16 @@ async def verify_item_or_category(data: VerifyRequest, db: AsyncSession, checked
         actual_qty=data.quantity,
         diff=float(data.quantity - expected_qty),
         status_value=status_value,
-        attempts_used=data.attempt_number,
+        attempts_used=attempt_number,
         checked_by_user_id=checked_by_user.id,
         checked_by_name_snapshot=checked_by_user.full_name,
+        db=db,
+    )
+    await _clear_attempt_count(
+        report_id=report.id,
+        target_type=target_type,
+        target_id=data.target_id,
+        checked_by_user_id=checked_by_user.id,
         db=db,
     )
     await db.commit()
