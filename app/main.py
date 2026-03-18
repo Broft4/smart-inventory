@@ -98,7 +98,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260318-role-hierarchy'
+templates.env.globals['asset_version'] = '20260318-report-finalization'
 
 
 async def get_current_user(request: Request, db: AsyncSession = Depends(get_db)) -> User | None:
@@ -264,7 +264,7 @@ async def verify_count(req: VerifyRequest, user: User = Depends(require_user), d
 
 @app.post('/finish-report', response_model=FinishReportResponse)
 async def complete_report(req: FinishReportRequest, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
-    success, message = await finish_report(req.report_id, db)
+    success, message = await finish_report(req.report_id, db, user)
     return FinishReportResponse(success=success, message=message)
 
 

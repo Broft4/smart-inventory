@@ -170,6 +170,20 @@ class ReportTargetSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class ReportEmployeeCompletion(Base):
+    __tablename__ = 'report_employee_completions'
+    __table_args__ = (
+        UniqueConstraint('report_id', 'user_id', name='uq_report_employee_completion_per_user'),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    report_id: Mapped[int] = mapped_column(ForeignKey('reports.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_full_name_snapshot: Mapped[str] = mapped_column(String(255), nullable=False)
+    finished_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+
 class CheckResult(Base):
     __tablename__ = 'check_results'
 

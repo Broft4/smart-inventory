@@ -1,4 +1,6 @@
 let inventoryState = null;
+let subcategoryAttempts = {};
+let itemAttempts = {};
 let inventoryLoading = false;
 
 function getInventoryStatusElement() {
@@ -48,7 +50,6 @@ const employeePageState = {
 
 const employeeUiState = {
     openCategories: new Set(),
-    closedCategories: new Set(),
     openSubcategories: new Set(),
 };
 
@@ -59,6 +60,7 @@ function getRevisionStorageKey(reportDate) {
 }
 
 function getEmployeeRevisionState(reportDate = inventoryState?.report_date) {
+    if (inventoryState?.employee_finished || inventoryState?.report_completed) return 'finished';
     if (!reportDate) return 'idle';
     return localStorage.getItem(getRevisionStorageKey(reportDate)) || 'idle';
 }
@@ -69,11 +71,11 @@ function setEmployeeRevisionState(state, reportDate = inventoryState?.report_dat
 }
 
 function employeeRevisionIsActive() {
-    return getEmployeeRevisionState() === 'started';
+    return !employeeRevisionIsFinished() && getEmployeeRevisionState() === 'started';
 }
 
 function employeeRevisionIsFinished() {
-    return getEmployeeRevisionState() === 'finished';
+    return Boolean(inventoryState?.employee_finished || inventoryState?.report_completed || getEmployeeRevisionState() === 'finished');
 }
 
 function renderEmployeeRevisionControls() {
@@ -87,12 +89,12 @@ function renderEmployeeRevisionControls() {
     const hint = document.getElementById('finish-hint');
     if (!startBtn || !refreshBtn || !finishBtn || !banner || !tools || !categories || !summary || !hint) return;
 
-    const state = getEmployeeRevisionState();
-    const active = state === 'started';
-    const finished = state === 'finished';
+    const finished = Boolean(inventoryState?.employee_finished || inventoryState?.report_completed);
+    const state = finished ? 'finished' : getEmployeeRevisionState();
+    const active = !finished && state === 'started';
 
-    startBtn.classList.toggle('hidden', active);
-    startBtn.textContent = finished ? 'Продолжить ревизию' : 'Начать ревизию';
+    startBtn.classList.toggle('hidden', active || finished);
+    startBtn.textContent = 'Начать ревизию';
     refreshBtn.classList.toggle('hidden', !active);
     finishBtn.classList.toggle('hidden', !active);
 
@@ -102,22 +104,28 @@ function renderEmployeeRevisionControls() {
 
     if (finished) {
         banner.className = 'employee-revision-banner done';
-        banner.innerHTML = '<strong>Ревизия на сегодня скрыта.</strong> Рабочие поля закрыты, но вы можете снова открыть их этой же кнопкой.';
-        hint.textContent = 'Кнопка «Продолжить ревизию» снова откроет категории и поля ввода за этот же день.';
+        banner.innerHTML = inventoryState?.report_completed
+            ? '<strong>Ревизия по точке завершена.</strong>'
+            : '<strong>Ваша ревизия завершена.</strong> Продолжить работу в этот день уже нельзя.';
+        hint.textContent = 'Кнопка «Завершить ревизию» фиксирует завершение на сервере и блокирует продолжение работы до следующего дня.';
     } else if (!active) {
         banner.className = 'employee-revision-banner idle';
         banner.innerHTML = '<strong>Ревизия ещё не начата.</strong> Нажмите «Начать ревизию», чтобы открыть категории и приступить к работе.';
-        hint.textContent = 'Сначала запустите ревизию на текущий день, затем введите данные и при необходимости скройте рабочие поля.';
+        hint.textContent = 'После завершения ревизии на текущий день продолжить её уже будет нельзя.';
     } else {
         banner.className = 'employee-revision-banner hidden';
         banner.innerHTML = '';
-        hint.textContent = 'Ревизия активна. Кнопка «Завершить ревизию» только скрывает интерфейс и не создаёт новую ревизию.';
+        hint.textContent = 'Когда закончите работу, нажмите «Завершить ревизию». После подтверждения продолжить её в этот день уже нельзя.';
     }
 }
 
 function ensureRevisionStateForCurrentDay() {
     if (!inventoryState?.report_date) return;
     const key = getRevisionStorageKey(inventoryState.report_date);
+    if (inventoryState?.employee_finished || inventoryState?.report_completed) {
+        localStorage.setItem(key, 'finished');
+        return;
+    }
     if (!localStorage.getItem(key)) {
         localStorage.setItem(key, 'idle');
     }
@@ -235,7 +243,6 @@ function categoryHasCompletedMineWork(category) {
 
 function captureEmployeeUiState() {
     employeeUiState.openCategories = new Set((inventoryState?.categories || []).filter(category => category.is_open).map(category => category.id));
-    employeeUiState.closedCategories = new Set((inventoryState?.categories || []).filter(category => category.is_open === false).map(category => category.id));
     employeeUiState.openSubcategories = new Set(
         (inventoryState?.categories || []).flatMap(category => (category.subcategories || []).filter(sub => sub.is_expanded).map(sub => sub.id))
     );
@@ -245,14 +252,8 @@ function applyEmployeeUiState() {
     if (!inventoryState?.categories) return;
 
     for (const category of inventoryState.categories) {
-        if (employeeUiState.openCategories.has(category.id)) {
+        if (employeeUiState.openCategories.has(category.id) || categoryHasPendingMineWork(category)) {
             category.is_open = true;
-        } else if (employeeUiState.closedCategories.has(category.id)) {
-            category.is_open = false;
-        } else if (categoryHasPendingMineWork(category)) {
-            category.is_open = true;
-        } else {
-            category.is_open = false;
         }
 
         for (const sub of category.subcategories || []) {
@@ -558,7 +559,7 @@ function renderCategoryCard(category, query) {
     const meta = categoryMetaText(category);
     const visibleSubcategories = getVisibleSubcategories(category, query);
     const queryActive = Boolean(normalizeSearch(query));
-    const bodyVisible = queryActive ? true : Boolean(category.is_open);
+    const bodyVisible = queryActive ? true : (Boolean(category.is_open) || categoryHasPendingMineWork(category));
 
     let bodyHtml = '';
     if (!category.is_diagnostic && category.can_take) {
@@ -663,10 +664,8 @@ window.toggleCategory = function (categoryId) {
     category.is_open = !category.is_open;
     if (category.is_open) {
         employeeUiState.openCategories.add(categoryId);
-        employeeUiState.closedCategories.delete(categoryId);
     } else {
         employeeUiState.openCategories.delete(categoryId);
-        employeeUiState.closedCategories.add(categoryId);
     }
     renderCategories();
 };
@@ -773,17 +772,18 @@ window.verifySubcategory = async function (subId) {
     const msgElement = document.getElementById(`msg-${subId}`);
     const inputValue = parseFloat(inputElement.value);
     if (Number.isNaN(inputValue)) return;
+    subcategoryAttempts[subId] = (subcategoryAttempts[subId] || 0) + 1;
 
     try {
         const response = await fetch('/verify', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ report_id: inventoryState.report_id, target_id: subId, is_category: true, quantity: inputValue }),
+            body: JSON.stringify({ report_id: inventoryState.report_id, target_id: subId, is_category: true, quantity: inputValue, attempt_number: subcategoryAttempts[subId] }),
         });
         const result = await response.json();
         msgElement.textContent = result.message;
         msgElement.style.color = result.is_correct ? 'green' : 'red';
-        if (result.expand_category || result.is_correct || result.attempts_left === 0) {
+        if (result.expand_category || result.is_correct) {
             await loadInventory();
         } else {
             inputElement.value = '';
@@ -803,16 +803,18 @@ window.verifyItem = async function (itemId) {
     const msgElement = document.getElementById(`msg-${itemId}`);
     const inputValue = parseFloat(inputElement.value);
     if (Number.isNaN(inputValue)) return;
+    itemAttempts[itemId] = (itemAttempts[itemId] || 0) + 1;
     try {
         const response = await fetch('/verify', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ report_id: inventoryState.report_id, target_id: itemId, is_category: false, quantity: inputValue }),
+            body: JSON.stringify({ report_id: inventoryState.report_id, target_id: itemId, is_category: false, quantity: inputValue, attempt_number: itemAttempts[itemId] }),
         });
         const result = await response.json();
         msgElement.textContent = result.message;
         msgElement.style.color = result.is_correct ? 'green' : 'red';
         if (result.is_correct || result.attempts_left === 0) {
+            itemAttempts[itemId] = 0;
             await loadInventory();
         } else {
             inputElement.value = '';
@@ -879,13 +881,29 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('logout-btn')?.addEventListener('click', logout);
     document.getElementById('refresh-btn')?.addEventListener('click', loadInventory);
     document.getElementById('start-revision-btn')?.addEventListener('click', () => {
+        if (inventoryState?.employee_finished || inventoryState?.report_completed) return;
         setEmployeeRevisionState('started');
         renderEmployeeRevisionControls();
     });
-    document.getElementById('finish-revision-btn')?.addEventListener('click', () => {
-        if (!window.confirm('Завершить ревизию на текущий день? Рабочие поля будут скрыты до следующего дня.')) return;
-        setEmployeeRevisionState('finished');
-        renderEmployeeRevisionControls();
+    document.getElementById('finish-revision-btn')?.addEventListener('click', async () => {
+        if (!inventoryState?.report_id) return;
+        if (!window.confirm('Завершить ревизию на текущий день? После подтверждения продолжить работу уже будет нельзя.')) return;
+        try {
+            const response = await fetch('/finish-report', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ report_id: inventoryState.report_id }),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || data.success === false) {
+                throw new Error(data.detail || data.message || 'Не удалось завершить ревизию.');
+            }
+            alert(data.message || 'Ревизия завершена.');
+            setEmployeeRevisionState('finished');
+            await loadInventory({ forceReload: true });
+        } catch (error) {
+            alert(error.message || 'Не удалось завершить ревизию.');
+        }
     });
     document.querySelectorAll('[data-employee-filter]').forEach(button => {
         button.addEventListener('click', () => {

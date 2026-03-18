@@ -165,6 +165,9 @@ class InventoryStructureResponse(BaseModel):
     cycle_version: int
     cycle_started_at: str
     cycle_days_left: int
+    report_status: str = 'created'
+    employee_finished: bool = False
+    report_completed: bool = False
 
 
 class AssignSelectionRequest(BaseModel):
@@ -224,12 +227,19 @@ class DiscrepancyItem(BaseModel):
     lost_profit: Optional[float] = None
 
 
+class CompletedSubcategoryInfo(BaseModel):
+    name: str
+    checked_by: Optional[str] = None
+    status: StatusEnum = StatusEnum.GREEN
+
+
 class CategoryResult(BaseModel):
     name: str
     status: StatusEnum
     assigned_to: Optional[str] = None
     selected_on_cycle: bool = False
     selected_subcategories: list[str] = Field(default_factory=list)
+    completed_subcategories: list[CompletedSubcategoryInfo] = Field(default_factory=list)
     problem_items: list[DiscrepancyItem] = Field(default_factory=list)
 
 

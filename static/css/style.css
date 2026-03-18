@@ -1200,3 +1200,18 @@ body.modal-open {
         max-width: none;
     }
 }
+
+.category-card--success {
+    border: 1px solid #bbf7d0 !important;
+    background: #f0fdf4;
+}
+
+.category-chip--success {
+    background: #dcfce7;
+    border: 1px solid #86efac;
+    color: #166534;
+}
+
+.success-text {
+    color: #166534;
+}

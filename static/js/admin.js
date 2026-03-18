@@ -234,6 +234,7 @@ function resetSummary() {
     document.getElementById('employees-count').textContent = '0';
     document.getElementById('completed-categories').textContent = '0/0';
     document.getElementById('discrepancy-categories').textContent = '0';
+    document.getElementById('no-discrepancy-categories').textContent = '0';
     document.getElementById('discrepancy-items').textContent = '0';
     document.getElementById('total-cost').textContent = '0 ₽';
     document.getElementById('total-retail').textContent = '0 ₽';
@@ -1103,8 +1104,11 @@ function filterCategoriesBySearch(categories) {
             const assignedName = normalizeSearch(category.assigned_to || '');
 
             const categorySubcategories = Array.isArray(category.selected_subcategories) ? category.selected_subcategories : [];
+            const completedSubcategories = Array.isArray(category.completed_subcategories) ? category.completed_subcategories : [];
             const subcategoryMatched = categorySubcategories.some(subName =>
                 normalizeSearch(subName).includes(q)
+            ) || completedSubcategories.some(sub =>
+                normalizeSearch(sub.name).includes(q) || normalizeSearch(sub.checked_by || '').includes(q)
             );
 
             const matchedProblemItems = (category.problem_items || []).filter(item => {
@@ -1166,17 +1170,24 @@ function buildEmployeeDetailGroups(report) {
         }
 
         const bucket = employeeMap.get(owner);
+        const completedSubcategories = (Array.isArray(category.completed_subcategories) ? category.completed_subcategories : []).filter(sub => {
+            if (!sub?.checked_by) return owner === 'Без закрепления';
+            return sub.checked_by === owner || (owner === 'Без закрепления' && !sub.checked_by);
+        });
+
         bucket.categories.push({
             name: category.name,
             status: category.status,
             problemCount: (category.problem_items || []).length,
             selected_on_cycle: Boolean(category.selected_on_cycle),
             selected_subcategories: Array.isArray(category.selected_subcategories) ? category.selected_subcategories : [],
+            completed_subcategories: completedSubcategories,
         });
 
         (category.problem_items || []).forEach(item => {
             bucket.discrepancyItems.push({
                 category_name: category.name,
+                subcategory_name: item.subcategory_name || '-',
                 name: item.name,
                 expected: item.expected,
                 actual: item.actual,
@@ -1207,12 +1218,14 @@ function filterEmployeeGroupsBySearch(employees) {
             const employeeName = normalizeSearch(employee.full_name);
 
             const matchedCategories = (employee.categories || []).filter(category =>
-                normalizeSearch(category.name).includes(q)
+                normalizeSearch(category.name).includes(q) ||
+                (category.completed_subcategories || []).some(sub => normalizeSearch(sub.name).includes(q))
             );
 
             const matchedDiscrepancies = (employee.discrepancyItems || []).filter(item => {
                 return (
                     normalizeSearch(item.category_name).includes(q) ||
+                    normalizeSearch(item.subcategory_name || '').includes(q) ||
                     normalizeSearch(item.name).includes(q) ||
                     normalizeSearch(item.checked_by).includes(q)
                 );
@@ -1281,12 +1294,16 @@ function renderEmployeeDetails(report) {
                     : (category.selected_subcategories || []).length
                         ? `<div class="employee-category-chips" style="margin-top:8px;">${category.selected_subcategories.map(sub => `<span class="category-chip">${highlightMatch(sub, adminState.searchQuery)}</span>`).join('')}</div>`
                         : '';
+                const completedSubcategoriesHtml = (category.completed_subcategories || []).length
+                    ? `<div class="employee-category-chips" style="margin-top:8px;">${category.completed_subcategories.map(sub => `<span class="category-chip">${highlightMatch(sub.name, adminState.searchQuery)}</span>`).join('')}</div>`
+                    : '';
                 return `
                 <div class="employee-detail-category-row">
                     <div>
                         <strong>${highlightMatch(category.name, adminState.searchQuery)}</strong>
                         <div class="muted-text">${category.problemCount ? `Проблемных товаров: ${category.problemCount}` : 'Без расхождений'}</div>
                         ${selectedScopeHtml}
+                        ${completedSubcategoriesHtml}
                     </div>
                     <span class="${getCategoryStatusClass(category.status, category)}">${getCategoryStatusLabel(category.status, category)}</span>
                 </div>
@@ -1389,11 +1406,13 @@ function updateSummary(report) {
     const totalCategories = countedCategories.length;
     const completedCategories = countedCategories.filter(cat => cat.status === 'green' || cat.status === 'red').length;
     const discrepancyCategories = countedCategories.filter(cat => (cat.problem_items || []).length > 0).length;
+    const noDiscrepancyCategories = countedCategories.filter(cat => (cat.status || '').toLowerCase() === 'green').length;
     const discrepancyItems = countedCategories.reduce((sum, cat) => sum + (cat.problem_items || []).length, 0);
 
     document.getElementById('employees-count').textContent = String((report.employees || []).length);
     document.getElementById('completed-categories').textContent = `${completedCategories}/${totalCategories}`;
     document.getElementById('discrepancy-categories').textContent = String(discrepancyCategories);
+    document.getElementById('no-discrepancy-categories').textContent = String(noDiscrepancyCategories);
     document.getElementById('discrepancy-items').textContent = String(discrepancyItems);
     document.getElementById('total-cost').textContent = formatMoney(report.total_cost);
     document.getElementById('total-retail').textContent = formatMoney(report.total_retail);
@@ -1459,6 +1478,7 @@ function renderCategories(report) {
         const isOpen = adminState.expandedCategories.has(key) || (!isDiagnostic && index === 0);
         const problemItems = cat.problem_items || [];
         const selectedSubcategories = Array.isArray(cat.selected_subcategories) ? cat.selected_subcategories : [];
+        const completedSubcategories = Array.isArray(cat.completed_subcategories) ? cat.completed_subcategories : [];
         const selectionText = cat.selected_on_cycle
             ? 'На цикл выбрана вся категория'
             : (selectedSubcategories.length ? `На цикл выбрано подкатегорий: ${selectedSubcategories.length}` : '');
@@ -1493,6 +1513,14 @@ function renderCategories(report) {
                             ${cat.selected_on_cycle
                                 ? '<div class="employee-category-chips"><span class="category-chip">Выбрана вся категория</span></div>'
                                 : `<div class="employee-category-chips">${selectedSubcategories.map(sub => `<span class="category-chip">${highlightMatch(sub, adminState.searchQuery)}</span>`).join('')}</div>`}
+                        </div>
+                    ` : ''}
+                    ${completedSubcategories.length ? `
+                        <div class="category-card category-card--success" style="margin-bottom:12px;padding:14px 16px;box-shadow:none;">
+                            <div class="success-text" style="margin-bottom:8px;font-weight:600;">Пройденные подкатегории</div>
+                            <div class="employee-category-chips">
+                                ${completedSubcategories.map(sub => `<span class="category-chip category-chip--success">${highlightMatch(sub.name, adminState.searchQuery)}${sub.checked_by ? ` · ${highlightMatch(sub.checked_by, adminState.searchQuery)}` : ''}</span>`).join('')}
+                            </div>
                         </div>
                     ` : ''}
                     ${problemItems.length ? `

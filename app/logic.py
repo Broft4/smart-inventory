@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.moysklad import DEFAULT_CATEGORY_NAME, DEFAULT_SUBCATEGORY_NAME, ms_client
-from app.models import AdminLocationAccess, CategoryAssignment, CheckResult, LocationPoint, Report, ReportTargetSnapshot, SelectionCycle, SelectionTarget, User, VerifyAttemptProgress
+from app.models import AdminLocationAccess, CategoryAssignment, CheckResult, LocationPoint, Report, ReportEmployeeCompletion, ReportTargetSnapshot, SelectionCycle, SelectionTarget, User, VerifyAttemptProgress
 from app.schemas import (
     AdminCycleTargetCategory,
     AdminCycleTargetItem,
@@ -28,6 +28,7 @@ from app.schemas import (
     CreateLocationResponse,
     DeleteResponse,
     DiscrepancyItem,
+    CompletedSubcategoryInfo,
     EmployeeReportSummary,
     InventoryStructureResponse,
     ItemModel,
@@ -175,6 +176,29 @@ def _normalize_location(location: str) -> str:
     return location.strip().title()
 
 
+def _strip_ignored_inventory_branches(inventory: dict[str, Any]) -> dict[str, Any]:
+    categories: list[dict[str, Any]] = []
+    for category in inventory.get('categories', []):
+        if category.get('name') == DEFAULT_CATEGORY_NAME:
+            continue
+        filtered_subcategories: list[dict[str, Any]] = []
+        for subcategory in category.get('subcategories', []):
+            if subcategory.get('name') == DEFAULT_SUBCATEGORY_NAME:
+                continue
+            filtered_subcategories.append({
+                'id': subcategory['id'],
+                'name': subcategory['name'],
+                'items': [dict(item) for item in subcategory.get('items', [])],
+            })
+        if filtered_subcategories:
+            categories.append({
+                'id': category['id'],
+                'name': category['name'],
+                'subcategories': filtered_subcategories,
+            })
+    return {'location': inventory.get('location'), 'categories': categories}
+
+
 async def _ensure_default_location_points(db: AsyncSession) -> None:
     existing_count = await db.scalar(select(func.count()).select_from(LocationPoint))
     if (existing_count or 0) > 0:
@@ -288,6 +312,12 @@ def bootstrap_schema_and_admin(sync_conn) -> None:
         required = {'id', 'report_id', 'category_id', 'category_name', 'subcategory_id', 'subcategory_name', 'target_type', 'target_id', 'target_name', 'assigned_user_id_snapshot', 'assigned_user_name_snapshot', 'created_at'}
         if not required.issubset(cols):
             sync_conn.execute(text('DROP TABLE IF EXISTS report_target_snapshots'))
+
+    if 'report_employee_completions' in tables:
+        cols = {c['name'] for c in inspector.get_columns('report_employee_completions')}
+        required = {'id', 'report_id', 'user_id', 'user_full_name_snapshot', 'finished_at'}
+        if not required.issubset(cols):
+            sync_conn.execute(text('DROP TABLE IF EXISTS report_employee_completions'))
 
     if reset_reports:
         sync_conn.execute(text('DROP TABLE IF EXISTS check_results'))
@@ -678,7 +708,8 @@ async def _get_inventory_for(location: str) -> dict[str, Any]:
     normalized = _normalize_location(location)
     if ms_client.enabled:
         try:
-            return await ms_client.get_inventory(normalized)
+            inventory = await ms_client.get_inventory(normalized)
+            return _strip_ignored_inventory_branches(inventory)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except httpx.HTTPError as exc:
@@ -686,7 +717,7 @@ async def _get_inventory_for(location: str) -> dict[str, Any]:
 
     if normalized not in MOCK_INVENTORY:
         raise HTTPException(status_code=404, detail='Неизвестная точка.')
-    return MOCK_INVENTORY[normalized]
+    return _strip_ignored_inventory_branches(MOCK_INVENTORY[normalized])
 
 
 async def _find_category(location: str, category_id: str) -> dict[str, Any]:
@@ -991,9 +1022,7 @@ def _subcategory_is_complete(raw_subcategory: dict[str, Any], results_by_target:
 
 
 def _category_is_complete(raw_category: dict[str, Any], results_by_target: dict[str, CheckResult]) -> bool:
-    if raw_category['name'] == DEFAULT_CATEGORY_NAME:
-        return True
-    relevant_subcategories = [sub for sub in raw_category['subcategories'] if sub['name'] != DEFAULT_SUBCATEGORY_NAME]
+    relevant_subcategories = list(raw_category['subcategories'])
     return bool(relevant_subcategories) and all(_subcategory_is_complete(sub, results_by_target)[0] for sub in relevant_subcategories)
 
 
@@ -1040,7 +1069,16 @@ async def reset_selection_cycle(location: str, db: AsyncSession) -> ResetSelecti
 
 
 async def _sync_report_status(report: Report, db: AsyncSession) -> None:
-    results_count = await db.scalar(select(func.count()).select_from(CheckResult).where(CheckResult.report_id == report.id))
+    results_count = await db.scalar(
+        select(func.count()).select_from(CheckResult).where(
+            CheckResult.report_id == report.id,
+            CheckResult.category_name != DEFAULT_CATEGORY_NAME,
+            or_(CheckResult.subcategory_name.is_(None), CheckResult.subcategory_name != DEFAULT_SUBCATEGORY_NAME),
+        )
+    )
+    completion_count = await db.scalar(select(func.count()).select_from(ReportEmployeeCompletion).where(ReportEmployeeCompletion.report_id == report.id))
+    active_employees = await _active_employee_users_for_location(report.location, db)
+    required_finish_count = len(active_employees)
     newer_report_exists = await db.scalar(
         select(func.count()).select_from(Report).where(
             Report.location == report.location,
@@ -1048,10 +1086,12 @@ async def _sync_report_status(report: Report, db: AsyncSession) -> None:
         )
     )
 
-    if (results_count or 0) == 0:
-        report.status = 'created'
+    if required_finish_count > 0 and (completion_count or 0) >= required_finish_count:
+        report.status = 'completed'
     elif (newer_report_exists or 0) > 0:
         report.status = 'completed'
+    elif (results_count or 0) == 0 and (completion_count or 0) == 0:
+        report.status = 'created'
     else:
         report.status = 'in_progress'
 
@@ -1140,21 +1180,6 @@ def _filter_inventory_by_targets(
 
     categories: list[dict[str, Any]] = []
     for category in inventory['categories']:
-        if category['name'] == DEFAULT_CATEGORY_NAME:
-            categories.append({
-                'id': category['id'],
-                'name': category['name'],
-                'subcategories': [
-                    {
-                        'id': sub['id'],
-                        'name': sub['name'],
-                        'items': [dict(item) for item in sub['items']],
-                    }
-                    for sub in category['subcategories']
-                ],
-            })
-            continue
-
         include_full_category = category['id'] in selected_category_ids or category['id'] in retained_category_ids
         allowed_sub_ids = set(selected_subcategory_ids.get(category['id'], set())) | set(retained_subcategory_ids.get(category['id'], set()))
         retained_items_by_sub = retained_item_ids.get(category['id'], {})
@@ -1165,18 +1190,11 @@ def _filter_inventory_by_targets(
             keep_subcategory = False
             keep_all_items = False
 
-            if _is_categoryless_subcategory(category, sub):
-                if include_full_category or sub['id'] in allowed_sub_ids:
-                    keep_subcategory = True
-                    keep_all_items = True
-                elif retained_sub_item_ids:
-                    keep_subcategory = True
-            else:
-                if include_full_category or sub['id'] in allowed_sub_ids:
-                    keep_subcategory = True
-                    keep_all_items = True
-                elif retained_sub_item_ids:
-                    keep_subcategory = True
+            if include_full_category or sub['id'] in allowed_sub_ids:
+                keep_subcategory = True
+                keep_all_items = True
+            elif retained_sub_item_ids:
+                keep_subcategory = True
 
             if not keep_subcategory:
                 continue
@@ -1442,6 +1460,38 @@ def _subcategories_user_can_work(raw_category: dict[str, Any], category_assignme
     return [sub['id'] for sub in raw_category['subcategories'] if sub_assignments.get(sub['id']) and sub_assignments[sub['id']].user_id == user_id]
 
 
+async def _load_report_employee_completions(report_id: int, db: AsyncSession) -> list[ReportEmployeeCompletion]:
+    return (
+        await db.scalars(
+            select(ReportEmployeeCompletion)
+            .where(ReportEmployeeCompletion.report_id == report_id)
+            .order_by(ReportEmployeeCompletion.finished_at.asc(), ReportEmployeeCompletion.id.asc())
+        )
+    ).all()
+
+
+async def _active_employee_users_for_location(location: str, db: AsyncSession) -> list[User]:
+    return (
+        await db.scalars(
+            select(User)
+            .where(User.role == RoleEnum.EMPLOYEE.value)
+            .where(User.is_active.is_(True))
+            .where(User.location == location)
+            .order_by(User.full_name.asc(), User.id.asc())
+        )
+    ).all()
+
+
+async def _is_employee_finished_report(report_id: int, user_id: int, db: AsyncSession) -> bool:
+    completion = await db.scalar(
+        select(ReportEmployeeCompletion)
+        .where(ReportEmployeeCompletion.report_id == report_id)
+        .where(ReportEmployeeCompletion.user_id == user_id)
+        .limit(1)
+    )
+    return completion is not None
+
+
 async def _refresh_report_status(report: Report, db: AsyncSession) -> None:
     await _sync_report_status(report, db)
     await db.commit()
@@ -1452,9 +1502,15 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
     cycle = await _get_or_create_selection_cycle(normalized, db)
     report = await get_or_create_daily_report(normalized, cycle.cycle_version, db)
     assignments = await _load_assignments(normalized, cycle.cycle_version, db)
-    results = await _load_results(report.id, db)
+    results = [
+        row for row in await _load_results(report.id, db)
+        if row.category_name != DEFAULT_CATEGORY_NAME and (row.subcategory_name is None or row.subcategory_name != DEFAULT_SUBCATEGORY_NAME)
+    ]
     targets = await _load_selection_targets(normalized, cycle.cycle_version, db)
     report_snapshots = await _bootstrap_report_target_snapshots(report, assignments, results, db)
+    employee_finished = await _is_employee_finished_report(report.id, user.id, db)
+    await _sync_report_status(report, db)
+    report_completed = report.status == 'completed'
 
     category_assignments, subcategory_assignments, item_assignments = _category_assignments_map(assignments)
     selected_category_ids, selected_subcategory_ids = _selection_target_maps(targets)
@@ -1678,6 +1734,9 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
         cycle_version=cycle.cycle_version,
         cycle_started_at=cycle.started_at.strftime('%d.%m.%Y'),
         cycle_days_left=days_left,
+        report_status=report.status,
+        employee_finished=employee_finished,
+        report_completed=report_completed,
     )
 
 
@@ -1688,6 +1747,11 @@ async def assign_selection_to_user(report_id: int, category_id: str, target_type
     report = await db.get(Report, report_id)
     if not report or report.location != user.location:
         raise HTTPException(status_code=404, detail='Ревизия не найдена.')
+    await _sync_report_status(report, db)
+    if report.status == 'completed':
+        raise HTTPException(status_code=409, detail='Ревизия по этой точке уже завершена на сегодня.')
+    if await _is_employee_finished_report(report.id, user.id, db):
+        raise HTTPException(status_code=409, detail='Вы уже завершили свою ревизию на сегодня. Продолжить работу нельзя.')
 
     cycle = await _get_or_create_selection_cycle(report.location, db)
     assignments = await _load_assignments(report.location, cycle.cycle_version, db)
@@ -1993,6 +2057,11 @@ async def verify_item_or_category(data: VerifyRequest, db: AsyncSession, checked
         raise HTTPException(status_code=404, detail='Ревизия не найдена.')
     if checked_by_user.location != report.location:
         raise HTTPException(status_code=403, detail='Ревизия относится к другой точке.')
+    await _sync_report_status(report, db)
+    if report.status == 'completed':
+        raise HTTPException(status_code=409, detail='Ревизия по этой точке уже завершена на сегодня.')
+    if await _is_employee_finished_report(report.id, checked_by_user.id, db):
+        raise HTTPException(status_code=409, detail='Вы уже завершили свою ревизию на сегодня. Продолжить работу нельзя.')
 
     category_id, category_name, subcategory_id, subcategory_name, target_type, target_name, expected_qty = await _find_target(report.location, data.target_id)
     assignments = await _load_assignments(report.location, report.cycle_version, db)
@@ -2105,14 +2174,43 @@ async def verify_item_or_category(data: VerifyRequest, db: AsyncSession, checked
     )
 
 
-async def finish_report(report_id: int, db: AsyncSession) -> tuple[bool, str]:
+async def finish_report(report_id: int, db: AsyncSession, user: User) -> tuple[bool, str]:
     report = await db.get(Report, report_id)
     if not report:
         return False, 'Ревизия не найдена.'
-    await _refresh_report_status(report, db)
-    if report.status != 'completed':
-        return False, 'Общая ревизия завершится автоматически, когда все выбранные категории и подкатегории будут проверены.'
-    return True, 'Ревизия завершена.'
+    if user.role != RoleEnum.EMPLOYEE.value or user.location != report.location:
+        raise HTTPException(status_code=403, detail='Можно завершать только свою ревизию по назначенной точке.')
+
+    await _sync_report_status(report, db)
+    if report.status == 'completed':
+        return True, 'Ревизия по этой точке уже завершена на сегодня.'
+
+    existing = await db.scalar(
+        select(ReportEmployeeCompletion)
+        .where(ReportEmployeeCompletion.report_id == report.id)
+        .where(ReportEmployeeCompletion.user_id == user.id)
+        .limit(1)
+    )
+    if existing:
+        return True, 'Вы уже завершили свою ревизию на сегодня.'
+
+    db.add(ReportEmployeeCompletion(
+        report_id=report.id,
+        user_id=user.id,
+        user_full_name_snapshot=user.full_name,
+        finished_at=datetime.utcnow(),
+    ))
+    await db.flush()
+    await _sync_report_status(report, db)
+    await db.commit()
+
+    if report.status == 'completed':
+        return True, 'Ревизия завершена.'
+
+    active_employees = await _active_employee_users_for_location(report.location, db)
+    completion_count = await db.scalar(select(func.count()).select_from(ReportEmployeeCompletion).where(ReportEmployeeCompletion.report_id == report.id))
+    remaining = max(0, len(active_employees) - int(completion_count or 0))
+    return True, f'Ваша ревизия завершена. Ожидаем завершения ещё {remaining} сотрудник(а/ов) по этой точке.'
 
 
 async def get_reports_history(location: str, db: AsyncSession) -> ReportHistoryResponse:
@@ -2223,7 +2321,10 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
     await db.commit()
 
     assignments = await _load_assignments(report.location, report.cycle_version, db)
-    results = await _load_results(report.id, db)
+    results = [
+        row for row in await _load_results(report.id, db)
+        if row.category_name != DEFAULT_CATEGORY_NAME and (row.subcategory_name is None or row.subcategory_name != DEFAULT_SUBCATEGORY_NAME)
+    ]
     targets = await _load_selection_targets(normalized, report.cycle_version, db)
     inventory = await _get_inventory_for(normalized)
     discrepancy_financials = await _load_discrepancy_financials(normalized, results)
@@ -2304,6 +2405,25 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
             for sub in raw_category['subcategories']
             if sub['id'] in selected_subcategory_ids.get(raw_category['id'], set())
         ])
+        completed_subcategories: list[CompletedSubcategoryInfo] = []
+        for raw_sub in raw_category['subcategories']:
+            sub_completed, sub_status = _subcategory_is_complete(raw_sub, result_map)
+            if not sub_completed:
+                continue
+            sub_row = result_map.get(raw_sub['id'])
+            checked_by = sub_row.checked_by_name_snapshot if sub_row else None
+            if not checked_by:
+                item_rows = [result_map.get(item['id']) for item in raw_sub['items']]
+                item_rows = [row for row in item_rows if row and row.checked_by_name_snapshot]
+                if item_rows:
+                    owners = sorted({row.checked_by_name_snapshot for row in item_rows if row.checked_by_name_snapshot})
+                    checked_by = owners[0] if len(owners) == 1 else 'Несколько сотрудников'
+            completed_subcategories.append(CompletedSubcategoryInfo(
+                name=raw_sub['name'],
+                checked_by=checked_by,
+                status=sub_status,
+            ))
+        completed_subcategories.sort(key=lambda item: item.name.lower())
 
         categories.append(CategoryResult(
             name=raw_category['name'],
@@ -2311,6 +2431,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
             assigned_to=_category_assignment_label(raw_category['id'], assignments),
             selected_on_cycle=raw_category['id'] in selected_category_ids,
             selected_subcategories=selected_sub_names,
+            completed_subcategories=completed_subcategories,
             problem_items=grouped_problem_items.get(raw_category['name'], []),
         ))
 
