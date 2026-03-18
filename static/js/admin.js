@@ -238,6 +238,7 @@ function resetSummary() {
     document.getElementById('total-cost').textContent = '0 ₽';
     document.getElementById('total-retail').textContent = '0 ₽';
     document.getElementById('total-lost-profit').textContent = '0 ₽';
+    renderSelectedCycleScope({ selected_categories: [], selected_subcategories: [] });
 }
 
 function setAdminReportLoading(message = 'Загрузка данных ревизии...') {
@@ -827,6 +828,42 @@ function updateCycleTargetDependencyState() {
             }
         });
     });
+
+    renderCycleTargetsSelectionSummary();
+}
+
+function renderCycleTargetsSelectionSummary() {
+    const selectedCountNode = document.getElementById('cycle-targets-selected-count');
+    const filteredCountNode = document.getElementById('cycle-targets-filtered-count');
+    const categoryCheckboxes = [...document.querySelectorAll('[data-cycle-category-id]')];
+    const subcategoryCheckboxes = [...document.querySelectorAll('[data-cycle-subcategory-id]')];
+
+    if (selectedCountNode) {
+        const selectedCategoryCount = categoryCheckboxes.filter(node => node.checked).length;
+        const selectedSubcategoryCount = subcategoryCheckboxes.filter(node => node.checked && !node.disabled).length;
+        selectedCountNode.textContent = `Выбрано категорий: ${selectedCategoryCount}. Подкатегорий: ${selectedSubcategoryCount}.`;
+    }
+
+    if (filteredCountNode) {
+        filteredCountNode.textContent = `Показано категорий: ${categoryCheckboxes.length}.`;
+    }
+}
+
+function renderSelectedCycleScope(report) {
+    const categoriesContainer = document.getElementById('selected-cycle-categories-list');
+    const subcategoriesContainer = document.getElementById('selected-cycle-subcategories-list');
+    if (!categoriesContainer || !subcategoriesContainer) return;
+
+    const selectedCategories = Array.isArray(report?.selected_categories) ? report.selected_categories : [];
+    const selectedSubcategories = Array.isArray(report?.selected_subcategories) ? report.selected_subcategories : [];
+
+    categoriesContainer.innerHTML = selectedCategories.length
+        ? selectedCategories.map(name => `<span class="category-chip">${highlightMatch(name, adminState.searchQuery)}</span>`).join('')
+        : '<span class="muted-text">Нет выбранных категорий</span>';
+
+    subcategoriesContainer.innerHTML = selectedSubcategories.length
+        ? selectedSubcategories.map(name => `<span class="category-chip">${highlightMatch(name, adminState.searchQuery)}</span>`).join('')
+        : '<span class="muted-text">Нет выбранных подкатегорий</span>';
 }
 
 function renderCycleTargets(data) {
@@ -845,6 +882,7 @@ function renderCycleTargets(data) {
 
     if (!categories.length) {
         container.innerHTML = '<div class="category-card"><p class="empty-text">Нет доступных категорий для настройки цикла.</p></div>';
+        renderCycleTargetsSelectionSummary();
         return;
     }
 
@@ -903,11 +941,13 @@ function renderCycleTargets(data) {
 
     updateCycleTargetDependencyState();
 
-    container.querySelectorAll('[data-cycle-category-id]').forEach(checkbox => {
+    container.querySelectorAll('[data-cycle-category-id], [data-cycle-subcategory-id]').forEach(checkbox => {
         checkbox.addEventListener('change', () => {
             updateCycleTargetDependencyState();
         });
     });
+
+    renderCycleTargetsSelectionSummary();
 }
 
 async function openCycleTargetsModal() {
@@ -1054,9 +1094,9 @@ function filterCategoriesBySearch(categories) {
             const categoryName = normalizeSearch(category.name);
             const assignedName = normalizeSearch(category.assigned_to || '');
 
-            const categorySubcategories = Array.isArray(category.subcategories) ? category.subcategories : [];
-            const subcategoryMatched = categorySubcategories.some(sub =>
-                normalizeSearch(sub.name).includes(q)
+            const categorySubcategories = Array.isArray(category.selected_subcategories) ? category.selected_subcategories : [];
+            const subcategoryMatched = categorySubcategories.some(subName =>
+                normalizeSearch(subName).includes(q)
             );
 
             const matchedProblemItems = (category.problem_items || []).filter(item => {
@@ -1122,6 +1162,8 @@ function buildEmployeeDetailGroups(report) {
             name: category.name,
             status: category.status,
             problemCount: (category.problem_items || []).length,
+            selected_on_cycle: Boolean(category.selected_on_cycle),
+            selected_subcategories: Array.isArray(category.selected_subcategories) ? category.selected_subcategories : [],
         });
 
         (category.problem_items || []).forEach(item => {
@@ -1225,15 +1267,23 @@ function renderEmployeeDetails(report) {
 
     container.innerHTML = employees.map(employee => {
         const categoriesHtml = employee.categories.length
-            ? `<div class="employee-detail-category-list">${employee.categories.map(category => `
+            ? `<div class="employee-detail-category-list">${employee.categories.map(category => {
+                const selectedScopeHtml = category.selected_on_cycle
+                    ? '<div class="employee-category-chips" style="margin-top:8px;"><span class="category-chip">Выбрана вся категория на цикл</span></div>'
+                    : (category.selected_subcategories || []).length
+                        ? `<div class="employee-category-chips" style="margin-top:8px;">${category.selected_subcategories.map(sub => `<span class="category-chip">${highlightMatch(sub, adminState.searchQuery)}</span>`).join('')}</div>`
+                        : '';
+                return `
                 <div class="employee-detail-category-row">
                     <div>
                         <strong>${highlightMatch(category.name, adminState.searchQuery)}</strong>
                         <div class="muted-text">${category.problemCount ? `Проблемных товаров: ${category.problemCount}` : 'Без расхождений'}</div>
+                        ${selectedScopeHtml}
                     </div>
                     <span class="${getCategoryStatusClass(category.status, category)}">${getCategoryStatusLabel(category.status, category)}</span>
                 </div>
-            `).join('')}</div>`
+            `;
+            }).join('')}</div>`
             : '<p class="empty-text">Категории по текущим фильтрам не найдены.</p>';
 
         const discrepanciesHtml = employee.discrepancyItems.length
@@ -1243,6 +1293,7 @@ function renderEmployeeDetails(report) {
                         <thead>
                             <tr>
                                 <th>Категория</th>
+                                <th>Подкатегория</th>
                                 <th>Товар</th>
                                 <th>План</th>
                                 <th>Факт</th>
@@ -1260,6 +1311,7 @@ function renderEmployeeDetails(report) {
                                 return `
                                     <tr>
                                         <td>${highlightMatch(item.category_name, adminState.searchQuery)}</td>
+                                        <td>${highlightMatch(item.subcategory_name || '-', adminState.searchQuery)}</td>
                                         <td>${highlightMatch(item.name, adminState.searchQuery)}</td>
                                         <td class="num-cell">${item.expected}</td>
                                         <td class="num-cell">${item.actual}</td>
@@ -1338,6 +1390,7 @@ function updateSummary(report) {
     document.getElementById('total-cost').textContent = formatMoney(report.total_cost);
     document.getElementById('total-retail').textContent = formatMoney(report.total_retail);
     document.getElementById('total-lost-profit').textContent = formatMoney(report.total_lost_profit);
+    renderSelectedCycleScope(report);
 }
 
 function renderEmployees(report) {
@@ -1397,6 +1450,10 @@ function renderCategories(report) {
         const isDiagnostic = isDiagnosticsCategoryName(cat.name);
         const isOpen = adminState.expandedCategories.has(key) || (!isDiagnostic && index === 0);
         const problemItems = cat.problem_items || [];
+        const selectedSubcategories = Array.isArray(cat.selected_subcategories) ? cat.selected_subcategories : [];
+        const selectionText = cat.selected_on_cycle
+            ? 'На цикл выбрана вся категория'
+            : (selectedSubcategories.length ? `На цикл выбрано подкатегорий: ${selectedSubcategories.length}` : '');
         const summaryText = isDiagnostic
             ? 'Служебная ветка. Не входит в общую ревизию.'
             : (problemItems.length
@@ -1413,7 +1470,7 @@ function renderCategories(report) {
                         <h3>${highlightMatch(cat.name, adminState.searchQuery)}</h3>
                         <div class="admin-category-subline">
                             <span class="assigned-badge">${cat.assigned_to ? `Закреплена за: ${highlightMatch(cat.assigned_to, adminState.searchQuery)}` : 'Категория пока не закреплена'}</span>
-                            <span class="muted-text">${summaryText}</span>
+                            <span class="muted-text">${selectionText ? `${selectionText} · ${summaryText}` : summaryText}</span>
                         </div>
                     </div>
                     <div class="admin-category-header-right">
@@ -1422,12 +1479,21 @@ function renderCategories(report) {
                     </div>
                 </button>
                 <div class="admin-category-body ${isOpen ? '' : 'hidden'}">
+                    ${(!isDiagnostic && (cat.selected_on_cycle || selectedSubcategories.length)) ? `
+                        <div class="category-card" style="margin-bottom:12px;padding:14px 16px;box-shadow:none;border:1px solid rgba(148,163,184,.24);">
+                            <div class="muted-text" style="margin-bottom:8px;">Выбрано в текущем цикле</div>
+                            ${cat.selected_on_cycle
+                                ? '<div class="employee-category-chips"><span class="category-chip">Выбрана вся категория</span></div>'
+                                : `<div class="employee-category-chips">${selectedSubcategories.map(sub => `<span class="category-chip">${highlightMatch(sub, adminState.searchQuery)}</span>`).join('')}</div>`}
+                        </div>
+                    ` : ''}
                     ${problemItems.length ? `
                         ${isDiagnostic ? '' : '<div class="discrepancy-banner">⚠️ Зафиксированы расхождения</div>'}
                         <div class="table-scroll">
                             <table class="admin-table">
                                 <thead>
                                     <tr>
+                                        <th>Подкатегория</th>
                                         <th>Товар</th>
                                         <th>План</th>
                                         <th>Факт</th>
@@ -1444,6 +1510,7 @@ function renderCategories(report) {
                                         const diffClass = item.diff > 0 ? 'diff-plus' : 'diff-minus';
                                         return `
                                             <tr>
+                                                <td>${highlightMatch(item.subcategory_name || '-', adminState.searchQuery)}</td>
                                                 <td>${highlightMatch(item.name, adminState.searchQuery)}</td>
                                                 <td class="num-cell">${item.expected}</td>
                                                 <td class="num-cell">${item.actual}</td>

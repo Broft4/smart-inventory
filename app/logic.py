@@ -654,7 +654,7 @@ async def delete_user(user_id: int, db: AsyncSession, current_user: User) -> Del
         if (superadmin_count or 0) <= 1:
             raise HTTPException(status_code=400, detail='Нельзя удалить последнего главного администратора.')
 
-    await db.execute(update(CategoryAssignment).where(CategoryAssignment.user_id == user.id).values(user_id=None))
+    await db.execute(delete(CategoryAssignment).where(CategoryAssignment.user_id == user.id))
     await db.execute(update(CheckResult).where(CheckResult.checked_by_user_id == user.id).values(checked_by_user_id=None))
     await db.execute(delete(AdminLocationAccess).where(AdminLocationAccess.admin_user_id == user.id))
     await db.delete(user)
@@ -1811,6 +1811,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
                     actual=float(row.actual_qty or 0),
                     diff=float(row.diff or 0),
                     checked_by=row.checked_by_name_snapshot,
+                    subcategory_name=row.subcategory_name,
                     cost_price=cost_price,
                     retail_price=retail_price,
                     cost_total=cost_total,
@@ -1821,6 +1822,12 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
 
     categories: list[CategoryResult] = []
     selected_category_ids, selected_subcategory_ids = _selection_target_maps(targets)
+    target_category_names = sorted({target.category_name for target in targets if target.target_type == 'category'})
+    target_subcategory_labels = sorted({
+        f"{target.category_name} → {target.subcategory_name}"
+        for target in targets
+        if target.target_type == 'subcategory' and target.subcategory_name
+    })
     inventory = _filter_inventory_by_targets(inventory, selected_category_ids, selected_subcategory_ids)
     for raw_category in inventory['categories']:
         result_map = rows_by_category_target.get(raw_category['id'], {})
@@ -1839,10 +1846,18 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         elif grouped_problem_items.get(raw_category['name']):
             status = StatusEnum.RED
 
+        selected_sub_names = sorted([
+            sub['name']
+            for sub in raw_category['subcategories']
+            if sub['id'] in selected_subcategory_ids.get(raw_category['id'], set())
+        ])
+
         categories.append(CategoryResult(
             name=raw_category['name'],
             status=status,
             assigned_to=_category_assignment_label(raw_category['id'], assignments),
+            selected_on_cycle=raw_category['id'] in selected_category_ids,
+            selected_subcategories=selected_sub_names,
             problem_items=grouped_problem_items.get(raw_category['name'], []),
         ))
 
@@ -1872,6 +1887,8 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         location=report.location,
         status=_report_status_label(report.status),
         categories=categories,
+        selected_categories=target_category_names,
+        selected_subcategories=target_subcategory_labels,
         total_plus=float(total_plus),
         total_minus=float(total_minus),
         total_cost=float(round(total_cost, 2)),

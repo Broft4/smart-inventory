@@ -118,6 +118,29 @@
     <section class="category-card">
         <div class="section-title-row">
             <div>
+                <h2 class="section-title">Выбрано на текущий цикл</h2>
+                <p class="muted-text">Быстрый список категорий и подкатегорий, которые сейчас включены в ревизию для выбранной точки.</p>
+            </div>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;">
+            <div>
+                <h3 style="margin:0 0 10px;">Категории</h3>
+                <div id="selected-cycle-categories-list" class="employee-category-chips">
+                    <span class="muted-text">Нет выбранных категорий</span>
+                </div>
+            </div>
+            <div>
+                <h3 style="margin:0 0 10px;">Подкатегории</h3>
+                <div id="selected-cycle-subcategories-list" class="employee-category-chips">
+                    <span class="muted-text">Нет выбранных подкатегорий</span>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="category-card">
+        <div class="section-title-row">
+            <div>
                 <h2 class="section-title">Сотрудники в ревизии</h2>
                 <p class="muted-text">Кто какие категории взял, что уже завершено и где есть расхождения.</p>
             </div>

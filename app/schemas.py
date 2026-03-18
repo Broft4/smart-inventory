@@ -215,6 +215,7 @@ class DiscrepancyItem(BaseModel):
     actual: float
     diff: float
     checked_by: Optional[str] = None
+    subcategory_name: Optional[str] = None
     cost_price: Optional[float] = None
     retail_price: Optional[float] = None
     cost_total: Optional[float] = None
@@ -226,6 +227,8 @@ class CategoryResult(BaseModel):
     name: str
     status: StatusEnum
     assigned_to: Optional[str] = None
+    selected_on_cycle: bool = False
+    selected_subcategories: list[str] = Field(default_factory=list)
     problem_items: list[DiscrepancyItem] = Field(default_factory=list)
 
 
@@ -243,6 +246,8 @@ class AdminReport(BaseModel):
     location: str
     status: str
     categories: list[CategoryResult]
+    selected_categories: list[str] = Field(default_factory=list)
+    selected_subcategories: list[str] = Field(default_factory=list)
     total_plus: float
     total_minus: float
     total_cost: float = 0.0
