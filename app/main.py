@@ -150,8 +150,12 @@ async def inventory_page(request: Request, user: User | None = Depends(get_curre
 
 
 @app.get('/admin')
-async def admin_page(request: Request, admin: User = Depends(require_admin_or_superadmin)):
-    return templates.TemplateResponse('admin.html', {'request': request, 'user': admin})
+async def admin_page(request: Request, user: User | None = Depends(get_current_user)):
+    if not user:
+        return RedirectResponse(url='/login', status_code=302)
+    if user.role not in {'admin', 'superadmin'}:
+        return RedirectResponse(url='/', status_code=302)
+    return templates.TemplateResponse('admin.html', {'request': request, 'user': user})
 
 
 @app.post('/api/login', response_model=LoginResponse)
