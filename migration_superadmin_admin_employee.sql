@@ -19,7 +19,7 @@ CREATE INDEX IF NOT EXISTS ix_admin_location_access_granted_by_user_id ON admin_
 -- Подставьте нужный логин вместо admin, если у вас другой основной аккаунт.
 UPDATE users
 SET role = 'superadmin', location = NULL
-WHERE username = 'admin';
+WHERE username = 'pba';
 
 -- 3. Если у вас уже были обычные админы с одной точкой в users.location,
 -- перенесите их доступы в новую таблицу.
