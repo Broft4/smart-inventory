@@ -1233,7 +1233,20 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
                 break
 
         has_diagnostic_subcategories = any(sub['name'] == DEFAULT_SUBCATEGORY_NAME for sub in raw_category['subcategories'])
-        can_take_category = (not category_is_diagnostic) and (not has_diagnostic_subcategories) and category_assignment is None and not sub_assignments and not item_assignments_by_sub
+        selected_whole_category = raw_category['id'] in selected_category_ids
+        selected_subcategory_names = [
+            sub['name']
+            for sub in raw_category['subcategories']
+            if sub['id'] in selected_subcategory_ids.get(raw_category['id'], set())
+        ]
+        can_take_category = (
+            selected_whole_category
+            and (not category_is_diagnostic)
+            and (not has_diagnostic_subcategories)
+            and category_assignment is None
+            and not sub_assignments
+            and not item_assignments_by_sub
+        )
 
         owner_names = {a.user_full_name_snapshot for a in sub_assignments.values() if a.user_full_name_snapshot}
         owner_names.update(a.user_full_name_snapshot for sub_items in item_assignments_by_sub.values() for a in sub_items.values() if a.user_full_name_snapshot)
@@ -1360,6 +1373,8 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
                 is_diagnostic=category_is_diagnostic,
                 has_my_items=has_my_items,
                 has_other_items=has_other_items,
+                selected_whole_category=selected_whole_category,
+                selected_subcategory_names=selected_subcategory_names,
             )
         )
 
@@ -1399,6 +1414,12 @@ async def assign_selection_to_user(report_id: int, category_id: str, target_type
         if category_is_diagnostic:
             raise HTTPException(status_code=400, detail='Категорию «Без категории» нельзя брать целиком.')
         if category_id not in selected_category_ids:
+            partial_sub_ids = selected_subcategory_ids.get(category_id, set())
+            if partial_sub_ids:
+                raise HTTPException(
+                    status_code=400,
+                    detail='Администратор выбрал в этой категории только отдельные подкатегории. Возьмите нужную подкатегорию ниже.',
+                )
             raise HTTPException(status_code=400, detail='Эта категория не выбрана администратором для текущего цикла.')
         if any(sub['name'] == DEFAULT_SUBCATEGORY_NAME for sub in category['subcategories']):
             raise HTTPException(status_code=400, detail='Категории со служебными ветками «Без категории/Без подкатегории» нельзя брать целиком. Выберите обычную подкатегорию или конкретные товары.')

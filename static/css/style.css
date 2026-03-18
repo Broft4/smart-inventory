@@ -1115,3 +1115,88 @@ body.modal-open {
         justify-content: flex-start;
     }
 }
+
+
+.selected-cycle-card {
+    padding: 0;
+    overflow: hidden;
+}
+.selected-cycle-details {
+    display: block;
+}
+.selected-cycle-details summary {
+    list-style: none;
+}
+.selected-cycle-details summary::-webkit-details-marker {
+    display: none;
+}
+.selected-cycle-summary {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+    padding: 20px;
+    cursor: pointer;
+}
+.selected-cycle-summary:hover {
+    background: #f8fafc;
+}
+.selected-cycle-title {
+    margin: 0 0 8px;
+}
+.selected-cycle-subtitle {
+    margin: 0;
+}
+.selected-cycle-toggle-text {
+    flex-shrink: 0;
+    align-self: center;
+    color: #2563eb;
+    font-weight: 700;
+    font-size: 14px;
+}
+
+
+.selected-cycle-details[open] .selected-cycle-toggle-text::before {
+    content: 'Свернуть';
+}
+.selected-cycle-details:not([open]) .selected-cycle-toggle-text::before {
+    content: 'Развернуть';
+}
+.selected-cycle-details[open] .selected-cycle-toggle-text {
+    color: #1d4ed8;
+}
+.selected-cycle-grid {
+    display: grid;
+    grid-template-columns: minmax(180px, 0.65fr) minmax(360px, 1.35fr);
+    gap: 20px;
+    padding: 0 20px 20px;
+    border-top: 1px solid #eef2f7;
+}
+.selected-cycle-column {
+    min-width: 0;
+}
+.selected-cycle-column-title {
+    margin: 16px 0 10px;
+}
+.selected-cycle-column-categories {
+    max-width: 320px;
+}
+.selected-cycle-column-subcategories {
+    min-width: 0;
+}
+
+@media (max-width: 840px) {
+    .selected-cycle-summary {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    .selected-cycle-toggle-text {
+        align-self: flex-start;
+    }
+    .selected-cycle-grid {
+        grid-template-columns: 1fr;
+    }
+    .selected-cycle-column-categories {
+        max-width: none;
+    }
+}

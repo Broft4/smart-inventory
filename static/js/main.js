@@ -50,6 +50,7 @@ const employeePageState = {
 
 const employeeUiState = {
     openCategories: new Set(),
+    closedCategories: new Set(),
     openSubcategories: new Set(),
 };
 
@@ -236,6 +237,7 @@ function categoryHasCompletedMineWork(category) {
 
 function captureEmployeeUiState() {
     employeeUiState.openCategories = new Set((inventoryState?.categories || []).filter(category => category.is_open).map(category => category.id));
+    employeeUiState.closedCategories = new Set((inventoryState?.categories || []).filter(category => category.is_open === false).map(category => category.id));
     employeeUiState.openSubcategories = new Set(
         (inventoryState?.categories || []).flatMap(category => (category.subcategories || []).filter(sub => sub.is_expanded).map(sub => sub.id))
     );
@@ -245,8 +247,14 @@ function applyEmployeeUiState() {
     if (!inventoryState?.categories) return;
 
     for (const category of inventoryState.categories) {
-        if (employeeUiState.openCategories.has(category.id) || categoryHasPendingMineWork(category)) {
+        if (employeeUiState.openCategories.has(category.id)) {
             category.is_open = true;
+        } else if (employeeUiState.closedCategories.has(category.id)) {
+            category.is_open = false;
+        } else if (categoryHasPendingMineWork(category)) {
+            category.is_open = true;
+        } else {
+            category.is_open = false;
         }
 
         for (const sub of category.subcategories || []) {
@@ -389,6 +397,9 @@ function categoryMetaText(category) {
     if (category.has_my_subcategories && category.has_other_subcategories) return 'подкатегории распределены между сотрудниками';
     if (category.has_my_subcategories) return 'у вас есть закреплённые подкатегории';
     if (category.has_my_items) return 'у вас есть закреплённые товары';
+    if (!category.selected_whole_category && (category.selected_subcategory_names || []).length) {
+        return 'администратор выбрал только часть категории';
+    }
     if (category.is_blocked_by_other) return `категория занята: ${category.assigned_to}`;
     if (category.has_other_subcategories || category.has_other_items) return 'часть ветки занята другими';
     return 'свободна';
@@ -446,10 +457,13 @@ function renderSubcategoryCard(category, sub, query) {
     })();
 
     let selectionHtml = '';
+    const quickActionHtml = (!diagnosticBucket && sub.can_take)
+        ? `<div class="subcategory-action-row" style="margin:8px 0 6px;"><button class="btn secondary btn-inline" onclick="takeSubcategory('${category.id}', '${sub.id}')">Взять подкатегорию</button></div>`
+        : '';
     if (diagnosticBucket) {
         selectionHtml = '<div class="muted-text diagnostic-help">Эта служебная ветка не считает общий итог. Здесь можно закреплять только отдельные товары.</div>';
     } else if (sub.can_take) {
-        selectionHtml = `<div class="subcategory-action-row"><button class="btn secondary btn-inline" onclick="takeSubcategory('${category.id}', '${sub.id}')">Взять подкатегорию</button></div>`;
+        selectionHtml = '<div class="muted-text">Подкатегория доступна для выбора.</div>';
     } else if (sub.is_blocked_by_other && !sub.assigned_to_current_user && !sub.taken_as_part_of_category) {
         selectionHtml = `<div class="muted-text">Подкатегория занята: <strong>${escapeHtml(sub.assigned_to || 'другой сотрудник')}</strong>.</div>`;
     } else if (sub.assigned_to_current_user) {
@@ -512,6 +526,7 @@ function renderSubcategoryCard(category, sub, query) {
     return `
         <div class="category-card subcategory-card status-${sub.status}" id="card-${sub.id}">
             <h3 id="title-${sub.id}" onclick="toggleSubcategory('${sub.id}')">${icon} ${highlightMatch(sub.name, query)}</h3>
+            ${quickActionHtml}
             <div id="body-${sub.id}" style="display:${subExpanded ? 'block' : 'none'}; ${locked && !canCountThisSub && !diagnosticBucket ? 'opacity:.65;' : ''}">
                 ${selectionHtml}
                 ${canCountThisSub ? `
@@ -545,14 +560,22 @@ function renderCategoryCard(category, query) {
     const meta = categoryMetaText(category);
     const visibleSubcategories = getVisibleSubcategories(category, query);
     const queryActive = Boolean(normalizeSearch(query));
-    const bodyVisible = queryActive ? true : (Boolean(category.is_open) || categoryHasPendingMineWork(category));
+    const bodyVisible = queryActive ? true : Boolean(category.is_open);
 
     let bodyHtml = '';
     if (!category.is_diagnostic && category.can_take) {
         bodyHtml += `
             <div class="category-card">
-                <p class="muted-text">Категория пока никем не взята в работу.</p>
+                <p class="muted-text">Категория целиком выбрана администратором и пока никем не взята в работу.</p>
                 <button class="btn primary btn-inline" onclick="takeCategory('${category.id}')">Взять всю категорию</button>
+            </div>
+        `;
+    } else if (!category.is_diagnostic && !category.selected_whole_category && (category.selected_subcategory_names || []).length) {
+        const selectedNames = (category.selected_subcategory_names || []).map(name => `«${escapeHtml(name)}»`).join(', ');
+        bodyHtml += `
+            <div class="category-card">
+                <p class="muted-text">Администратор выбрал в этой категории только отдельные подкатегории. Целиком взять категорию нельзя — выберите одну из доступных подкатегорий ниже.</p>
+                <div class="muted-text">Выбрано: ${selectedNames}</div>
             </div>
         `;
     }
@@ -642,8 +665,10 @@ window.toggleCategory = function (categoryId) {
     category.is_open = !category.is_open;
     if (category.is_open) {
         employeeUiState.openCategories.add(categoryId);
+        employeeUiState.closedCategories.delete(categoryId);
     } else {
         employeeUiState.openCategories.delete(categoryId);
+        employeeUiState.closedCategories.add(categoryId);
     }
     renderCategories();
 };

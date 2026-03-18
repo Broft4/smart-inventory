@@ -115,27 +115,30 @@
         </div>
     </section>
 
-    <section class="category-card">
-        <div class="section-title-row">
-            <div>
-                <h2 class="section-title">Выбрано на текущий цикл</h2>
-                <p class="muted-text">Быстрый список категорий и подкатегорий, которые сейчас включены в ревизию для выбранной точки.</p>
-            </div>
-        </div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;">
-            <div>
-                <h3 style="margin:0 0 10px;">Категории</h3>
-                <div id="selected-cycle-categories-list" class="employee-category-chips">
-                    <span class="muted-text">Нет выбранных категорий</span>
+    <section class="category-card selected-cycle-card">
+        <details class="selected-cycle-details">
+            <summary class="selected-cycle-summary">
+                <div>
+                    <h2 class="section-title selected-cycle-title">Выбрано на текущий цикл</h2>
+                    <p class="muted-text selected-cycle-subtitle">Быстрый список категорий и подкатегорий, которые сейчас включены в ревизию для выбранной точки.</p>
+                </div>
+                <span class="selected-cycle-toggle-text" aria-hidden="true"></span>
+            </summary>
+            <div class="selected-cycle-grid">
+                <div class="selected-cycle-column selected-cycle-column-categories">
+                    <h3 class="selected-cycle-column-title">Категории</h3>
+                    <div id="selected-cycle-categories-list" class="employee-category-chips">
+                        <span class="muted-text">Нет выбранных категорий</span>
+                    </div>
+                </div>
+                <div class="selected-cycle-column selected-cycle-column-subcategories">
+                    <h3 class="selected-cycle-column-title">Подкатегории</h3>
+                    <div id="selected-cycle-subcategories-list" class="employee-category-chips">
+                        <span class="muted-text">Нет выбранных подкатегорий</span>
+                    </div>
                 </div>
             </div>
-            <div>
-                <h3 style="margin:0 0 10px;">Подкатегории</h3>
-                <div id="selected-cycle-subcategories-list" class="employee-category-chips">
-                    <span class="muted-text">Нет выбранных подкатегорий</span>
-                </div>
-            </div>
-        </div>
+        </details>
     </section>
 
     <section class="category-card">

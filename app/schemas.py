@@ -153,6 +153,8 @@ class CategoryModel(BaseModel):
     is_diagnostic: bool = False
     has_my_items: bool = False
     has_other_items: bool = False
+    selected_whole_category: bool = False
+    selected_subcategory_names: list[str] = Field(default_factory=list)
 
 
 class InventoryStructureResponse(BaseModel):
