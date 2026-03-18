@@ -2210,7 +2210,7 @@ async def finish_report(report_id: int, db: AsyncSession, user: User) -> tuple[b
     active_employees = await _active_employee_users_for_location(report.location, db)
     completion_count = await db.scalar(select(func.count()).select_from(ReportEmployeeCompletion).where(ReportEmployeeCompletion.report_id == report.id))
     remaining = max(0, len(active_employees) - int(completion_count or 0))
-    return True, f'Ваша ревизия завершена. Ожидаем завершения ещё {remaining} сотрудник(а/ов) по этой точке.'
+    return True, f'Ваша ревизия завершена.'
 
 
 async def get_reports_history(location: str, db: AsyncSession) -> ReportHistoryResponse:
