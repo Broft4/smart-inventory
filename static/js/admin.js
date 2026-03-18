@@ -841,12 +841,20 @@ function renderCycleTargetsSelectionSummary() {
     if (selectedCountNode) {
         const selectedCategoryCount = categoryCheckboxes.filter(node => node.checked).length;
         const selectedSubcategoryCount = subcategoryCheckboxes.filter(node => node.checked && !node.disabled).length;
-        selectedCountNode.textContent = `Выбрано категорий: ${selectedCategoryCount}. Подкатегорий: ${selectedSubcategoryCount}.`;
+        selectedCountNode.textContent = `Новый выбор: категорий ${selectedCategoryCount}. Подкатегорий ${selectedSubcategoryCount}.`;
     }
 
     if (filteredCountNode) {
         filteredCountNode.textContent = `Показано категорий: ${categoryCheckboxes.length}.`;
     }
+}
+
+function clearCycleTargetsSelection() {
+    document.querySelectorAll('[data-cycle-category-id], [data-cycle-subcategory-id]').forEach(checkbox => {
+        checkbox.checked = false;
+        checkbox.disabled = false;
+    });
+    updateCycleTargetDependencyState();
 }
 
 function renderSelectedCycleScope(report) {
@@ -947,7 +955,7 @@ function renderCycleTargets(data) {
         });
     });
 
-    renderCycleTargetsSelectionSummary();
+    clearCycleTargetsSelection();
 }
 
 async function openCycleTargetsModal() {
