@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.moysklad import DEFAULT_CATEGORY_NAME, DEFAULT_SUBCATEGORY_NAME, ms_client
-from app.models import AdminLocationAccess, CategoryAssignment, CheckResult, LocationPoint, Report, SelectionCycle, SelectionTarget, User, VerifyAttemptProgress
+from app.models import AdminLocationAccess, CategoryAssignment, CheckResult, LocationPoint, Report, ReportTargetSnapshot, SelectionCycle, SelectionTarget, User, VerifyAttemptProgress
 from app.schemas import (
     AdminCycleTargetCategory,
     AdminCycleTargetItem,
@@ -282,6 +282,12 @@ def bootstrap_schema_and_admin(sync_conn) -> None:
         required = {'id', 'report_id', 'target_type', 'target_id', 'checked_by_user_id', 'attempts_used', 'created_at', 'updated_at'}
         if not required.issubset(cols):
             sync_conn.execute(text('DROP TABLE IF EXISTS verify_attempt_progress'))
+
+    if 'report_target_snapshots' in tables:
+        cols = {c['name'] for c in inspector.get_columns('report_target_snapshots')}
+        required = {'id', 'report_id', 'category_id', 'category_name', 'subcategory_id', 'subcategory_name', 'target_type', 'target_id', 'target_name', 'assigned_user_id_snapshot', 'assigned_user_name_snapshot', 'created_at'}
+        if not required.issubset(cols):
+            sync_conn.execute(text('DROP TABLE IF EXISTS report_target_snapshots'))
 
     if reset_reports:
         sync_conn.execute(text('DROP TABLE IF EXISTS check_results'))
@@ -777,6 +783,196 @@ async def get_inventory_diagnostics_rows(location: str) -> list[dict[str, Any]]:
     ]
 
 
+
+async def _load_report_target_snapshots(report_id: int, db: AsyncSession) -> list[ReportTargetSnapshot]:
+    return (
+        await db.scalars(
+            select(ReportTargetSnapshot)
+            .where(ReportTargetSnapshot.report_id == report_id)
+            .order_by(ReportTargetSnapshot.id.asc())
+        )
+    ).all()
+
+
+async def _upsert_report_target_snapshot(
+    *,
+    report_id: int,
+    category_id: str,
+    category_name: str,
+    subcategory_id: str | None,
+    subcategory_name: str | None,
+    target_type: str,
+    target_id: str,
+    target_name: str,
+    assigned_user_id_snapshot: int | None,
+    assigned_user_name_snapshot: str | None,
+    db: AsyncSession,
+) -> None:
+    existing = await db.scalar(
+        select(ReportTargetSnapshot)
+        .where(ReportTargetSnapshot.report_id == report_id)
+        .where(ReportTargetSnapshot.target_type == target_type)
+        .where(ReportTargetSnapshot.target_id == target_id)
+        .where(ReportTargetSnapshot.assigned_user_id_snapshot == assigned_user_id_snapshot)
+        .limit(1)
+    )
+    if existing:
+        existing.category_id = category_id
+        existing.category_name = category_name
+        existing.subcategory_id = subcategory_id
+        existing.subcategory_name = subcategory_name
+        existing.target_name = target_name
+        existing.assigned_user_name_snapshot = assigned_user_name_snapshot
+        return
+
+    db.add(ReportTargetSnapshot(
+        report_id=report_id,
+        category_id=category_id,
+        category_name=category_name,
+        subcategory_id=subcategory_id,
+        subcategory_name=subcategory_name,
+        target_type=target_type,
+        target_id=target_id,
+        target_name=target_name,
+        assigned_user_id_snapshot=assigned_user_id_snapshot,
+        assigned_user_name_snapshot=assigned_user_name_snapshot,
+    ))
+
+
+async def _bootstrap_report_target_snapshots(
+    report: Report,
+    assignments: list[CategoryAssignment],
+    results: list[CheckResult],
+    db: AsyncSession,
+) -> list[ReportTargetSnapshot]:
+    existing = await _load_report_target_snapshots(report.id, db)
+    existing_keys = {
+        (row.target_type, row.target_id, row.assigned_user_id_snapshot)
+        for row in existing
+    }
+    created = False
+
+    for assignment in assignments:
+        key = (assignment.target_type, assignment.target_id, assignment.user_id)
+        if key in existing_keys:
+            continue
+        db.add(ReportTargetSnapshot(
+            report_id=report.id,
+            category_id=assignment.category_id,
+            category_name=assignment.category_name,
+            subcategory_id=assignment.subcategory_id,
+            subcategory_name=assignment.subcategory_name,
+            target_type=assignment.target_type,
+            target_id=assignment.target_id,
+            target_name=assignment.target_name,
+            assigned_user_id_snapshot=assignment.user_id,
+            assigned_user_name_snapshot=assignment.user_full_name_snapshot,
+        ))
+        existing_keys.add(key)
+        created = True
+
+    for row in results:
+        if row.checked_by_user_id is None and not row.checked_by_name_snapshot:
+            continue
+        key = (row.target_type, row.target_id, row.checked_by_user_id)
+        if key in existing_keys:
+            continue
+        db.add(ReportTargetSnapshot(
+            report_id=report.id,
+            category_id=row.category_id,
+            category_name=row.category_name,
+            subcategory_id=row.subcategory_id,
+            subcategory_name=row.subcategory_name,
+            target_type=row.target_type,
+            target_id=row.target_id,
+            target_name=row.target_name,
+            assigned_user_id_snapshot=row.checked_by_user_id,
+            assigned_user_name_snapshot=row.checked_by_name_snapshot,
+        ))
+        existing_keys.add(key)
+        created = True
+
+    if created:
+        await db.commit()
+        return await _load_report_target_snapshots(report.id, db)
+    return existing
+
+
+def _build_retained_scope_for_user(
+    user_id: int,
+    snapshots: list[ReportTargetSnapshot],
+    results: list[CheckResult],
+) -> tuple[set[str], dict[str, set[str]], dict[str, dict[str, set[str]]]]:
+    retained_category_ids: set[str] = set()
+    retained_subcategory_ids: dict[str, set[str]] = defaultdict(set)
+    retained_item_ids: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+
+    for row in snapshots:
+        if row.assigned_user_id_snapshot != user_id:
+            continue
+        if row.target_type == 'category':
+            retained_category_ids.add(row.category_id)
+        elif row.target_type == 'subcategory' and row.subcategory_id:
+            retained_subcategory_ids[row.category_id].add(row.subcategory_id)
+        elif row.target_type == 'item' and row.subcategory_id:
+            retained_item_ids[row.category_id][row.subcategory_id].add(row.target_id)
+
+    for row in results:
+        if row.checked_by_user_id != user_id:
+            continue
+        if row.target_type == 'category':
+            retained_category_ids.add(row.category_id)
+        elif row.target_type == 'subcategory' and row.subcategory_id:
+            retained_subcategory_ids[row.category_id].add(row.subcategory_id)
+        elif row.target_type == 'item' and row.subcategory_id:
+            retained_item_ids[row.category_id][row.subcategory_id].add(row.target_id)
+
+    return retained_category_ids, retained_subcategory_ids, retained_item_ids
+
+
+def _report_snapshot_maps(
+    snapshots: list[ReportTargetSnapshot],
+) -> tuple[
+    dict[str, set[int]],
+    dict[str, dict[str, set[int]]],
+    dict[str, dict[str, dict[str, set[int]]]],
+    dict[str, str],
+    dict[str, dict[str, str]],
+    dict[str, dict[str, dict[str, str]]],
+]:
+    category_user_ids: dict[str, set[int]] = defaultdict(set)
+    subcategory_user_ids: dict[str, dict[str, set[int]]] = defaultdict(lambda: defaultdict(set))
+    item_user_ids: dict[str, dict[str, dict[str, set[int]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(set)))
+    category_owner_names: dict[str, str] = {}
+    subcategory_owner_names: dict[str, dict[str, str]] = defaultdict(dict)
+    item_owner_names: dict[str, dict[str, dict[str, str]]] = defaultdict(lambda: defaultdict(dict))
+
+    for row in snapshots:
+        if row.target_type == 'category':
+            if row.assigned_user_id_snapshot is not None:
+                category_user_ids[row.category_id].add(int(row.assigned_user_id_snapshot))
+            if row.assigned_user_name_snapshot and row.category_id not in category_owner_names:
+                category_owner_names[row.category_id] = row.assigned_user_name_snapshot
+        elif row.target_type == 'subcategory' and row.subcategory_id:
+            if row.assigned_user_id_snapshot is not None:
+                subcategory_user_ids[row.category_id][row.subcategory_id].add(int(row.assigned_user_id_snapshot))
+            if row.assigned_user_name_snapshot and row.subcategory_id not in subcategory_owner_names[row.category_id]:
+                subcategory_owner_names[row.category_id][row.subcategory_id] = row.assigned_user_name_snapshot
+        elif row.target_type == 'item' and row.subcategory_id:
+            if row.assigned_user_id_snapshot is not None:
+                item_user_ids[row.category_id][row.subcategory_id][row.target_id].add(int(row.assigned_user_id_snapshot))
+            if row.assigned_user_name_snapshot and row.target_id not in item_owner_names[row.category_id][row.subcategory_id]:
+                item_owner_names[row.category_id][row.subcategory_id][row.target_id] = row.assigned_user_name_snapshot
+
+    return (
+        category_user_ids,
+        subcategory_user_ids,
+        item_user_ids,
+        category_owner_names,
+        subcategory_owner_names,
+        item_owner_names,
+    )
+
 def _subcategory_is_complete(raw_subcategory: dict[str, Any], results_by_target: dict[str, CheckResult]) -> tuple[bool, StatusEnum]:
     sub_row = results_by_target.get(raw_subcategory['id'])
     item_rows = [results_by_target.get(item['id']) for item in raw_subcategory['items']]
@@ -924,32 +1120,86 @@ def _is_categoryless_subcategory(category: dict[str, Any], subcategory: dict[str
     return category['name'] != DEFAULT_CATEGORY_NAME and subcategory['name'] == DEFAULT_SUBCATEGORY_NAME
 
 
-def _filter_inventory_by_targets(inventory: dict[str, Any], selected_category_ids: set[str], selected_subcategory_ids: dict[str, set[str]]) -> dict[str, Any]:
-    if not selected_category_ids and not any(selected_subcategory_ids.values()):
+def _filter_inventory_by_targets(
+    inventory: dict[str, Any],
+    selected_category_ids: set[str],
+    selected_subcategory_ids: dict[str, set[str]],
+    retained_category_ids: set[str] | None = None,
+    retained_subcategory_ids: dict[str, set[str]] | None = None,
+    retained_item_ids: dict[str, dict[str, set[str]]] | None = None,
+) -> dict[str, Any]:
+    retained_category_ids = retained_category_ids or set()
+    retained_subcategory_ids = retained_subcategory_ids or {}
+    retained_item_ids = retained_item_ids or {}
+
+    has_retained_scope = bool(retained_category_ids) or any(retained_subcategory_ids.values()) or any(
+        retained_item_ids.get(category_id, {}) for category_id in retained_item_ids
+    )
+    if not selected_category_ids and not any(selected_subcategory_ids.values()) and not has_retained_scope:
         return inventory
 
     categories: list[dict[str, Any]] = []
     for category in inventory['categories']:
         if category['name'] == DEFAULT_CATEGORY_NAME:
-            categories.append(category)
+            categories.append({
+                'id': category['id'],
+                'name': category['name'],
+                'subcategories': [
+                    {
+                        'id': sub['id'],
+                        'name': sub['name'],
+                        'items': [dict(item) for item in sub['items']],
+                    }
+                    for sub in category['subcategories']
+                ],
+            })
             continue
 
-        include_full_category = category['id'] in selected_category_ids
-        allowed_sub_ids = selected_subcategory_ids.get(category['id'], set())
+        include_full_category = category['id'] in selected_category_ids or category['id'] in retained_category_ids
+        allowed_sub_ids = set(selected_subcategory_ids.get(category['id'], set())) | set(retained_subcategory_ids.get(category['id'], set()))
+        retained_items_by_sub = retained_item_ids.get(category['id'], {})
+
         filtered_subcategories: list[dict[str, Any]] = []
         for sub in category['subcategories']:
+            retained_sub_item_ids = set(retained_items_by_sub.get(sub['id'], set()))
+            keep_subcategory = False
+            keep_all_items = False
+
             if _is_categoryless_subcategory(category, sub):
-                if include_full_category:
-                    filtered_subcategories.append(dict(sub))
+                if include_full_category or sub['id'] in allowed_sub_ids:
+                    keep_subcategory = True
+                    keep_all_items = True
+                elif retained_sub_item_ids:
+                    keep_subcategory = True
+            else:
+                if include_full_category or sub['id'] in allowed_sub_ids:
+                    keep_subcategory = True
+                    keep_all_items = True
+                elif retained_sub_item_ids:
+                    keep_subcategory = True
+
+            if not keep_subcategory:
                 continue
-            if include_full_category or sub['id'] in allowed_sub_ids:
-                filtered_subcategories.append(dict(sub))
+
+            items = [dict(item) for item in sub['items']]
+            if not keep_all_items:
+                items = [item for item in items if item['id'] in retained_sub_item_ids]
+                if not items:
+                    continue
+
+            filtered_subcategories.append({
+                'id': sub['id'],
+                'name': sub['name'],
+                'items': items,
+            })
+
         if include_full_category or filtered_subcategories:
             categories.append({
                 'id': category['id'],
                 'name': category['name'],
                 'subcategories': filtered_subcategories,
             })
+
     return {'location': inventory.get('location'), 'categories': categories}
 
 
@@ -1204,16 +1454,34 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
     assignments = await _load_assignments(normalized, cycle.cycle_version, db)
     results = await _load_results(report.id, db)
     targets = await _load_selection_targets(normalized, cycle.cycle_version, db)
+    report_snapshots = await _bootstrap_report_target_snapshots(report, assignments, results, db)
 
     category_assignments, subcategory_assignments, item_assignments = _category_assignments_map(assignments)
     selected_category_ids, selected_subcategory_ids = _selection_target_maps(targets)
+    retained_category_ids, retained_subcategory_ids, retained_item_ids = _build_retained_scope_for_user(user.id, report_snapshots, results)
+    (
+        snapshot_category_user_ids,
+        snapshot_subcategory_user_ids,
+        snapshot_item_user_ids,
+        snapshot_category_owner_names,
+        snapshot_subcategory_owner_names,
+        snapshot_item_owner_names,
+    ) = _report_snapshot_maps(report_snapshots)
+
     rows_by_category_target: dict[str, dict[str, CheckResult]] = defaultdict(dict)
     for row in results:
         rows_by_category_target[row.category_id][row.target_id] = row
 
     categories: list[CategoryModel] = []
     inventory = await _get_inventory_for(normalized)
-    inventory = _filter_inventory_by_targets(inventory, selected_category_ids, selected_subcategory_ids)
+    inventory = _filter_inventory_by_targets(
+        inventory,
+        selected_category_ids,
+        selected_subcategory_ids,
+        retained_category_ids,
+        retained_subcategory_ids,
+        retained_item_ids,
+    )
 
     for raw_category in inventory['categories']:
         category_is_diagnostic = raw_category['name'] == DEFAULT_CATEGORY_NAME
@@ -1221,11 +1489,18 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
         sub_assignments = subcategory_assignments.get(raw_category['id'], {})
         item_assignments_by_sub = item_assignments.get(raw_category['id'], {})
 
-        assigned_to_current_user = bool(category_assignment and category_assignment.user_id == user.id)
+        snapshot_category_taken_by_user = user.id in snapshot_category_user_ids.get(raw_category['id'], set())
+        assigned_to_current_user = bool((category_assignment and category_assignment.user_id == user.id) or snapshot_category_taken_by_user)
         assigned_to_other = bool(category_assignment and category_assignment.user_id != user.id)
-        has_my_subcategories = any(a.user_id == user.id for a in sub_assignments.values())
+        has_my_subcategories = any(a.user_id == user.id for a in sub_assignments.values()) or any(
+            user.id in user_ids for user_ids in snapshot_subcategory_user_ids.get(raw_category['id'], {}).values()
+        )
         has_other_subcategories = any(a.user_id != user.id for a in sub_assignments.values())
-        has_my_items = any(a.user_id == user.id for sub_items in item_assignments_by_sub.values() for a in sub_items.values())
+        has_my_items = any(a.user_id == user.id for sub_items in item_assignments_by_sub.values() for a in sub_items.values()) or any(
+            user.id in user_ids
+            for sub_items in snapshot_item_user_ids.get(raw_category['id'], {}).values()
+            for user_ids in sub_items.values()
+        )
         has_other_items = any(a.user_id != user.id for sub_items in item_assignments_by_sub.values() for a in sub_items.values())
 
         has_free_diag_items = False
@@ -1260,6 +1535,8 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
         mixed_assignment = False
         if category_assignment:
             assigned_to = category_assignment.user_full_name_snapshot
+        elif snapshot_category_taken_by_user:
+            assigned_to = snapshot_category_owner_names.get(raw_category['id']) or user.full_name
         elif owner_names:
             if len(owner_names) == 1:
                 assigned_to = next(iter(owner_names))
@@ -1283,7 +1560,11 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
             diagnostic_sub = category_is_diagnostic or raw_sub['name'] == DEFAULT_SUBCATEGORY_NAME
             is_completed, status = sub_states[raw_sub['id']]
             sub_item_assignments = item_assignments_by_sub.get(raw_sub['id'], {})
-            has_my_items_in_sub = any(a.user_id == user.id for a in sub_item_assignments.values())
+            snapshot_sub_taken_by_user = user.id in snapshot_subcategory_user_ids.get(raw_category['id'], {}).get(raw_sub['id'], set())
+            has_my_items_in_sub = any(a.user_id == user.id for a in sub_item_assignments.values()) or any(
+                user.id in user_ids
+                for user_ids in snapshot_item_user_ids.get(raw_category['id'], {}).get(raw_sub['id'], {}).values()
+            )
             has_other_items_in_sub = any(a.user_id != user.id for a in sub_item_assignments.values())
 
             item_rows = []
@@ -1307,15 +1588,15 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
                     name=item['name'],
                     status=item_status,
                     is_final=is_final,
-                    assigned_to=item_assignment.user_full_name_snapshot if item_assignment else None,
-                    assigned_to_current_user=bool(item_assignment and item_assignment.user_id == user.id),
+                    assigned_to=(item_assignment.user_full_name_snapshot if item_assignment else snapshot_item_owner_names.get(raw_category['id'], {}).get(raw_sub['id'], {}).get(item['id'])),
+                    assigned_to_current_user=bool((item_assignment and item_assignment.user_id == user.id) or user.id in snapshot_item_user_ids.get(raw_category['id'], {}).get(raw_sub['id'], {}).get(item['id'], set())),
                     can_take=diagnostic_sub and category_assignment is None and sub_assignments.get(raw_sub['id']) is None and item_assignment is None,
                     is_blocked_by_other=bool(item_assignment and item_assignment.user_id != user.id),
                     is_diagnostic=diagnostic_sub,
                 ))
 
             sub_assignment = sub_assignments.get(raw_sub['id'])
-            sub_assigned_to_current_user = bool(sub_assignment and sub_assignment.user_id == user.id)
+            sub_assigned_to_current_user = bool((sub_assignment and sub_assignment.user_id == user.id) or snapshot_sub_taken_by_user)
             sub_assigned_to_other = bool(sub_assignment and sub_assignment.user_id != user.id)
             can_take_sub = (not diagnostic_sub) and category_assignment is None and sub_assignment is None and not sub_item_assignments
 
@@ -1337,6 +1618,10 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
                 sub_assigned_to = sub_assignment.user_full_name_snapshot
             elif category_assignment:
                 sub_assigned_to = category_assignment.user_full_name_snapshot
+            elif snapshot_sub_taken_by_user:
+                sub_assigned_to = snapshot_subcategory_owner_names.get(raw_category['id'], {}).get(raw_sub['id']) or user.full_name
+            elif snapshot_category_taken_by_user:
+                sub_assigned_to = snapshot_category_owner_names.get(raw_category['id']) or user.full_name
             elif sub_owner_names:
                 sub_assigned_to = next(iter(sub_owner_names)) if len(sub_owner_names) == 1 else 'Несколько сотрудников'
 
@@ -1449,6 +1734,19 @@ async def assign_selection_to_user(report_id: int, category_id: str, target_type
             user_id=user.id,
             user_full_name_snapshot=user.full_name,
         ))
+        await _upsert_report_target_snapshot(
+            report_id=report.id,
+            category_id=category_id,
+            category_name=category['name'],
+            subcategory_id=None,
+            subcategory_name=None,
+            target_type='category',
+            target_id=category_id,
+            target_name=category['name'],
+            assigned_user_id_snapshot=user.id,
+            assigned_user_name_snapshot=user.full_name,
+            db=db,
+        )
         await db.commit()
         return AssignSelectionResponse(success=True, message='Категория закреплена за вами на текущий 15-дневный цикл.')
 
@@ -1489,6 +1787,19 @@ async def assign_selection_to_user(report_id: int, category_id: str, target_type
             user_id=user.id,
             user_full_name_snapshot=user.full_name,
         ))
+        await _upsert_report_target_snapshot(
+            report_id=report.id,
+            category_id=category_id,
+            category_name=category['name'],
+            subcategory_id=subcategory_id,
+            subcategory_name=subcategory['name'],
+            target_type='subcategory',
+            target_id=subcategory_id,
+            target_name=subcategory['name'],
+            assigned_user_id_snapshot=user.id,
+            assigned_user_name_snapshot=user.full_name,
+            db=db,
+        )
         await db.commit()
         return AssignSelectionResponse(success=True, message='Подкатегория закреплена за вами на текущий 15-дневный цикл.')
 
@@ -1535,6 +1846,19 @@ async def assign_selection_to_user(report_id: int, category_id: str, target_type
             user_id=user.id,
             user_full_name_snapshot=user.full_name,
         ))
+        await _upsert_report_target_snapshot(
+            report_id=report.id,
+            category_id=category_id,
+            category_name=category['name'],
+            subcategory_id=subcategory_id,
+            subcategory_name=subcategory['name'],
+            target_type='item',
+            target_id=item_id,
+            target_name=item['name'],
+            assigned_user_id_snapshot=user.id,
+            assigned_user_name_snapshot=user.full_name,
+            db=db,
+        )
         await db.commit()
         return AssignSelectionResponse(success=True, message='Товар закреплён за вами на текущий 15-дневный цикл.')
 
@@ -1685,6 +2009,19 @@ async def verify_item_or_category(data: VerifyRequest, db: AsyncSession, checked
 
     is_correct = abs(data.quantity - expected_qty) < 1e-9
     if is_correct:
+        await _upsert_report_target_snapshot(
+            report_id=report.id,
+            category_id=category_id,
+            category_name=category_name,
+            subcategory_id=subcategory_id,
+            subcategory_name=subcategory_name,
+            target_type=target_type,
+            target_id=data.target_id,
+            target_name=target_name,
+            assigned_user_id_snapshot=checked_by_user.id,
+            assigned_user_name_snapshot=checked_by_user.full_name,
+            db=db,
+        )
         await _upsert_check_result(
             report_id=report.id,
             category_id=category_id,
@@ -1720,6 +2057,19 @@ async def verify_item_or_category(data: VerifyRequest, db: AsyncSession, checked
         return VerifyResponse(is_correct=False, attempts_left=attempts_left, message=f'Неверно. Осталось {attempts_left} попытк(и).', expand_category=False)
 
     status_value = 'orange' if data.is_category else 'red'
+    await _upsert_report_target_snapshot(
+        report_id=report.id,
+        category_id=category_id,
+        category_name=category_name,
+        subcategory_id=subcategory_id,
+        subcategory_name=subcategory_name,
+        target_type=target_type,
+        target_id=data.target_id,
+        target_name=target_name,
+        assigned_user_id_snapshot=checked_by_user.id,
+        assigned_user_name_snapshot=checked_by_user.full_name,
+        db=db,
+    )
     await _upsert_check_result(
         report_id=report.id,
         category_id=category_id,

@@ -150,6 +150,26 @@ class VerifyAttemptProgress(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class ReportTargetSnapshot(Base):
+    __tablename__ = 'report_target_snapshots'
+    __table_args__ = (
+        UniqueConstraint('report_id', 'target_type', 'target_id', 'assigned_user_id_snapshot', name='uq_report_target_snapshot_per_user'),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    report_id: Mapped[int] = mapped_column(ForeignKey('reports.id', ondelete='CASCADE'), nullable=False, index=True)
+    category_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    category_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    subcategory_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    subcategory_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    target_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    target_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    target_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    assigned_user_id_snapshot: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    assigned_user_name_snapshot: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class CheckResult(Base):
     __tablename__ = 'check_results'
 
