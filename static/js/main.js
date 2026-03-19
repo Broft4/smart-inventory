@@ -169,11 +169,19 @@ function highlightMatch(text, query) {
     return safe.replace(regex, '<span class="search-highlight">$1</span>');
 }
 
+function categoryHasFreeWork(category) {
+    return category.can_take || (category.subcategories || []).some(sub => sub.can_take) || categoryHasFreeDiagnosticItems(category);
+}
+
+function categoryHasBusyWork(category) {
+    return category.is_blocked_by_other || category.has_other_subcategories || category.has_other_items;
+}
+
 function getCategoryBucket(category) {
     if (categoryHasPendingMineWork(category)) return 'mine';
+    if (categoryHasFreeWork(category)) return 'free';
     if (categoryHasCompletedMineWork(category)) return 'completed';
-    if (category.can_take || category.subcategories.some(sub => sub.can_take) || categoryHasFreeDiagnosticItems(category)) return 'free';
-    if (category.is_blocked_by_other || category.has_other_subcategories || category.has_other_items) return 'busy';
+    if (categoryHasBusyWork(category)) return 'busy';
     return 'other';
 }
 
@@ -275,6 +283,20 @@ function getVisibleSubcategories(category, query) {
         scopedSubcategories = allSubcategories.filter(subcategory => subcategoryHasPendingMineWork(category, subcategory));
     } else if (employeePageState.filter === 'completed') {
         scopedSubcategories = allSubcategories.filter(subcategory => subcategoryHasCompletedMineWork(category, subcategory));
+    } else if (employeePageState.filter === 'free') {
+        if (category.can_take) {
+            scopedSubcategories = allSubcategories;
+        } else {
+            scopedSubcategories = allSubcategories.filter(subcategory => {
+                const hasFreeItems = (subcategory.items || []).some(item => item.can_take);
+                return subcategory.can_take || hasFreeItems;
+            });
+        }
+    } else if (employeePageState.filter === 'busy') {
+        scopedSubcategories = allSubcategories.filter(subcategory => {
+            const hasBusyItems = (subcategory.items || []).some(item => item.is_blocked_by_other || item.assigned_to_current_user === false && item.assigned_to);
+            return subcategory.is_blocked_by_other || subcategory.has_other_items || hasBusyItems;
+        });
     }
 
     if (!q) return scopedSubcategories;
@@ -286,10 +308,10 @@ function getVisibleSubcategories(category, query) {
 
 function categoryPassesFilter(category) {
     const mode = employeePageState.filter;
-    if (mode === 'mine') return categoryHasPendingMineWork(category);
-    if (mode === 'completed') return categoryHasCompletedMineWork(category);
-    if (mode === 'free') return category.can_take || category.subcategories.some(sub => sub.can_take) || categoryHasFreeDiagnosticItems(category);
-    if (mode === 'busy') return category.is_blocked_by_other || category.has_other_subcategories || category.has_other_items;
+    if (mode === 'mine') return getCategoryBucket(category) === 'mine';
+    if (mode === 'completed') return getCategoryBucket(category) === 'completed';
+    if (mode === 'free') return getCategoryBucket(category) === 'free';
+    if (mode === 'busy') return getCategoryBucket(category) === 'busy';
     if (mode === 'problem') return categoryHasProblems(category);
     return true;
 }
@@ -309,10 +331,10 @@ function renderSummary() {
     const dateLine = document.getElementById('report-date-line');
     const cycleLine = document.getElementById('cycle-line');
     const allCategories = inventoryState?.categories || [];
-    const myCategories = allCategories.filter(categoryHasPendingMineWork);
-    const completedCategories = allCategories.filter(categoryHasCompletedMineWork);
-    const freeCategories = allCategories.filter(cat => cat.can_take || cat.subcategories.some(sub => sub.can_take) || categoryHasFreeDiagnosticItems(cat));
-    const occupiedCategories = allCategories.filter(cat => cat.is_blocked_by_other || cat.has_other_subcategories || cat.has_other_items);
+    const myCategories = allCategories.filter(category => getCategoryBucket(category) === 'mine');
+    const completedCategories = allCategories.filter(category => getCategoryBucket(category) === 'completed');
+    const freeCategories = allCategories.filter(category => getCategoryBucket(category) === 'free');
+    const occupiedCategories = allCategories.filter(category => getCategoryBucket(category) === 'busy');
     const problemCategories = allCategories.filter(categoryHasProblems);
 
     if (dateLine) dateLine.textContent = `Общая ревизия за ${inventoryState.report_date}`;
