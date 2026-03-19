@@ -182,7 +182,24 @@ function toggleCycleCategoryBody(categoryId) {
     button.setAttribute('aria-expanded', isHidden ? 'true' : 'false');
 }
 
+function toggleCycleCompletedSubcategories(categoryId) {
+    const body = document.querySelector(`[data-cycle-completed-body="${CSS.escape(categoryId)}"]`);
+    const button = document.querySelector(`[data-cycle-completed-toggle="${CSS.escape(categoryId)}"]`);
+    if (!body || !button) return;
+
+    const isHidden = body.classList.contains('hidden');
+    const count = Number(button.dataset.completedCount || 0);
+    if (isHidden) {
+        body.classList.remove('hidden');
+    } else {
+        body.classList.add('hidden');
+    }
+    button.textContent = isHidden ? 'Скрыть пройденные' : `Показать пройденные (${count})`;
+    button.setAttribute('aria-expanded', isHidden ? 'true' : 'false');
+}
+
 window.toggleCycleCategoryBody = toggleCycleCategoryBody;
+window.toggleCycleCompletedSubcategories = toggleCycleCompletedSubcategories;
 
 function updateSearchUI() {
     const input = document.getElementById('admin-search-input');
@@ -840,6 +857,7 @@ function renderCycleTargetsSelectionSummary() {
     const filteredCountNode = document.getElementById('cycle-targets-filtered-count');
     const categoryCheckboxes = [...document.querySelectorAll('[data-cycle-category-id]')];
     const subcategoryCheckboxes = [...document.querySelectorAll('[data-cycle-subcategory-id]')];
+    const completedSubcategoryNodes = [...document.querySelectorAll('[data-cycle-completed-subcategory-id]')];
 
     if (selectedCountNode) {
         const selectedCategoryCount = categoryCheckboxes.filter(node => node.checked).length;
@@ -848,7 +866,7 @@ function renderCycleTargetsSelectionSummary() {
     }
 
     if (filteredCountNode) {
-        filteredCountNode.textContent = `Показано категорий: ${categoryCheckboxes.length}.`;
+        filteredCountNode.textContent = `Показано категорий: ${categoryCheckboxes.length}. Уже пройдено подкатегорий в цикле: ${completedSubcategoryNodes.length}.`;
     }
 }
 
@@ -859,7 +877,6 @@ function clearCycleTargetsSelection() {
     });
     updateCycleTargetDependencyState();
 }
-
 
 function rememberCycleTargetsPreviousSelection(data) {
     const categories = Array.isArray(data?.categories) ? data.categories : [];
@@ -954,7 +971,9 @@ function renderCycleTargets(data) {
 
     container.innerHTML = categories.map(category => {
         const subcategories = Array.isArray(category.subcategories) ? category.subcategories : [];
+        const completedSubcategories = Array.isArray(category.completed_subcategories) ? category.completed_subcategories : [];
         const hasSubcategories = subcategories.length > 0;
+        const hasCompletedSubcategories = completedSubcategories.length > 0;
         const expanded = category.selected || subcategories.some(sub => sub.selected);
         return `
             <article class="category-card admin-category-card status-grey">
@@ -967,18 +986,30 @@ function renderCycleTargets(data) {
                         >
                         <div>
                             <strong>${escapeHtml(category.name)}</strong>
-                            <div class="muted-text">Выбрать всю категорию на цикл</div>
+                            <div class="muted-text">Выбрать всю категорию на цикл. Сотрудники увидят только новые подкатегории, ещё не пройденные в этом цикле.</div>
                         </div>
                     </label>
-                    ${hasSubcategories ? `
-                        <button
-                            type="button"
-                            class="chip-button"
-                            data-cycle-category-toggle="${escapeHtml(category.id)}"
-                            aria-expanded="${expanded ? 'true' : 'false'}"
-                            onclick="toggleCycleCategoryBody('${escapeHtml(category.id)}')"
-                        >${expanded ? '−' : '+'}</button>
-                    ` : ''}
+                    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end;">
+                        ${hasCompletedSubcategories ? `
+                            <button
+                                type="button"
+                                class="chip-button"
+                                data-cycle-completed-toggle="${escapeHtml(category.id)}"
+                                data-completed-count="${completedSubcategories.length}"
+                                aria-expanded="false"
+                                onclick="toggleCycleCompletedSubcategories('${escapeHtml(category.id)}')"
+                            >Показать пройденные (${completedSubcategories.length})</button>
+                        ` : ''}
+                        ${hasSubcategories ? `
+                            <button
+                                type="button"
+                                class="chip-button"
+                                data-cycle-category-toggle="${escapeHtml(category.id)}"
+                                aria-expanded="${expanded ? 'true' : 'false'}"
+                                onclick="toggleCycleCategoryBody('${escapeHtml(category.id)}')"
+                            >${expanded ? '−' : '+'}</button>
+                        ` : ''}
+                    </div>
                 </div>
                 ${hasSubcategories ? `
                     <div class="admin-category-body ${expanded ? '' : 'hidden'}" data-cycle-category-body="${escapeHtml(category.id)}">
@@ -994,10 +1025,22 @@ function renderCycleTargets(data) {
                                     >
                                     <div>
                                         <strong>${escapeHtml(subcategory.name)}</strong>
-                                        <div class="muted-text">Выбрать отдельно только эту подкатегорию</div>
+                                        <div class="muted-text">Выбрать отдельно только эту новую подкатегорию</div>
                                     </div>
                                 </label>
                             `).join('')}
+                        </div>
+                    </div>
+                ` : `
+                    <div class="admin-category-body" data-cycle-category-body="${escapeHtml(category.id)}">
+                        <div class="muted-text">Все текущие подкатегории уже пройдены в этом 15-дневном цикле.</div>
+                    </div>
+                `}
+                ${hasCompletedSubcategories ? `
+                    <div class="admin-category-body hidden" data-cycle-completed-body="${escapeHtml(category.id)}" style="margin-top:12px;border-top:1px solid rgba(148,163,184,0.25);padding-top:12px;">
+                        <div class="success-text" style="margin-bottom:8px;font-weight:600;">Пройденные подкатегории</div>
+                        <div class="employee-category-chips">
+                            ${completedSubcategories.map(subcategory => `<span class="category-chip" data-cycle-completed-subcategory-id="${escapeHtml(subcategory.id)}">${escapeHtml(subcategory.name)}</span>`).join('')}
                         </div>
                     </div>
                 ` : ''}
@@ -1566,7 +1609,7 @@ function renderCategories(report) {
                 <div class="admin-category-body ${isOpen ? '' : 'hidden'}">
                     ${(!isDiagnostic && (cat.selected_on_cycle || selectedSubcategories.length)) ? `
                         <div class="category-card" style="margin-bottom:12px;padding:14px 16px;box-shadow:none;border:1px solid rgba(148,163,184,.24);">
-                            <div class="muted-text" style="margin-bottom:8px;">Выбрано в этой ревизии</div>
+                            <div class="muted-text" style="margin-bottom:8px;">Выбрано в текущем цикле</div>
                             ${cat.selected_on_cycle
                                 ? '<div class="employee-category-chips"><span class="category-chip">Выбрана вся категория</span></div>'
                                 : `<div class="employee-category-chips">${selectedSubcategories.map(sub => `<span class="category-chip">${highlightMatch(sub, adminState.searchQuery)}</span>`).join('')}</div>`}

@@ -634,10 +634,12 @@ function renderCategories() {
     if (employeePageState.filter === 'all') {
         const mine = filtered.filter(cat => getCategoryBucket(cat) === 'mine');
         const free = filtered.filter(cat => getCategoryBucket(cat) === 'free');
+        const completed = filtered.filter(cat => getCategoryBucket(cat) === 'completed');
         const busy = filtered.filter(cat => getCategoryBucket(cat) === 'busy');
         container.innerHTML = [
             renderCategorySection('Мои выборы', 'Категории, подкатегории или отдельные товары, закреплённые за вами.', mine, query),
             renderCategorySection('Свободные категории и подкатегории', 'Их можно взять в работу. В служебных ветках выбираются отдельные товары.', free, query),
+            renderCategorySection('Завершённые подкатегории', 'То, что вы уже полностью завершили на текущий день или сохранилось в истории ревизии.', completed, query),
             renderCategorySection('Выборы других сотрудников', 'Эти категории, подкатегории или товары уже заняты.', busy, query),
         ].join('');
     } else {
