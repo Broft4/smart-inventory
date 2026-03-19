@@ -342,6 +342,7 @@ class AdminCycleTargetCategory(BaseModel):
     selected: bool = False
     disabled: bool = False
     subcategories: list[AdminCycleTargetItem] = Field(default_factory=list)
+    completed_subcategories: list[AdminCycleTargetItem] = Field(default_factory=list)
 
 
 class AdminCycleTargetsResponse(BaseModel):

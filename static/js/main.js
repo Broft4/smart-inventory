@@ -169,19 +169,11 @@ function highlightMatch(text, query) {
     return safe.replace(regex, '<span class="search-highlight">$1</span>');
 }
 
-function categoryHasFreeWork(category) {
-    return category.can_take || (category.subcategories || []).some(sub => sub.can_take) || categoryHasFreeDiagnosticItems(category);
-}
-
-function categoryHasBusyWork(category) {
-    return category.is_blocked_by_other || category.has_other_subcategories || category.has_other_items;
-}
-
 function getCategoryBucket(category) {
     if (categoryHasPendingMineWork(category)) return 'mine';
-    if (categoryHasFreeWork(category)) return 'free';
+    if (category.can_take || category.subcategories.some(sub => sub.can_take) || categoryHasFreeDiagnosticItems(category)) return 'free';
     if (categoryHasCompletedMineWork(category)) return 'completed';
-    if (categoryHasBusyWork(category)) return 'busy';
+    if (category.is_blocked_by_other || category.has_other_subcategories || category.has_other_items) return 'busy';
     return 'other';
 }
 
@@ -287,16 +279,8 @@ function getVisibleSubcategories(category, query) {
         if (category.can_take) {
             scopedSubcategories = allSubcategories;
         } else {
-            scopedSubcategories = allSubcategories.filter(subcategory => {
-                const hasFreeItems = (subcategory.items || []).some(item => item.can_take);
-                return subcategory.can_take || hasFreeItems;
-            });
+            scopedSubcategories = allSubcategories.filter(subcategory => subcategory.can_take || (subcategory.items || []).some(item => item.can_take));
         }
-    } else if (employeePageState.filter === 'busy') {
-        scopedSubcategories = allSubcategories.filter(subcategory => {
-            const hasBusyItems = (subcategory.items || []).some(item => item.is_blocked_by_other || item.assigned_to_current_user === false && item.assigned_to);
-            return subcategory.is_blocked_by_other || subcategory.has_other_items || hasBusyItems;
-        });
     }
 
     if (!q) return scopedSubcategories;
@@ -308,10 +292,9 @@ function getVisibleSubcategories(category, query) {
 
 function categoryPassesFilter(category) {
     const mode = employeePageState.filter;
-    if (mode === 'mine') return getCategoryBucket(category) === 'mine';
-    if (mode === 'completed') return getCategoryBucket(category) === 'completed';
-    if (mode === 'free') return getCategoryBucket(category) === 'free';
-    if (mode === 'busy') return getCategoryBucket(category) === 'busy';
+    if (mode === 'mine' || mode === 'completed' || mode === 'free' || mode === 'busy') {
+        return getCategoryBucket(category) === mode;
+    }
     if (mode === 'problem') return categoryHasProblems(category);
     return true;
 }
@@ -395,7 +378,7 @@ function buildSelectionConfirmMessage(kind, label) {
     const entityLabel = kind === 'category' ? 'категорию' : kind === 'subcategory' ? 'подкатегорию' : 'товар';
     return `Подтвердите выбор: ${entityLabel} «${safeLabel}».
 
-После закрепления отменить действие нельзя до начала нового 15-дневного цикла.`;
+После закрепления отменить действие нельзя до начала следующей ревизии.`;
 }
 
 
@@ -516,7 +499,7 @@ function renderSubcategoryCard(category, sub, query) {
         } else if (diagnosticItem && item.is_blocked_by_other) {
             itemMessage = `Товар закреплён за сотрудником ${item.assigned_to || 'другой сотрудник'}.`;
         } else if (diagnosticItem && item.can_take) {
-            itemMessage = 'Товар ещё не выбран на текущий 15-дневный цикл.';
+            itemMessage = 'Товар ещё не выбран на сегодня.';
         } else if (diagnosticItem) {
             itemMessage = 'Служебный товар без активного закрепления.';
         }
