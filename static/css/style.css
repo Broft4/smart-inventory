@@ -1215,3 +1215,13 @@ body.modal-open {
 .success-text {
     color: #166534;
 }
+
+#close-cycle-targets-modal-btn {
+    background: #dc3545;
+    color: #fff;
+    border: none;
+}
+
+#close-cycle-targets-modal-btn:hover {
+    background: #bb2d3b;
+}

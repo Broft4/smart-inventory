@@ -13,6 +13,8 @@ const adminState = {
     locations: [],
     locationModalTab: 'create',
     editingLocationId: null,
+    cycleTargetsPreviousCategoryIds: new Set(),
+    cycleTargetsPreviousSubcategoryIds: new Set(),
 };
 
 function formatDateTime(value) {
@@ -180,24 +182,7 @@ function toggleCycleCategoryBody(categoryId) {
     button.setAttribute('aria-expanded', isHidden ? 'true' : 'false');
 }
 
-function toggleCycleCompletedSubcategories(categoryId) {
-    const body = document.querySelector(`[data-cycle-completed-body="${CSS.escape(categoryId)}"]`);
-    const button = document.querySelector(`[data-cycle-completed-toggle="${CSS.escape(categoryId)}"]`);
-    if (!body || !button) return;
-
-    const isHidden = body.classList.contains('hidden');
-    const count = Number(button.dataset.completedCount || 0);
-    if (isHidden) {
-        body.classList.remove('hidden');
-    } else {
-        body.classList.add('hidden');
-    }
-    button.textContent = isHidden ? 'Скрыть пройденные' : `Показать пройденные (${count})`;
-    button.setAttribute('aria-expanded', isHidden ? 'true' : 'false');
-}
-
 window.toggleCycleCategoryBody = toggleCycleCategoryBody;
-window.toggleCycleCompletedSubcategories = toggleCycleCompletedSubcategories;
 
 function updateSearchUI() {
     const input = document.getElementById('admin-search-input');
@@ -855,7 +840,6 @@ function renderCycleTargetsSelectionSummary() {
     const filteredCountNode = document.getElementById('cycle-targets-filtered-count');
     const categoryCheckboxes = [...document.querySelectorAll('[data-cycle-category-id]')];
     const subcategoryCheckboxes = [...document.querySelectorAll('[data-cycle-subcategory-id]')];
-    const completedSubcategoryNodes = [...document.querySelectorAll('[data-cycle-completed-subcategory-id]')];
 
     if (selectedCountNode) {
         const selectedCategoryCount = categoryCheckboxes.filter(node => node.checked).length;
@@ -864,7 +848,7 @@ function renderCycleTargetsSelectionSummary() {
     }
 
     if (filteredCountNode) {
-        filteredCountNode.textContent = `Показано категорий: ${categoryCheckboxes.length}. Уже пройдено подкатегорий в цикле: ${completedSubcategoryNodes.length}.`;
+        filteredCountNode.textContent = `Показано категорий: ${categoryCheckboxes.length}.`;
     }
 }
 
@@ -874,6 +858,60 @@ function clearCycleTargetsSelection() {
         checkbox.disabled = false;
     });
     updateCycleTargetDependencyState();
+}
+
+
+function rememberCycleTargetsPreviousSelection(data) {
+    const categories = Array.isArray(data?.categories) ? data.categories : [];
+    adminState.cycleTargetsPreviousCategoryIds = new Set(
+        categories.filter(category => category?.selected).map(category => String(category.id)),
+    );
+    adminState.cycleTargetsPreviousSubcategoryIds = new Set(
+        categories.flatMap(category => (Array.isArray(category?.subcategories) ? category.subcategories : []))
+            .filter(subcategory => subcategory?.selected)
+            .map(subcategory => String(subcategory.id)),
+    );
+}
+
+function applyPreviousCycleTargetsSelection() {
+    const message = document.getElementById('cycle-targets-message');
+    const categoryIds = adminState.cycleTargetsPreviousCategoryIds || new Set();
+    const subcategoryIds = adminState.cycleTargetsPreviousSubcategoryIds || new Set();
+
+    if (!categoryIds.size && !subcategoryIds.size) {
+        setMessage(message, 'Прошлого выбора для этой точки пока нет.', '#6b7280');
+        return;
+    }
+
+    let appliedCategories = 0;
+    let appliedSubcategories = 0;
+
+    document.querySelectorAll('[data-cycle-category-id]').forEach(checkbox => {
+        const shouldCheck = categoryIds.has(String(checkbox.dataset.cycleCategoryId || ''));
+        if (shouldCheck && !checkbox.checked) {
+            checkbox.checked = true;
+            appliedCategories += 1;
+        }
+    });
+
+    document.querySelectorAll('[data-cycle-subcategory-id]').forEach(checkbox => {
+        const shouldCheck = subcategoryIds.has(String(checkbox.dataset.cycleSubcategoryId || ''));
+        if (!shouldCheck) return;
+        const parentCategoryId = String(checkbox.dataset.cycleSubcategoryFor || '');
+        const parentCheckbox = document.querySelector(`[data-cycle-category-id="${CSS.escape(parentCategoryId)}"]`);
+        if (parentCheckbox?.checked) return;
+        if (!checkbox.checked) {
+            checkbox.checked = true;
+            appliedSubcategories += 1;
+        }
+    });
+
+    updateCycleTargetDependencyState();
+    setMessage(
+        message,
+        `Добавлен прошлый выбор: категорий ${appliedCategories}, подкатегорий ${appliedSubcategories}. Можно отметить новые и сохранить.`,
+        '#1f9d55',
+    );
 }
 
 function renderSelectedCycleScope(report) {
@@ -900,6 +938,7 @@ function renderCycleTargets(data) {
     if (!container) return;
 
     const categories = Array.isArray(data?.categories) ? data.categories : [];
+    rememberCycleTargetsPreviousSelection(data);
     if (meta) {
         meta.textContent = `Точка: ${data?.location || '-'} · Версия цикла: ${data?.cycle_version || '-'} · Старт: ${data?.cycle_started_at || '-'}`;
     }
@@ -915,9 +954,7 @@ function renderCycleTargets(data) {
 
     container.innerHTML = categories.map(category => {
         const subcategories = Array.isArray(category.subcategories) ? category.subcategories : [];
-        const completedSubcategories = Array.isArray(category.completed_subcategories) ? category.completed_subcategories : [];
         const hasSubcategories = subcategories.length > 0;
-        const hasCompletedSubcategories = completedSubcategories.length > 0;
         const expanded = category.selected || subcategories.some(sub => sub.selected);
         return `
             <article class="category-card admin-category-card status-grey">
@@ -930,30 +967,18 @@ function renderCycleTargets(data) {
                         >
                         <div>
                             <strong>${escapeHtml(category.name)}</strong>
-                            <div class="muted-text">Выбрать всю категорию на цикл. Сотрудники увидят только новые подкатегории, ещё не пройденные в этом цикле.</div>
+                            <div class="muted-text">Выбрать всю категорию на цикл</div>
                         </div>
                     </label>
-                    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end;">
-                        ${hasCompletedSubcategories ? `
-                            <button
-                                type="button"
-                                class="chip-button"
-                                data-cycle-completed-toggle="${escapeHtml(category.id)}"
-                                data-completed-count="${completedSubcategories.length}"
-                                aria-expanded="false"
-                                onclick="toggleCycleCompletedSubcategories('${escapeHtml(category.id)}')"
-                            >Показать пройденные (${completedSubcategories.length})</button>
-                        ` : ''}
-                        ${hasSubcategories ? `
-                            <button
-                                type="button"
-                                class="chip-button"
-                                data-cycle-category-toggle="${escapeHtml(category.id)}"
-                                aria-expanded="${expanded ? 'true' : 'false'}"
-                                onclick="toggleCycleCategoryBody('${escapeHtml(category.id)}')"
-                            >${expanded ? '−' : '+'}</button>
-                        ` : ''}
-                    </div>
+                    ${hasSubcategories ? `
+                        <button
+                            type="button"
+                            class="chip-button"
+                            data-cycle-category-toggle="${escapeHtml(category.id)}"
+                            aria-expanded="${expanded ? 'true' : 'false'}"
+                            onclick="toggleCycleCategoryBody('${escapeHtml(category.id)}')"
+                        >${expanded ? '−' : '+'}</button>
+                    ` : ''}
                 </div>
                 ${hasSubcategories ? `
                     <div class="admin-category-body ${expanded ? '' : 'hidden'}" data-cycle-category-body="${escapeHtml(category.id)}">
@@ -969,22 +994,10 @@ function renderCycleTargets(data) {
                                     >
                                     <div>
                                         <strong>${escapeHtml(subcategory.name)}</strong>
-                                        <div class="muted-text">Выбрать отдельно только эту новую подкатегорию</div>
+                                        <div class="muted-text">Выбрать отдельно только эту подкатегорию</div>
                                     </div>
                                 </label>
                             `).join('')}
-                        </div>
-                    </div>
-                ` : `
-                    <div class="admin-category-body" data-cycle-category-body="${escapeHtml(category.id)}">
-                        <div class="muted-text">Все текущие подкатегории уже пройдены в этом 15-дневном цикле.</div>
-                    </div>
-                `}
-                ${hasCompletedSubcategories ? `
-                    <div class="admin-category-body hidden" data-cycle-completed-body="${escapeHtml(category.id)}" style="margin-top:12px;border-top:1px solid rgba(148,163,184,0.25);padding-top:12px;">
-                        <div class="success-text" style="margin-bottom:8px;font-weight:600;">Пройденные подкатегории</div>
-                        <div class="employee-category-chips">
-                            ${completedSubcategories.map(subcategory => `<span class="category-chip" data-cycle-completed-subcategory-id="${escapeHtml(subcategory.id)}">${escapeHtml(subcategory.name)}</span>`).join('')}
                         </div>
                     </div>
                 ` : ''}
@@ -1820,6 +1833,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     document.getElementById('close-cycle-targets-modal-btn')?.addEventListener('click', () => hideModal('cycle-targets-modal'));
     document.getElementById('save-cycle-targets-btn')?.addEventListener('click', saveCycleTargetsSelection);
+    document.getElementById('apply-previous-cycle-targets-btn')?.addEventListener('click', applyPreviousCycleTargetsSelection);
     document.getElementById('close-users-modal-btn').addEventListener('click', () => hideModal('users-modal'));
     document.getElementById('open-create-user-btn').textContent = isSuperadmin() ? 'Добавить пользователя' : 'Добавить сотрудника';
     document.getElementById('open-create-user-btn').addEventListener('click', openCreateUserModal);
