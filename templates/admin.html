@@ -123,8 +123,8 @@
         <details class="selected-cycle-details">
             <summary class="selected-cycle-summary">
                 <div>
-                    <h2 class="section-title selected-cycle-title">Выбрано на текущий цикл</h2>
-                    <p class="muted-text selected-cycle-subtitle">Быстрый список категорий и подкатегорий, которые сейчас включены в ревизию для выбранной точки.</p>
+                    <h2 class="section-title selected-cycle-title">Выбрано в этой ревизии</h2>
+                    <p class="muted-text selected-cycle-subtitle">Быстрый список категорий и подкатегорий, которые относятся к выбранной ревизии.</p>
                 </div>
                 <span class="selected-cycle-toggle-text" aria-hidden="true"></span>
             </summary>
@@ -381,7 +381,6 @@
                 <p class="muted-text">На 1-й день цикла администратор задаёт категории и подкатегории, которые сотрудники будут распределять между собой.</p>
             </div>
             <div class="modal-header-actions">
-                <button id="apply-previous-cycle-targets-btn" class="btn secondary btn-inline" type="button">Добавить прошлый выбор</button>
                 <button id="save-cycle-targets-btn" class="btn primary btn-inline" type="button">Сохранить</button>
                 <button id="close-cycle-targets-modal-btn" class="btn secondary btn-inline" type="button">Закрыть</button>
             </div>
@@ -396,7 +395,7 @@
                 <input type="text" id="cycle-targets-search" placeholder="Начните вводить категорию или подкатегорию..." autocomplete="off">
             </label>
         </div>
-        <p class="muted-text" style="margin:0 0 12px;">Можно выбрать дату в пределах последних 15 дней.</p>
+        <p class="muted-text" style="margin:0 0 12px;">Можно выбрать дату в пределах последних 15 дней. Ниже — полный список категорий: можно выбрать всю категорию целиком или раскрыть её и отметить только нужные подкатегории.</p>
         <div id="cycle-targets-meta" class="muted-text" style="margin-bottom:6px;"></div>
         <div class="cycle-targets-status-row muted-text">
             <span id="cycle-targets-selected-count">Выбрано категорий: 0. Подкатегорий: 0.</span>

@@ -13,8 +13,6 @@ const adminState = {
     locations: [],
     locationModalTab: 'create',
     editingLocationId: null,
-    cycleTargetsPreviousCategoryIds: new Set(),
-    cycleTargetsPreviousSubcategoryIds: new Set(),
 };
 
 function formatDateTime(value) {
@@ -860,60 +858,6 @@ function clearCycleTargetsSelection() {
     updateCycleTargetDependencyState();
 }
 
-
-function rememberCycleTargetsPreviousSelection(data) {
-    const categories = Array.isArray(data?.categories) ? data.categories : [];
-    adminState.cycleTargetsPreviousCategoryIds = new Set(
-        categories.filter(category => category?.selected).map(category => String(category.id)),
-    );
-    adminState.cycleTargetsPreviousSubcategoryIds = new Set(
-        categories.flatMap(category => (Array.isArray(category?.subcategories) ? category.subcategories : []))
-            .filter(subcategory => subcategory?.selected)
-            .map(subcategory => String(subcategory.id)),
-    );
-}
-
-function applyPreviousCycleTargetsSelection() {
-    const message = document.getElementById('cycle-targets-message');
-    const categoryIds = adminState.cycleTargetsPreviousCategoryIds || new Set();
-    const subcategoryIds = adminState.cycleTargetsPreviousSubcategoryIds || new Set();
-
-    if (!categoryIds.size && !subcategoryIds.size) {
-        setMessage(message, 'Прошлого выбора для этой точки пока нет.', '#6b7280');
-        return;
-    }
-
-    let appliedCategories = 0;
-    let appliedSubcategories = 0;
-
-    document.querySelectorAll('[data-cycle-category-id]').forEach(checkbox => {
-        const shouldCheck = categoryIds.has(String(checkbox.dataset.cycleCategoryId || ''));
-        if (shouldCheck && !checkbox.checked) {
-            checkbox.checked = true;
-            appliedCategories += 1;
-        }
-    });
-
-    document.querySelectorAll('[data-cycle-subcategory-id]').forEach(checkbox => {
-        const shouldCheck = subcategoryIds.has(String(checkbox.dataset.cycleSubcategoryId || ''));
-        if (!shouldCheck) return;
-        const parentCategoryId = String(checkbox.dataset.cycleSubcategoryFor || '');
-        const parentCheckbox = document.querySelector(`[data-cycle-category-id="${CSS.escape(parentCategoryId)}"]`);
-        if (parentCheckbox?.checked) return;
-        if (!checkbox.checked) {
-            checkbox.checked = true;
-            appliedSubcategories += 1;
-        }
-    });
-
-    updateCycleTargetDependencyState();
-    setMessage(
-        message,
-        `Добавлен прошлый выбор: категорий ${appliedCategories}, подкатегорий ${appliedSubcategories}. Можно отметить новые и сохранить.`,
-        '#1f9d55',
-    );
-}
-
 function renderSelectedCycleScope(report) {
     const categoriesContainer = document.getElementById('selected-cycle-categories-list');
     const subcategoriesContainer = document.getElementById('selected-cycle-subcategories-list');
@@ -938,7 +882,6 @@ function renderCycleTargets(data) {
     if (!container) return;
 
     const categories = Array.isArray(data?.categories) ? data.categories : [];
-    rememberCycleTargetsPreviousSelection(data);
     if (meta) {
         meta.textContent = `Точка: ${data?.location || '-'} · Версия цикла: ${data?.cycle_version || '-'} · Старт: ${data?.cycle_started_at || '-'}`;
     }
@@ -1566,7 +1509,7 @@ function renderCategories(report) {
                 <div class="admin-category-body ${isOpen ? '' : 'hidden'}">
                     ${(!isDiagnostic && (cat.selected_on_cycle || selectedSubcategories.length)) ? `
                         <div class="category-card" style="margin-bottom:12px;padding:14px 16px;box-shadow:none;border:1px solid rgba(148,163,184,.24);">
-                            <div class="muted-text" style="margin-bottom:8px;">Выбрано в текущем цикле</div>
+                            <div class="muted-text" style="margin-bottom:8px;">Выбрано в этой ревизии</div>
                             ${cat.selected_on_cycle
                                 ? '<div class="employee-category-chips"><span class="category-chip">Выбрана вся категория</span></div>'
                                 : `<div class="employee-category-chips">${selectedSubcategories.map(sub => `<span class="category-chip">${highlightMatch(sub, adminState.searchQuery)}</span>`).join('')}</div>`}
@@ -1833,7 +1776,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     document.getElementById('close-cycle-targets-modal-btn')?.addEventListener('click', () => hideModal('cycle-targets-modal'));
     document.getElementById('save-cycle-targets-btn')?.addEventListener('click', saveCycleTargetsSelection);
-    document.getElementById('apply-previous-cycle-targets-btn')?.addEventListener('click', applyPreviousCycleTargetsSelection);
     document.getElementById('close-users-modal-btn').addEventListener('click', () => hideModal('users-modal'));
     document.getElementById('open-create-user-btn').textContent = isSuperadmin() ? 'Добавить пользователя' : 'Добавить сотрудника';
     document.getElementById('open-create-user-btn').addEventListener('click', openCreateUserModal);
