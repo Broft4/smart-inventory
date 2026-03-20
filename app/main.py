@@ -50,6 +50,7 @@ from app.logic import (
     update_user,
     user_to_schema,
     verify_item_or_category,
+    update_discrepancy_actual_qty,
 )
 from app.models import User
 from app.moysklad import ms_client
@@ -81,6 +82,8 @@ from app.schemas import (
     UserUpdateRequest,
     VerifyRequest,
     VerifyResponse,
+    UpdateDiscrepancyRequest,
+    UpdateDiscrepancyResponse,
 )
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -135,7 +138,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260320-employee-selection-fix'
+templates.env.globals['asset_version'] = '20260320-admin-discrepancy-edit'
 
 
 @app.middleware('http')
@@ -497,6 +500,18 @@ async def api_get_report(request: Request, location: str | None = None, report_i
 @app.delete('/api/report/{report_id}', response_model=DeleteResponse)
 async def api_delete_report(report_id: int, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
     return await delete_report(report_id, db, current_user=admin)
+
+
+
+
+@app.patch('/api/report/discrepancy/{check_result_id}', response_model=UpdateDiscrepancyResponse)
+async def api_update_discrepancy(
+    check_result_id: int,
+    payload: UpdateDiscrepancyRequest,
+    admin: User = Depends(require_admin_or_superadmin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await update_discrepancy_actual_qty(check_result_id, payload, db, current_user=admin)
 
 
 @app.get('/api/inventory-diagnostics')

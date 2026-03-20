@@ -301,6 +301,37 @@
 </div>
 
 
+<div id="edit-discrepancy-modal" class="modal-overlay hidden">
+    <div class="modal-card form-modal-card discrepancy-edit-modal-card">
+        <div class="modal-header">
+            <div>
+                <h2>Редактировать расхождение</h2>
+                <p class="muted-text">Измените фактическое количество и подтвердите действие паролем текущего администратора точки.</p>
+            </div>
+            <button id="close-edit-discrepancy-modal-btn" class="btn secondary btn-inline" type="button">Закрыть</button>
+        </div>
+
+        <form id="edit-discrepancy-form" class="user-form discrepancy-edit-form" novalidate>
+            <div class="discrepancy-edit-summary">
+                <strong id="edit-discrepancy-item-name">Товар</strong>
+                <p id="edit-discrepancy-item-meta" class="muted-text"></p>
+            </div>
+            <label>Новый факт
+                <input type="number" id="edit-discrepancy-actual" min="0" step="0.001" required>
+            </label>
+            <label>Пароль текущего администратора
+                <input type="password" id="edit-discrepancy-password" autocomplete="current-password" required>
+            </label>
+            <div class="form-actions">
+                <button type="submit" id="save-discrepancy-edit-btn" class="btn primary">Сохранить</button>
+                <button type="button" id="edit-discrepancy-cancel-btn" class="btn secondary">Отмена</button>
+            </div>
+            <div id="edit-discrepancy-message" class="message"></div>
+        </form>
+    </div>
+</div>
+
+
 <div id="location-modal" class="modal-overlay hidden">
     <div class="modal-card location-modal-card">
         <div class="modal-header">

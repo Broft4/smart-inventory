@@ -61,6 +61,8 @@ from app.schemas import (
     UserUpdateRequest,
     VerifyRequest,
     VerifyResponse,
+    UpdateDiscrepancyRequest,
+    UpdateDiscrepancyResponse,
 )
 
 
@@ -2810,6 +2812,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
 
             grouped_problem_items[row.category_name].append(
                 DiscrepancyItem(
+                    check_result_id=row.id,
                     name=row.target_name,
                     expected=float(row.expected_qty),
                     actual=float(row.actual_qty or 0),
@@ -2930,6 +2933,51 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         total_retail=float(round(total_retail, 2)),
         total_lost_profit=float(round(total_lost_profit, 2)),
         employees=sorted(employee_bucket.values(), key=lambda item: item.full_name.lower()),
+    )
+
+
+async def update_discrepancy_actual_qty(
+    check_result_id: int,
+    payload: UpdateDiscrepancyRequest,
+    db: AsyncSession,
+    current_user: User,
+) -> UpdateDiscrepancyResponse:
+    check_result = await db.get(CheckResult, check_result_id)
+    if not check_result:
+        raise HTTPException(status_code=404, detail='Строка расхождения не найдена.')
+    if check_result.target_type != 'item':
+        raise HTTPException(status_code=400, detail='Редактировать можно только товарные расхождения.')
+
+    report = await db.get(Report, check_result.report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail='Ревизия для строки расхождения не найдена.')
+
+    await ensure_user_can_access_location(current_user, report.location, db)
+
+    password = str(payload.password or '').strip()
+    if not password or not verify_password(password, current_user.password_hash):
+        raise HTTPException(status_code=403, detail='Неверный пароль текущего администратора.')
+
+    actual_quantity = float(payload.actual_quantity)
+    expected_quantity = float(check_result.expected_qty or 0.0)
+    diff = float(actual_quantity - expected_quantity)
+    if abs(diff) < 1e-9:
+        diff = 0.0
+
+    check_result.actual_qty = actual_quantity
+    check_result.diff = diff
+    check_result.status = 'green' if diff == 0.0 else 'red'
+
+    await _refresh_report_status(report, db)
+    await db.commit()
+
+    return UpdateDiscrepancyResponse(
+        success=True,
+        message='Расхождение обновлено.',
+        check_result_id=check_result.id,
+        actual_quantity=float(actual_quantity),
+        diff=float(diff),
+        status=StatusEnum.GREEN if diff == 0.0 else StatusEnum.RED,
     )
 
 
