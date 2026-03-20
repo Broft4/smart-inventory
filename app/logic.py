@@ -1548,11 +1548,30 @@ async def get_cycle_targets(location: str, db: AsyncSession) -> AdminCycleTarget
 async def save_cycle_targets(payload: SaveCycleTargetsRequest, db: AsyncSession) -> SaveCycleTargetsResponse:
     normalized = _normalize_location(payload.location)
     cycle = await _get_or_create_selection_cycle(normalized, db)
-    inventory = await _get_inventory_for(normalized)
+
+    requested_category_ids = sorted(set(payload.category_ids))
+    requested_subcategory_ids = sorted(set(payload.subcategory_ids))
+    existing_targets = await _load_selection_targets(normalized, cycle.cycle_version, db)
 
     if payload.cycle_started_at:
         cycle.started_at = payload.cycle_started_at
         cycle.updated_at = datetime.utcnow()
+
+    if not requested_category_ids and not requested_subcategory_ids:
+        await db.commit()
+        if existing_targets:
+            return SaveCycleTargetsResponse(
+                success=True,
+                message='Пустой выбор не сохранён. Оставлен предыдущий выбор цикла.',
+                cycle_started_at=cycle.started_at.strftime('%d.%m.%Y'),
+            )
+        return SaveCycleTargetsResponse(
+            success=True,
+            message='Нечего сохранять: категории и подкатегории не выбраны.',
+            cycle_started_at=cycle.started_at.strftime('%d.%m.%Y'),
+        )
+
+    inventory = await _get_inventory_for(normalized)
 
     completed_subcategory_ids = await _load_completed_subcategory_ids_for_cycle(
         normalized,
@@ -1569,7 +1588,7 @@ async def save_cycle_targets(payload: SaveCycleTargetsRequest, db: AsyncSession)
 
     await db.execute(delete(SelectionTarget).where(SelectionTarget.location == normalized, SelectionTarget.cycle_version == cycle.cycle_version))
 
-    for category_id in sorted(set(payload.category_ids)):
+    for category_id in requested_category_ids:
         category = category_by_id.get(category_id)
         if not category or category['name'] == DEFAULT_CATEGORY_NAME:
             continue
@@ -1585,9 +1604,9 @@ async def save_cycle_targets(payload: SaveCycleTargetsRequest, db: AsyncSession)
             target_name=category['name'],
         ))
 
-    selected_categories = set(payload.category_ids)
+    selected_categories = set(requested_category_ids)
     skipped_completed_subcategories = 0
-    for subcategory_id in sorted(set(payload.subcategory_ids)):
+    for subcategory_id in requested_subcategory_ids:
         pair = sub_by_id.get(subcategory_id)
         if not pair:
             continue

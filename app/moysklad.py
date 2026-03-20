@@ -35,7 +35,7 @@ class MoySkladClient:
         self.retry_attempts = max(1, configured_retries)
 
         configured_inventory_ttl = int(settings.ms_inventory_cache_ttl_seconds or 300)
-        self.inventory_cache_ttl = max(15, configured_inventory_ttl)
+        self.inventory_cache_ttl = max(30, configured_inventory_ttl)
 
         self.folder_cache_ttl = max(1800, self.inventory_cache_ttl)
         self.assortment_item_cache_ttl = max(900, self.inventory_cache_ttl)

@@ -1147,6 +1147,13 @@ async function saveCycleTargetsSelection() {
 
     const categoryIds = [...document.querySelectorAll('[data-cycle-category-id]:checked')].map(node => node.dataset.cycleCategoryId).filter(Boolean);
     const subcategoryIds = [...document.querySelectorAll('[data-cycle-subcategory-id]:checked')].map(node => node.dataset.cycleSubcategoryId).filter(Boolean);
+    const hasPreviousSelection = Boolean(adminState.cycleTargetsPreviousCategoryIds?.size || adminState.cycleTargetsPreviousSubcategoryIds?.size);
+
+    if (!categoryIds.length && !subcategoryIds.length && hasPreviousSelection) {
+        setMessage(message, 'Пустой выбор не сохраняется. Оставлен предыдущий выбор цикла.', '#6b7280');
+        await openCycleTargetsModal();
+        return;
+    }
 
     setMessage(message, 'Сохраняем...', '#6b7280');
 
