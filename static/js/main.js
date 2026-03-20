@@ -711,7 +711,7 @@ window.takeCategory = async function (categoryId) {
         await loadInventory();
     } catch (error) {
         console.error(error);
-        alert('Ошибка сервера при закреплении категории.');
+        alert(describeSelectionTransportError('категории', error));
     }
 };
 
@@ -736,7 +736,7 @@ window.takeSubcategory = async function (categoryId, subcategoryId) {
         await loadInventory();
     } catch (error) {
         console.error(error);
-        alert('Ошибка сервера при закреплении подкатегории.');
+        alert(describeSelectionTransportError('подкатегории', error));
     }
 };
 
@@ -764,7 +764,7 @@ window.takeItem = async function (categoryId, subcategoryId, itemId) {
         await loadInventory();
     } catch (error) {
         console.error(error);
-        alert('Ошибка сервера при закреплении товара.');
+        alert(describeSelectionTransportError('товара', error));
     }
 };
 
@@ -785,6 +785,78 @@ function setVerificationBusyState(targetId, isBusy) {
 
 function normalizeServerError(result, fallbackMessage) {
     return result?.detail || result?.message || fallbackMessage;
+}
+
+function extractRequestId(response) {
+    return response?.headers?.get?.('X-Request-ID') || null;
+}
+
+function appendRequestId(message, requestId) {
+    if (!requestId) return message;
+    return `${message} Код запроса: ${requestId}.`;
+}
+
+function describeVerifyHttpError(status, result, requestId) {
+    const serverMessage = normalizeServerError(result, '');
+    if (status === 401) {
+        return appendRequestId('Сессия истекла. Войдите заново.', requestId);
+    }
+    if (status === 403 || status === 409) {
+        return appendRequestId(serverMessage || 'Данные ревизии уже изменились. Обновляем список и попробуйте ещё раз.', requestId);
+    }
+    if (status === 422) {
+        return appendRequestId(serverMessage || 'Не удалось обработать введённое количество. Проверьте число и повторите.', requestId);
+    }
+    if (status === 429) {
+        return appendRequestId('Слишком много запросов подряд. Подождите несколько секунд и повторите.', requestId);
+    }
+    if (status >= 500) {
+        return appendRequestId('Сервер временно недоступен. Повторите через несколько секунд.', requestId);
+    }
+    return appendRequestId(serverMessage || 'Не удалось сохранить результат проверки.', requestId);
+}
+
+function describeVerifyTransportError(error) {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        return 'Похоже, пропало интернет-соединение. Проверьте сеть и повторите.';
+    }
+    const message = String(error?.message || '').toLowerCase();
+    if (message.includes('timeout') || message.includes('timed out') || message.includes('abort')) {
+        return 'Сервер отвечает слишком долго. Подождите пару секунд и попробуйте снова.';
+    }
+    return 'Нет ответа от сервера. Обновите страницу и попробуйте ещё раз.';
+}
+
+function describeInventoryHttpError(status, requestId) {
+    if (status === 401) {
+        return 'Сессия истекла. Перенаправляем на вход.';
+    }
+    if (status === 403) {
+        return appendRequestId('У вас нет доступа к этой ревизии.', requestId);
+    }
+    if (status === 429) {
+        return 'Сервер занят. Подождите несколько секунд и повторите загрузку.';
+    }
+    if (status >= 500) {
+        return appendRequestId('Сервер временно недоступен. Попробуйте ещё раз через несколько секунд.', requestId);
+    }
+    return appendRequestId('Не удалось получить данные ревизии. Попробуйте ещё раз.', requestId);
+}
+
+function describeInventoryTransportError(error) {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        return 'Похоже, пропало интернет-соединение. Проверьте сеть и повторите загрузку.';
+    }
+    const message = String(error?.message || '').toLowerCase();
+    if (message.includes('timeout') || message.includes('timed out') || message.includes('abort')) {
+        return 'Загрузка ревизии заняла слишком много времени. Попробуйте ещё раз.';
+    }
+    return 'Сервер не ответил или соединение прервалось. Повторите загрузку.';
+}
+
+function describeSelectionTransportError(targetLabel, error) {
+    const base = describeVerifyTransportError(error);
+    return `${base} Закрепление ${targetLabel} не выполнено.`;
 }
 
 async function parseJsonSafe(response) {
@@ -822,9 +894,11 @@ window.verifySubcategory = async function (subId) {
         });
         const result = await parseJsonSafe(response);
         if (!response.ok) {
-            msgElement.textContent = normalizeServerError(result, 'Не удалось сохранить результат проверки.');
+            const requestId = extractRequestId(response);
+            console.error('POST /verify failed', { status: response.status, requestId, result, targetId: subId });
+            msgElement.textContent = describeVerifyHttpError(response.status, result, requestId);
             msgElement.style.color = 'red';
-            if ([403, 409].includes(response.status)) {
+            if ([401, 403, 409].includes(response.status)) {
                 await loadInventory({ forceReload: true });
             }
             return;
@@ -839,7 +913,7 @@ window.verifySubcategory = async function (subId) {
         }
     } catch (error) {
         console.error(error);
-        msgElement.textContent = 'Ошибка сервера';
+        msgElement.textContent = describeVerifyTransportError(error);
         msgElement.style.color = 'red';
     } finally {
         pendingVerificationTargets.delete(subId);
@@ -873,9 +947,11 @@ window.verifyItem = async function (itemId) {
         });
         const result = await parseJsonSafe(response);
         if (!response.ok) {
-            msgElement.textContent = normalizeServerError(result, 'Не удалось сохранить результат проверки.');
+            const requestId = extractRequestId(response);
+            console.error('POST /verify failed', { status: response.status, requestId, result, targetId: itemId });
+            msgElement.textContent = describeVerifyHttpError(response.status, result, requestId);
             msgElement.style.color = 'red';
-            if ([403, 409].includes(response.status)) {
+            if ([401, 403, 409].includes(response.status)) {
                 await loadInventory({ forceReload: true });
             }
             return;
@@ -891,7 +967,7 @@ window.verifyItem = async function (itemId) {
         }
     } catch (error) {
         console.error(error);
-        msgElement.textContent = 'Ошибка сервера';
+        msgElement.textContent = describeVerifyTransportError(error);
         msgElement.style.color = 'red';
     } finally {
         pendingVerificationTargets.delete(itemId);
@@ -925,10 +1001,11 @@ async function loadInventory(options = {}) {
         }
         if (!response.ok) {
             const text = await response.text();
-            console.error('GET /get-structure failed:', response.status, text);
+            const requestId = extractRequestId(response);
+            console.error('GET /get-structure failed:', response.status, text, { requestId });
             if (summary) summary.innerHTML = '<span style="color:#dc3545;">Ошибка загрузки ревизии.</span>';
-            if (container) container.innerHTML = '<div class="employee-empty-state">Не удалось загрузить данные с сервера.</div>';
-            setInventoryStatus('error', 'Не удалось получить данные ревизии. Попробуйте ещё раз.', { retry: true });
+            if (container) container.innerHTML = `<div class="employee-empty-state">${escapeHtml(describeInventoryHttpError(response.status, requestId))}</div>`;
+            setInventoryStatus('error', describeInventoryHttpError(response.status, requestId), { retry: true });
             return;
         }
         inventoryState = await response.json();
@@ -939,9 +1016,10 @@ async function loadInventory(options = {}) {
         setInventoryStatus(null);
     } catch (error) {
         console.error('loadInventory error:', error);
+        const friendlyMessage = describeInventoryTransportError(error);
         if (summary) summary.innerHTML = '<span style="color:#dc3545;">Ошибка загрузки ревизии.</span>';
-        if (container) container.innerHTML = '<div class="employee-empty-state">Ошибка соединения с сервером.</div>';
-        setInventoryStatus('error', 'Сервер не ответил или соединение прервалось. Повторите загрузку.', { retry: true });
+        if (container) container.innerHTML = `<div class="employee-empty-state">${escapeHtml(friendlyMessage)}</div>`;
+        setInventoryStatus('error', friendlyMessage, { retry: true });
     } finally {
         inventoryLoading = false;
         setRefreshButtonState(false);

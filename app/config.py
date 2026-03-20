@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     ms_retry_attempts: int = 4
     ms_max_concurrent_requests: int = 4
     ms_financial_cache_ttl_seconds: int = 900
+    app_log_level: str = "INFO"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

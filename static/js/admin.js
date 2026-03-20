@@ -1,7 +1,41 @@
+const ADMIN_UI_STATE_STORAGE_KEY = 'smart_inventory_admin_ui_state';
+
+function loadPersistedAdminUiState() {
+    try {
+        const raw = localStorage.getItem(ADMIN_UI_STATE_STORAGE_KEY);
+        if (!raw) return { selectedLocation: '', selectedReportId: null, selectedReportIdByLocation: {} };
+        const parsed = JSON.parse(raw);
+        return {
+            selectedLocation: typeof parsed?.selectedLocation === 'string' ? parsed.selectedLocation : '',
+            selectedReportId: Number.isFinite(Number(parsed?.selectedReportId)) ? Number(parsed.selectedReportId) : null,
+            selectedReportIdByLocation: parsed?.selectedReportIdByLocation && typeof parsed.selectedReportIdByLocation === 'object'
+                ? parsed.selectedReportIdByLocation
+                : {},
+        };
+    } catch {
+        return { selectedLocation: '', selectedReportId: null, selectedReportIdByLocation: {} };
+    }
+}
+
+function persistAdminUiState() {
+    try {
+        localStorage.setItem(ADMIN_UI_STATE_STORAGE_KEY, JSON.stringify({
+            selectedLocation: adminState.selectedLocation || '',
+            selectedReportId: adminState.selectedReportId ?? null,
+            selectedReportIdByLocation: adminState.selectedReportIdByLocation || {},
+        }));
+    } catch {
+        // ignore storage errors
+    }
+}
+
+const persistedAdminUiState = loadPersistedAdminUiState();
+
 const adminState = {
     report: null,
-    selectedLocation: '',
-    selectedReportId: null,
+    selectedLocation: persistedAdminUiState.selectedLocation || '',
+    selectedReportId: persistedAdminUiState.selectedReportId ?? null,
+    selectedReportIdByLocation: persistedAdminUiState.selectedReportIdByLocation || {},
     employeeFilter: '',
     discrepancyOnly: false,
     completedOnly: false,
@@ -459,10 +493,15 @@ function renderLocationOptions(locations) {
 
     if (adminState.selectedLocation && !adminState.locations.some(location => location.name === adminState.selectedLocation)) {
         adminState.selectedLocation = adminState.locations[0]?.name || '';
+        adminState.selectedReportId = adminState.selectedLocation
+            ? Number(adminState.selectedReportIdByLocation?.[adminState.selectedLocation] || null)
+            : null;
     }
     if (!adminState.selectedLocation && adminState.locations.length) {
         adminState.selectedLocation = adminState.locations[0].name;
+        adminState.selectedReportId = Number(adminState.selectedReportIdByLocation?.[adminState.selectedLocation] || null) || null;
     }
+    persistAdminUiState();
 
     if (locationSelect) {
         locationSelect.innerHTML = adminState.locations.length
@@ -1083,7 +1122,7 @@ function renderCycleTargets(data) {
                 `}
                 ${hasCompletedSubcategories ? `
                     <div class="admin-category-body hidden" data-cycle-completed-body="${escapeHtml(category.id)}" style="margin-top:12px;border-top:1px solid rgba(148,163,184,0.25);padding-top:12px;">
-                        <div class="success-text" style="margin-bottom:8px;font-weight:600;">Пройденные подкатегории</div>
+                        <div class="success-text" style="margin-bottom:8px;font-weight:600;">Успешно пройденные подкатегории</div>
                         <div class="employee-category-chips">
                             ${completedSubcategories.map(subcategory => `<span class="category-chip" data-cycle-completed-subcategory-id="${escapeHtml(subcategory.id)}">${escapeHtml(subcategory.name)}</span>`).join('')}
                         </div>
@@ -1717,7 +1756,7 @@ function renderCategories(report) {
                     ` : ''}
                     ${completedSubcategories.length ? `
                         <div class="category-card category-card--success" style="margin-bottom:12px;padding:14px 16px;box-shadow:none;">
-                            <div class="success-text" style="margin-bottom:8px;font-weight:600;">Пройденные подкатегории</div>
+                            <div class="success-text" style="margin-bottom:8px;font-weight:600;">Успешно пройденные подкатегории</div>
                             <div class="employee-category-chips">
                                 ${completedSubcategories.map(sub => `<span class="category-chip category-chip--success">${highlightMatch(sub.name, adminState.searchQuery)}${sub.checked_by ? ` · ${highlightMatch(sub.checked_by, adminState.searchQuery)}` : ''}</span>`).join('')}
                             </div>
@@ -1824,12 +1863,23 @@ async function loadReportsList(location) {
     if (!data.reports.length) {
         select.innerHTML = '<option value="">Нет сохранённых ревизий</option>';
         select.disabled = true;
+        adminState.selectedReportId = null;
+        if (location) {
+            delete adminState.selectedReportIdByLocation[location];
+        }
+        persistAdminUiState();
         return null;
     }
 
     select.innerHTML = data.reports.map(report => `
         <option value="${report.report_id}" data-report-number="${report.report_number ?? ''}">${escapeHtml(report.label)}</option>
     `).join('');
+
+    const persistedReportId = Number(adminState.selectedReportIdByLocation?.[location] || adminState.selectedReportId || null);
+    if (persistedReportId && data.reports.some(report => Number(report.report_id) === persistedReportId)) {
+        select.value = String(persistedReportId);
+    }
+
     select.disabled = false;
     return Number(select.value);
 }
@@ -1866,6 +1916,10 @@ async function loadAdminReport(location, reportId) {
         const report = payload;
         adminState.report = report;
         adminState.selectedReportId = report.report_id || null;
+        if (adminState.selectedLocation) {
+            adminState.selectedReportIdByLocation[adminState.selectedLocation] = adminState.selectedReportId;
+        }
+        persistAdminUiState();
 
         updateSummary(report);
         populateEmployeeFilter(report);
@@ -1900,6 +1954,8 @@ async function deleteSelectedReport() {
 
 async function reloadReportsSection(location) {
     adminState.selectedLocation = location;
+    adminState.selectedReportId = Number(adminState.selectedReportIdByLocation?.[location] || adminState.selectedReportId || null) || null;
+    persistAdminUiState();
     adminState.employeeFilter = '';
     adminState.expandedCategories.clear();
 
@@ -1923,6 +1979,15 @@ async function reloadReportsSection(location) {
 
     reportSelect.onchange = async () => {
         const selected = reportSelect.value ? Number(reportSelect.value) : null;
+        adminState.selectedReportId = selected;
+        if (location) {
+            if (selected) {
+                adminState.selectedReportIdByLocation[location] = selected;
+            } else {
+                delete adminState.selectedReportIdByLocation[location];
+            }
+        }
+        persistAdminUiState();
         adminState.expandedCategories.clear();
         await loadAdminReport(location, selected);
     };
@@ -2036,7 +2101,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     locationSelect.addEventListener('change', async () => {
-        await reloadReportsSection(locationSelect.value);
+        const nextLocation = locationSelect.value;
+        adminState.selectedLocation = nextLocation;
+        adminState.selectedReportId = Number(adminState.selectedReportIdByLocation?.[nextLocation] || null) || null;
+        persistAdminUiState();
+        await reloadReportsSection(nextLocation);
     });
 
     employeeFilter.addEventListener('change', () => {

@@ -3,9 +3,13 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import logging
 
 from contextlib import asynccontextmanager
 from pathlib import Path
+from logging.handlers import RotatingFileHandler
+from time import monotonic
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -82,6 +86,30 @@ from app.schemas import (
 BASE_DIR = Path(__file__).resolve().parents[1]
 
 
+def configure_logging() -> None:
+    level_name = (settings.app_log_level or 'INFO').upper()
+    level = getattr(logging, level_name, logging.INFO)
+    formatter = logging.Formatter('%(asctime)s %(levelname)s [%(name)s] %(message)s')
+
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    log_path = BASE_DIR / 'logs' / 'smart_inventory.log'
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(log_path, maxBytes=2_000_000, backupCount=3, encoding='utf-8')
+        handlers.append(file_handler)
+    except Exception:
+        pass
+
+    for handler in handlers:
+        handler.setFormatter(formatter)
+
+    logging.basicConfig(level=level, handlers=handlers, force=True)
+
+
+configure_logging()
+logger = logging.getLogger(__name__)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
@@ -107,7 +135,30 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260320-verify-fix-and-cache'
+templates.env.globals['asset_version'] = '20260320-report-history-fix'
+
+
+@app.middleware('http')
+async def request_id_middleware(request: Request, call_next):
+    request_id = uuid4().hex[:10]
+    request.state.request_id = request_id
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception('[req:%s] %s %s unhandled server error', request_id, request.method, request.url.path)
+        raise
+    response.headers['X-Request-ID'] = request_id
+    return response
+
+
+
+
+def _request_id(request: Request) -> str:
+    return getattr(request.state, 'request_id', '-')
+
+
+def _duration_ms(started: float) -> float:
+    return round((monotonic() - started) * 1000, 1)
 
 
 def _spawn_prewarm(location: str | None) -> None:
@@ -274,10 +325,45 @@ async def api_delete_user(user_id: int, admin: User = Depends(require_admin_or_s
 
 
 @app.get('/get-structure', response_model=InventoryStructureResponse)
-async def get_inventory_structure(user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
+async def get_inventory_structure(request: Request, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
     if user.role != 'employee' or not user.location:
         raise HTTPException(status_code=403, detail='Сотруднику не назначена точка.')
-    return await get_inventory_data(user.location, db, user)
+
+    request_id = _request_id(request)
+    started = monotonic()
+    logger.info('[req:%s] GET /get-structure start user_id=%s location=%s', request_id, user.id, user.location)
+    try:
+        response = await get_inventory_data(user.location, db, user)
+        logger.info(
+            '[req:%s] GET /get-structure ok user_id=%s location=%s report_id=%s categories=%s duration_ms=%s',
+            request_id,
+            user.id,
+            user.location,
+            response.report_id,
+            len(response.categories),
+            _duration_ms(started),
+        )
+        return response
+    except HTTPException as exc:
+        logger.warning(
+            '[req:%s] GET /get-structure http_error user_id=%s location=%s status=%s detail=%s duration_ms=%s',
+            request_id,
+            user.id,
+            user.location,
+            exc.status_code,
+            exc.detail,
+            _duration_ms(started),
+        )
+        raise
+    except Exception:
+        logger.exception(
+            '[req:%s] GET /get-structure crash user_id=%s location=%s duration_ms=%s',
+            request_id,
+            user.id,
+            user.location,
+            _duration_ms(started),
+        )
+        raise
 
 
 @app.post('/assign-selection', response_model=AssignSelectionResponse)
@@ -288,8 +374,57 @@ async def api_assign_selection(payload: AssignSelectionRequest, user: User = Dep
 
 
 @app.post('/verify', response_model=VerifyResponse)
-async def verify_count(req: VerifyRequest, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
-    return await verify_item_or_category(req, db, checked_by_user=user)
+async def verify_count(request: Request, req: VerifyRequest, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
+    request_id = _request_id(request)
+    started = monotonic()
+    logger.info(
+        '[req:%s] POST /verify start user_id=%s location=%s report_id=%s target_id=%s is_category=%s quantity=%s',
+        request_id,
+        user.id,
+        user.location,
+        req.report_id,
+        req.target_id,
+        req.is_category,
+        req.quantity,
+    )
+    try:
+        response = await verify_item_or_category(req, db, checked_by_user=user)
+        logger.info(
+            '[req:%s] POST /verify ok user_id=%s report_id=%s target_id=%s is_correct=%s attempts_left=%s expand_category=%s duration_ms=%s',
+            request_id,
+            user.id,
+            req.report_id,
+            req.target_id,
+            response.is_correct,
+            response.attempts_left,
+            response.expand_category,
+            _duration_ms(started),
+        )
+        return response
+    except HTTPException as exc:
+        logger.warning(
+            '[req:%s] POST /verify http_error user_id=%s location=%s report_id=%s target_id=%s status=%s detail=%s duration_ms=%s',
+            request_id,
+            user.id,
+            user.location,
+            req.report_id,
+            req.target_id,
+            exc.status_code,
+            exc.detail,
+            _duration_ms(started),
+        )
+        raise
+    except Exception:
+        logger.exception(
+            '[req:%s] POST /verify crash user_id=%s location=%s report_id=%s target_id=%s duration_ms=%s',
+            request_id,
+            user.id,
+            user.location,
+            req.report_id,
+            req.target_id,
+            _duration_ms(started),
+        )
+        raise
 
 
 @app.post('/finish-report', response_model=FinishReportResponse)
@@ -314,11 +449,49 @@ async def api_get_reports(location: str | None = None, user: User = Depends(requ
 
 
 @app.get('/api/report', response_model=AdminReport)
-async def api_get_report(location: str | None = None, report_id: int | None = None, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+async def api_get_report(request: Request, location: str | None = None, report_id: int | None = None, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
     if not location:
         raise HTTPException(status_code=400, detail='Нужно указать точку.')
     await ensure_user_can_access_location(admin, location, db)
-    return await get_admin_report(location, db, report_id)
+
+    request_id = _request_id(request)
+    started = monotonic()
+    logger.info('[req:%s] GET /api/report start user_id=%s location=%s report_id=%s', request_id, admin.id, location, report_id)
+    try:
+        response = await get_admin_report(location, db, report_id)
+        logger.info(
+            '[req:%s] GET /api/report ok user_id=%s location=%s report_id=%s categories=%s employees=%s duration_ms=%s',
+            request_id,
+            admin.id,
+            location,
+            response.report_id,
+            len(response.categories),
+            len(response.employees),
+            _duration_ms(started),
+        )
+        return response
+    except HTTPException as exc:
+        logger.warning(
+            '[req:%s] GET /api/report http_error user_id=%s location=%s report_id=%s status=%s detail=%s duration_ms=%s',
+            request_id,
+            admin.id,
+            location,
+            report_id,
+            exc.status_code,
+            exc.detail,
+            _duration_ms(started),
+        )
+        raise
+    except Exception:
+        logger.exception(
+            '[req:%s] GET /api/report crash user_id=%s location=%s report_id=%s duration_ms=%s',
+            request_id,
+            admin.id,
+            location,
+            report_id,
+            _duration_ms(started),
+        )
+        raise
 
 
 @app.delete('/api/report/{report_id}', response_model=DeleteResponse)

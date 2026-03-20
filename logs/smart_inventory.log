@@ -1,0 +1,790 @@
+2026-03-20 13:03:31,129 INFO [httpx] HTTP Request: GET http://testserver/login "HTTP/1.1 200 OK"
+2026-03-20 13:03:31,168 INFO [httpx] HTTP Request: POST http://testserver/api/login "HTTP/1.1 200 OK"
+2026-03-20 13:03:31,173 INFO [httpx] HTTP Request: GET http://testserver/api/me "HTTP/1.1 200 OK"
+2026-03-20 13:03:31,188 INFO [httpx] HTTP Request: GET http://testserver/admin "HTTP/1.1 200 OK"
+2026-03-20 13:03:31,196 INFO [httpx] HTTP Request: GET http://testserver/api/locations "HTTP/1.1 200 OK"
+2026-03-20 13:03:31,203 INFO [httpx] HTTP Request: GET http://testserver/api/users "HTTP/1.1 200 OK"
+2026-03-20 13:04:11,437 INFO [httpx] HTTP Request: POST http://testserver/api/login "HTTP/1.1 200 OK"
+2026-03-20 13:04:11,446 INFO [httpx] HTTP Request: GET http://testserver/api/reports?location=%D0%94%D1%83%D0%B1%D0%BD%D0%B0 "HTTP/1.1 200 OK"
+2026-03-20 13:04:11,449 INFO [app.main] [req:5f60fe0324] GET /api/report start user_id=1 location=Дубна report_id=9999
+2026-03-20 13:04:11,453 ERROR [app.main] [req:5f60fe0324] GET /api/report crash user_id=1 location=Дубна report_id=9999 duration_ms=3.6
+Traceback (most recent call last):
+  File "/mnt/data/check_archive2/fix_report_loading/app/main.py", line 468, in api_get_report
+    len(response.discrepancies),
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/pyvenv/lib/python3.13/site-packages/pydantic/main.py", line 1026, in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+AttributeError: 'AdminReport' object has no attribute 'discrepancies'
+2026-03-20 13:04:11,456 ERROR [app.main] [req:5f60fe0324] GET /api/report unhandled server error
+Traceback (most recent call last):
+  File "/opt/pyvenv/lib/python3.13/site-packages/starlette/middleware/base.py", line 159, in call_next
+    message = await recv_stream.receive()
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/pyvenv/lib/python3.13/site-packages/anyio/streams/memory.py", line 132, in receive
+    raise EndOfStream from None
+anyio.EndOfStream
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/mnt/data/check_archive2/fix_report_loading/app/main.py", line 146, in request_id_middleware
+    response = await call_next(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/pyvenv/lib/python3.13/site-packages/starlette/middleware/base.py", line 165, in call_next
+    raise app_exc
+  File "/opt/pyvenv/lib/python3.13/site-packages/starlette/middleware/base.py", line 151, in coro
+    await self.app(scope, receive_or_disconnect, send_no_error)
+  File "/opt/pyvenv/lib/python3.13/site-packages/starlette/middleware/cors.py", line 85, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/pyvenv/lib/python3.13/site-packages/starlette/middleware/gzip.py", line 24, in __call__
+    await responder(scope, receive, send)
+  File "/opt/pyvenv/lib/python3.13/site-packages/starlette/middleware/gzip.py", line 44, in __call__
+    await self.app(scope, receive, self.send_with_gzip)
+  File "/opt/pyvenv/lib/python3.13/site-packages/starlette/middleware/sessions.py", line 85, in __call__
+    await self.app(scope, receive, send_wrapper)
+  File "/opt/pyvenv/lib/python3.13/site-packages/starlette/middleware/exceptions.py", line 65, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/pyvenv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 64, in wrapped_app
+    raise exc
+  File "/opt/pyvenv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/pyvenv/lib/python3.13/site-packages/starlette/routing.py", line 756, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/pyvenv/lib/python3.13/site-packages/starlette/routing.py", line 776, in app
+    await route.handle(scope, receive, send)
+  File "/opt/pyvenv/lib/python3.13/site-packages/starlette/routing.py", line 297, in handle
+    await self.app(scope, receive, send)
+  File "/opt/pyvenv/lib/python3.13/site-packages/starlette/routing.py", line 77, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/pyvenv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 64, in wrapped_app
+    raise exc
+  File "/opt/pyvenv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/pyvenv/lib/python3.13/site-packages/starlette/routing.py", line 72, in app
+    response = await func(request)
+               ^^^^^^^^^^^^^^^^^^^
+  File "/opt/pyvenv/lib/python3.13/site-packages/fastapi/routing.py", line 278, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        dependant=dependant, values=values, is_coroutine=is_coroutine
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/opt/pyvenv/lib/python3.13/site-packages/fastapi/routing.py", line 191, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/data/check_archive2/fix_report_loading/app/main.py", line 468, in api_get_report
+    len(response.discrepancies),
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/pyvenv/lib/python3.13/site-packages/pydantic/main.py", line 1026, in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+AttributeError: 'AdminReport' object has no attribute 'discrepancies'
+2026-03-20 13:05:37,507 INFO [httpx] HTTP Request: GET http://testserver/login "HTTP/1.1 200 OK"
+2026-03-20 13:05:37,549 INFO [httpx] HTTP Request: POST http://testserver/api/login "HTTP/1.1 200 OK"
+2026-03-20 13:05:37,556 INFO [httpx] HTTP Request: GET http://testserver/api/me "HTTP/1.1 200 OK"
+2026-03-20 13:05:37,571 INFO [httpx] HTTP Request: GET http://testserver/admin "HTTP/1.1 200 OK"
+2026-03-20 13:05:37,578 INFO [httpx] HTTP Request: GET http://testserver/api/locations "HTTP/1.1 200 OK"
+2026-03-20 13:05:37,585 INFO [httpx] HTTP Request: GET http://testserver/api/users "HTTP/1.1 200 OK"
+2026-03-20 13:05:37,592 INFO [httpx] HTTP Request: GET http://testserver/api/reports?location=%D0%94%D1%83%D0%B1%D0%BD%D0%B0 "HTTP/1.1 200 OK"
+2026-03-20 13:05:37,595 INFO [app.main] [req:d32eef6bc1] GET /api/report start user_id=1 location=Дубна report_id=None
+2026-03-20 13:05:37,597 INFO [app.main] [req:d32eef6bc1] GET /api/report ok user_id=1 location=Дубна report_id=None categories=0 employees=0 duration_ms=2.0
+2026-03-20 13:05:37,598 INFO [httpx] HTTP Request: GET http://testserver/api/report?location=%D0%94%D1%83%D0%B1%D0%BD%D0%B0 "HTTP/1.1 200 OK"
+2026-03-20 16:09:09,345 INFO [app.moysklad] Inventory cache miss. Начинаем полную сборку. location=Дубна ttl_seconds=60
+2026-03-20 16:09:09,889 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/productfolder?limit=1000&offset=0 "HTTP/1.1 200 OK"
+2026-03-20 16:09:10,337 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/productfolder?limit=1000&offset=1000 "HTTP/1.1 200 OK"
+2026-03-20 16:09:10,353 INFO [app.moysklad] Получено 1205 записей из entity/productfolder
+2026-03-20 16:09:10,355 INFO [app.moysklad] Закешировано 1205 папок МоегоСклада
+2026-03-20 16:09:10,733 INFO [app.main] [req:9754d3ec86] GET /api/report start user_id=2 location=Дубна report_id=6
+2026-03-20 16:09:10,775 INFO [app.logic] Загрузка inventory началась. location=Дубна source=moysklad
+2026-03-20 16:09:10,839 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=0 "HTTP/1.1 200 OK"
+2026-03-20 16:09:12,857 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=1000 "HTTP/1.1 200 OK"
+2026-03-20 16:09:14,425 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=2000 "HTTP/1.1 200 OK"
+2026-03-20 16:09:15,909 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=3000 "HTTP/1.1 200 OK"
+2026-03-20 16:09:17,476 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=4000 "HTTP/1.1 200 OK"
+2026-03-20 16:09:18,895 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=5000 "HTTP/1.1 200 OK"
+2026-03-20 16:09:20,243 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=6000 "HTTP/1.1 200 OK"
+2026-03-20 16:09:21,550 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=7000 "HTTP/1.1 200 OK"
+2026-03-20 16:09:22,879 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=8000 "HTTP/1.1 200 OK"
+2026-03-20 16:09:24,222 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=9000 "HTTP/1.1 200 OK"
+2026-03-20 16:09:25,473 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=10000 "HTTP/1.1 200 OK"
+2026-03-20 16:09:26,648 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=11000 "HTTP/1.1 200 OK"
+2026-03-20 16:09:26,886 INFO [app.moysklad] Получено 11674 записей из report/stock/all
+2026-03-20 16:09:27,976 INFO [app.moysklad] Для точки Дубна собрано 18 категорий и 11674 товаров
+2026-03-20 16:09:28,020 INFO [app.moysklad] Inventory сохранён в кеш. location=Дубна categories=18 duration_ms=18687.0 ttl_seconds=60
+2026-03-20 16:09:28,172 INFO [app.logic] Загрузка inventory завершена. location=Дубна source=moysklad categories=16 duration_ms=17391.0
+2026-03-20 16:09:28,268 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/07694 "HTTP/1.1 404 Not Found"
+2026-03-20 16:09:28,272 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/07694 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/07694'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:09:28,276 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 07694
+2026-03-20 16:09:28,389 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/07696 "HTTP/1.1 404 Not Found"
+2026-03-20 16:09:28,396 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/07696 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/07696'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:09:28,400 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 07696
+2026-03-20 16:09:28,486 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D07694&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:09:28,500 INFO [app.moysklad] Себестоимость для 07694 (Дубна) получена через поиск по коду 07694
+2026-03-20 16:09:28,518 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/08568 "HTTP/1.1 404 Not Found"
+2026-03-20 16:09:28,520 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/08568 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/08568'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:09:28,520 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 08568
+2026-03-20 16:09:28,536 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/08270 "HTTP/1.1 404 Not Found"
+2026-03-20 16:09:28,536 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/08270 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/08270'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:09:28,536 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 08270
+2026-03-20 16:09:28,552 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/09254 "HTTP/1.1 404 Not Found"
+2026-03-20 16:09:28,556 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/09254 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/09254'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:09:28,560 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 09254
+2026-03-20 16:09:28,580 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D07696&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:09:28,589 INFO [app.moysklad] Себестоимость для 07696 (Дубна) получена через поиск по коду 07696
+2026-03-20 16:09:28,646 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/09589 "HTTP/1.1 404 Not Found"
+2026-03-20 16:09:28,653 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/09589 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/09589'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:09:28,656 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 09589
+2026-03-20 16:09:28,682 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D08568&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:09:28,686 INFO [app.moysklad] Себестоимость для 08568 (Дубна) получена через поиск по коду 08568
+2026-03-20 16:09:28,701 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D08270&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:09:28,706 INFO [app.moysklad] Себестоимость для 08270 (Дубна) получена через поиск по коду 08270
+2026-03-20 16:09:28,715 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D09254&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:09:28,718 INFO [app.moysklad] Себестоимость для 09254 (Дубна) получена через поиск по коду 09254
+2026-03-20 16:09:28,743 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/09974 "HTTP/1.1 404 Not Found"
+2026-03-20 16:09:28,751 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/09974 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/09974'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:09:28,756 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 09974
+2026-03-20 16:09:28,819 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D09589&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:09:28,824 INFO [app.moysklad] Себестоимость для 09589 (Дубна) получена через поиск по коду 09589
+2026-03-20 16:09:28,876 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/10979 "HTTP/1.1 404 Not Found"
+2026-03-20 16:09:28,880 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/10979 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/10979'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:09:28,880 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 10979
+2026-03-20 16:09:28,907 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/10515 "HTTP/1.1 404 Not Found"
+2026-03-20 16:09:28,917 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/10515 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/10515'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:09:28,920 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 10515
+2026-03-20 16:09:28,948 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/10978 "HTTP/1.1 404 Not Found"
+2026-03-20 16:09:28,952 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/10978 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/10978'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:09:28,956 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 10978
+2026-03-20 16:09:29,030 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D10979&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:09:29,036 INFO [app.moysklad] Себестоимость для 10979 (Дубна) получена через поиск по коду 10979
+2026-03-20 16:09:29,058 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D09974&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:09:29,066 INFO [app.moysklad] Себестоимость для 09974 (Дубна) получена через поиск по коду 09974
+2026-03-20 16:09:29,115 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/10980 "HTTP/1.1 404 Not Found"
+2026-03-20 16:09:29,122 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/10980 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/10980'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:09:29,123 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 10980
+2026-03-20 16:09:29,151 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D10515&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:09:29,156 INFO [app.moysklad] Себестоимость для 10515 (Дубна) получена через поиск по коду 10515
+2026-03-20 16:09:29,226 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/10982 "HTTP/1.1 404 Not Found"
+2026-03-20 16:09:29,228 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/10982 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/10982'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:09:29,228 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 10982
+2026-03-20 16:09:29,240 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D10978&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:09:29,248 INFO [app.moysklad] Себестоимость для 10978 (Дубна) получена через поиск по коду 10978
+2026-03-20 16:09:29,288 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D10980&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:09:29,288 INFO [app.moysklad] Себестоимость для 10980 (Дубна) получена через поиск по коду 10980
+2026-03-20 16:09:29,302 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/10989 "HTTP/1.1 404 Not Found"
+2026-03-20 16:09:29,307 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/10989 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/10989'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:09:29,310 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 10989
+2026-03-20 16:09:29,361 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/10993 "HTTP/1.1 404 Not Found"
+2026-03-20 16:09:29,366 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/10993 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/10993'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:09:29,366 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 10993
+2026-03-20 16:09:29,432 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D10982&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:09:29,439 INFO [app.moysklad] Себестоимость для 10982 (Дубна) получена через поиск по коду 10982
+2026-03-20 16:09:29,480 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/10991 "HTTP/1.1 404 Not Found"
+2026-03-20 16:09:29,504 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/10991 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/10991'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:09:29,513 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 10991
+2026-03-20 16:09:29,523 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/10999 "HTTP/1.1 404 Not Found"
+2026-03-20 16:09:29,532 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D10993&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:09:29,540 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/10999 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/10999'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:09:29,540 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 10999
+2026-03-20 16:09:29,549 INFO [app.moysklad] Себестоимость для 10993 (Дубна) получена через поиск по коду 10993
+2026-03-20 16:09:29,596 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/11281 "HTTP/1.1 404 Not Found"
+2026-03-20 16:09:29,606 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/11281 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/11281'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:09:29,606 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 11281
+2026-03-20 16:09:29,618 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D10989&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:09:29,622 INFO [app.moysklad] Себестоимость для 10989 (Дубна) получена через поиск по коду 10989
+2026-03-20 16:09:29,716 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D10999&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:09:29,720 INFO [app.moysklad] Себестоимость для 10999 (Дубна) получена через поиск по коду 10999
+2026-03-20 16:09:29,766 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D11281&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:09:29,775 INFO [app.moysklad] Себестоимость для 11281 (Дубна) получена через поиск по коду 11281
+2026-03-20 16:09:29,778 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/12791 "HTTP/1.1 404 Not Found"
+2026-03-20 16:09:29,787 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/12791 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/12791'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:09:29,789 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 12791
+2026-03-20 16:09:29,820 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D10991&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:09:29,827 INFO [app.moysklad] Себестоимость для 10991 (Дубна) получена через поиск по коду 10991
+2026-03-20 16:09:29,845 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/12792 "HTTP/1.1 404 Not Found"
+2026-03-20 16:09:29,858 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/12792 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/12792'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:09:29,860 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 12792
+2026-03-20 16:09:29,886 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/12789 "HTTP/1.1 404 Not Found"
+2026-03-20 16:09:29,886 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/12789 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/12789'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:09:29,896 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 12789
+2026-03-20 16:09:29,953 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D12791&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:09:29,968 INFO [app.moysklad] Себестоимость для 12791 (Дубна) получена через поиск по коду 12791
+2026-03-20 16:09:29,970 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/12796 "HTTP/1.1 404 Not Found"
+2026-03-20 16:09:29,979 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/12796 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/12796'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:09:29,979 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 12796
+2026-03-20 16:09:30,011 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D12792&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:09:30,020 INFO [app.moysklad] Себестоимость для 12792 (Дубна) получена через поиск по коду 12792
+2026-03-20 16:09:30,031 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/12798 "HTTP/1.1 404 Not Found"
+2026-03-20 16:09:30,037 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/12798 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/12798'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:09:30,037 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 12798
+2026-03-20 16:09:30,130 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D12789&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:09:30,143 INFO [app.moysklad] Себестоимость для 12789 (Дубна) получена через поиск по коду 12789
+2026-03-20 16:09:30,151 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D12796&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:09:30,160 INFO [app.moysklad] Себестоимость для 12796 (Дубна) получена через поиск по коду 12796
+2026-03-20 16:09:30,226 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D12798&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:09:30,242 INFO [app.moysklad] Себестоимость для 12798 (Дубна) получена через поиск по коду 12798
+2026-03-20 16:09:30,286 ERROR [app.main] [req:9754d3ec86] GET /api/report crash user_id=2 location=Дубна report_id=6 duration_ms=19563.0
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\main.py", line 468, in api_get_report
+    len(response.discrepancies),
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\pydantic\main.py", line 1026, in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+AttributeError: 'AdminReport' object has no attribute 'discrepancies'
+2026-03-20 16:09:30,291 ERROR [app.main] [req:9754d3ec86] GET /api/report unhandled server error
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\main.py", line 146, in request_id_middleware
+    response = await call_next(request)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\base.py", line 168, in call_next
+    raise app_exc from app_exc.__cause__ or app_exc.__context__
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\base.py", line 144, in coro
+    await self.app(scope, receive_or_disconnect, send_no_error)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\cors.py", line 87, in __call__
+    await self.app(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\gzip.py", line 29, in __call__
+    await responder(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\gzip.py", line 130, in __call__
+    await super().__call__(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\gzip.py", line 46, in __call__
+    await self.app(scope, receive, self.send_with_compression)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\sessions.py", line 85, in __call__
+    await self.app(scope, receive, send_wrapper)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\fastapi\middleware\asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\routing.py", line 716, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\routing.py", line 736, in app
+    await route.handle(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\routing.py", line 290, in handle
+    await self.app(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\fastapi\routing.py", line 130, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\fastapi\routing.py", line 116, in app
+    response = await f(request)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\fastapi\routing.py", line 670, in app
+    raw_response = await run_endpoint_function(
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\fastapi\routing.py", line 324, in run_endpoint_function
+    return await dependant.call(**values)
+  File "C:\универ\smart_inventory\app\main.py", line 468, in api_get_report
+    len(response.discrepancies),
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\pydantic\main.py", line 1026, in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+AttributeError: 'AdminReport' object has no attribute 'discrepancies'
+2026-03-20 16:11:16,610 INFO [app.moysklad] Inventory cache miss. Начинаем полную сборку. location=Дубна ttl_seconds=60
+2026-03-20 16:11:17,368 INFO [app.main] [req:785a7e9192] GET /api/report start user_id=2 location=Дубна report_id=6
+2026-03-20 16:11:17,418 INFO [app.logic] Загрузка inventory началась. location=Дубна source=moysklad
+2026-03-20 16:11:18,142 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=0 "HTTP/1.1 200 OK"
+2026-03-20 16:11:19,715 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=1000 "HTTP/1.1 200 OK"
+2026-03-20 16:11:21,063 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=2000 "HTTP/1.1 200 OK"
+2026-03-20 16:11:22,348 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=3000 "HTTP/1.1 200 OK"
+2026-03-20 16:11:23,892 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=4000 "HTTP/1.1 200 OK"
+2026-03-20 16:11:25,116 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=5000 "HTTP/1.1 200 OK"
+2026-03-20 16:11:26,768 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=6000 "HTTP/1.1 200 OK"
+2026-03-20 16:11:27,985 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=7000 "HTTP/1.1 200 OK"
+2026-03-20 16:11:29,429 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=8000 "HTTP/1.1 200 OK"
+2026-03-20 16:11:30,677 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=9000 "HTTP/1.1 200 OK"
+2026-03-20 16:11:31,972 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=10000 "HTTP/1.1 200 OK"
+2026-03-20 16:11:33,311 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=11000 "HTTP/1.1 200 OK"
+2026-03-20 16:11:33,365 INFO [app.moysklad] Получено 11674 записей из report/stock/all
+2026-03-20 16:11:34,699 INFO [app.moysklad] Для точки Дубна собрано 18 категорий и 11674 товаров
+2026-03-20 16:11:34,732 INFO [app.moysklad] Inventory сохранён в кеш. location=Дубна categories=18 duration_ms=18125.0 ttl_seconds=60
+2026-03-20 16:11:34,857 INFO [app.logic] Загрузка inventory завершена. location=Дубна source=moysklad categories=16 duration_ms=17437.0
+2026-03-20 16:11:34,883 ERROR [app.main] [req:785a7e9192] GET /api/report crash user_id=2 location=Дубна report_id=6 duration_ms=17516.0
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\main.py", line 468, in api_get_report
+    len(response.discrepancies),
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\pydantic\main.py", line 1026, in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+AttributeError: 'AdminReport' object has no attribute 'discrepancies'
+2026-03-20 16:11:34,890 ERROR [app.main] [req:785a7e9192] GET /api/report unhandled server error
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\main.py", line 146, in request_id_middleware
+    response = await call_next(request)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\base.py", line 168, in call_next
+    raise app_exc from app_exc.__cause__ or app_exc.__context__
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\base.py", line 144, in coro
+    await self.app(scope, receive_or_disconnect, send_no_error)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\cors.py", line 87, in __call__
+    await self.app(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\gzip.py", line 29, in __call__
+    await responder(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\gzip.py", line 130, in __call__
+    await super().__call__(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\gzip.py", line 46, in __call__
+    await self.app(scope, receive, self.send_with_compression)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\sessions.py", line 85, in __call__
+    await self.app(scope, receive, send_wrapper)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\fastapi\middleware\asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\routing.py", line 716, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\routing.py", line 736, in app
+    await route.handle(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\routing.py", line 290, in handle
+    await self.app(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\fastapi\routing.py", line 130, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\fastapi\routing.py", line 116, in app
+    response = await f(request)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\fastapi\routing.py", line 670, in app
+    raw_response = await run_endpoint_function(
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\fastapi\routing.py", line 324, in run_endpoint_function
+    return await dependant.call(**values)
+  File "C:\универ\smart_inventory\app\main.py", line 468, in api_get_report
+    len(response.discrepancies),
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\pydantic\main.py", line 1026, in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+AttributeError: 'AdminReport' object has no attribute 'discrepancies'
+2026-03-20 16:11:48,779 INFO [app.moysklad] Inventory cache miss. Начинаем полную сборку. location=Дмитров ttl_seconds=60
+2026-03-20 16:11:49,403 INFO [app.main] [req:d43b9536e4] GET /api/report start user_id=1 location=Дубна report_id=6
+2026-03-20 16:11:49,443 INFO [app.logic] Загрузка inventory началась. location=Дубна source=moysklad
+2026-03-20 16:11:49,444 INFO [app.logic] Загрузка inventory завершена. location=Дубна source=moysklad categories=16 duration_ms=0.0
+2026-03-20 16:11:49,475 ERROR [app.main] [req:d43b9536e4] GET /api/report crash user_id=1 location=Дубна report_id=6 duration_ms=78.0
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\main.py", line 468, in api_get_report
+    len(response.discrepancies),
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\pydantic\main.py", line 1026, in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+AttributeError: 'AdminReport' object has no attribute 'discrepancies'
+2026-03-20 16:11:49,483 ERROR [app.main] [req:d43b9536e4] GET /api/report unhandled server error
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\main.py", line 146, in request_id_middleware
+    response = await call_next(request)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\base.py", line 168, in call_next
+    raise app_exc from app_exc.__cause__ or app_exc.__context__
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\base.py", line 144, in coro
+    await self.app(scope, receive_or_disconnect, send_no_error)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\cors.py", line 87, in __call__
+    await self.app(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\gzip.py", line 29, in __call__
+    await responder(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\gzip.py", line 130, in __call__
+    await super().__call__(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\gzip.py", line 46, in __call__
+    await self.app(scope, receive, self.send_with_compression)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\sessions.py", line 85, in __call__
+    await self.app(scope, receive, send_wrapper)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\fastapi\middleware\asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\routing.py", line 716, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\routing.py", line 736, in app
+    await route.handle(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\routing.py", line 290, in handle
+    await self.app(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\fastapi\routing.py", line 130, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\fastapi\routing.py", line 116, in app
+    response = await f(request)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\fastapi\routing.py", line 670, in app
+    raw_response = await run_endpoint_function(
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\fastapi\routing.py", line 324, in run_endpoint_function
+    return await dependant.call(**values)
+  File "C:\универ\smart_inventory\app\main.py", line 468, in api_get_report
+    len(response.discrepancies),
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\pydantic\main.py", line 1026, in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+AttributeError: 'AdminReport' object has no attribute 'discrepancies'
+2026-03-20 16:11:49,791 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=0 "HTTP/1.1 200 OK"
+2026-03-20 16:11:50,829 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=1000 "HTTP/1.1 200 OK"
+2026-03-20 16:11:51,619 INFO [app.main] [req:3e870c97e7] GET /api/report start user_id=1 location=Дубна report_id=5
+2026-03-20 16:11:51,669 INFO [app.logic] Загрузка inventory началась. location=Дубна source=moysklad
+2026-03-20 16:11:51,669 INFO [app.logic] Загрузка inventory завершена. location=Дубна source=moysklad categories=16 duration_ms=0.0
+2026-03-20 16:11:51,850 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=2000 "HTTP/1.1 200 OK"
+2026-03-20 16:11:52,169 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/12911 "HTTP/1.1 404 Not Found"
+2026-03-20 16:11:52,179 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/12911 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/12911'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:11:52,179 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 12911
+2026-03-20 16:11:52,771 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D12911&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:11:52,785 INFO [app.moysklad] Себестоимость для 12911 (Дубна) получена через поиск по коду 12911
+2026-03-20 16:11:52,829 ERROR [app.main] [req:3e870c97e7] GET /api/report crash user_id=1 location=Дубна report_id=5 duration_ms=1203.0
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\main.py", line 468, in api_get_report
+    len(response.discrepancies),
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\pydantic\main.py", line 1026, in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+AttributeError: 'AdminReport' object has no attribute 'discrepancies'
+2026-03-20 16:11:52,843 ERROR [app.main] [req:3e870c97e7] GET /api/report unhandled server error
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\main.py", line 146, in request_id_middleware
+    response = await call_next(request)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\base.py", line 168, in call_next
+    raise app_exc from app_exc.__cause__ or app_exc.__context__
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\base.py", line 144, in coro
+    await self.app(scope, receive_or_disconnect, send_no_error)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\cors.py", line 87, in __call__
+    await self.app(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\gzip.py", line 29, in __call__
+    await responder(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\gzip.py", line 130, in __call__
+    await super().__call__(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\gzip.py", line 46, in __call__
+    await self.app(scope, receive, self.send_with_compression)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\sessions.py", line 85, in __call__
+    await self.app(scope, receive, send_wrapper)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\middleware\exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\fastapi\middleware\asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\routing.py", line 716, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\routing.py", line 736, in app
+    await route.handle(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\routing.py", line 290, in handle
+    await self.app(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\fastapi\routing.py", line 130, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\fastapi\routing.py", line 116, in app
+    response = await f(request)
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\fastapi\routing.py", line 670, in app
+    raw_response = await run_endpoint_function(
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\fastapi\routing.py", line 324, in run_endpoint_function
+    return await dependant.call(**values)
+  File "C:\универ\smart_inventory\app\main.py", line 468, in api_get_report
+    len(response.discrepancies),
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\pydantic\main.py", line 1026, in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+AttributeError: 'AdminReport' object has no attribute 'discrepancies'
+2026-03-20 16:11:52,873 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=3000 "HTTP/1.1 200 OK"
+2026-03-20 16:11:53,936 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=4000 "HTTP/1.1 200 OK"
+2026-03-20 16:11:55,024 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=5000 "HTTP/1.1 200 OK"
+2026-03-20 16:11:56,066 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=6000 "HTTP/1.1 200 OK"
+2026-03-20 16:11:57,066 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=7000 "HTTP/1.1 200 OK"
+2026-03-20 16:11:58,171 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=8000 "HTTP/1.1 200 OK"
+2026-03-20 16:11:59,639 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=9000 "HTTP/1.1 200 OK"
+2026-03-20 16:12:00,761 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=10000 "HTTP/1.1 200 OK"
+2026-03-20 16:12:01,991 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=11000 "HTTP/1.1 200 OK"
+2026-03-20 16:12:02,016 INFO [app.moysklad] Получено 11674 записей из report/stock/all
+2026-03-20 16:12:03,180 INFO [app.moysklad] Для точки Дмитров собрано 18 категорий и 11674 товаров
+2026-03-20 16:12:03,199 INFO [app.moysklad] Inventory сохранён в кеш. location=Дмитров categories=18 duration_ms=14422.0 ttl_seconds=60
+2026-03-20 13:37:43,088 INFO [httpx] HTTP Request: POST http://testserver/api/login "HTTP/1.1 200 OK"
+2026-03-20 13:37:43,100 INFO [httpx] HTTP Request: GET http://testserver/api/locations "HTTP/1.1 200 OK"
+2026-03-20 13:37:43,130 INFO [httpx] HTTP Request: GET http://testserver/api/reports?location=%D0%94%D1%83%D0%B1%D0%BD%D0%B0 "HTTP/1.1 200 OK"
+2026-03-20 13:37:43,133 INFO [app.main] [req:5ffa08ad6a] GET /api/report start user_id=1 location=Дубна report_id=None
+2026-03-20 13:37:43,149 INFO [app.logic] Загрузка inventory завершена. location=Дубна source=mock categories=2 duration_ms=0.0
+2026-03-20 13:37:43,152 INFO [app.main] [req:5ffa08ad6a] GET /api/report ok user_id=1 location=Дубна report_id=6 categories=0 employees=2 duration_ms=19.4
+2026-03-20 13:37:43,154 INFO [httpx] HTTP Request: GET http://testserver/api/report?location=%D0%94%D1%83%D0%B1%D0%BD%D0%B0 "HTTP/1.1 200 OK"
+2026-03-20 13:37:43,157 INFO [app.main] [req:6d95b6022e] GET /api/report start user_id=1 location=Дубна report_id=6
+2026-03-20 13:37:43,170 INFO [app.logic] Загрузка inventory завершена. location=Дубна source=mock categories=2 duration_ms=0.0
+2026-03-20 13:37:43,172 INFO [app.main] [req:6d95b6022e] GET /api/report ok user_id=1 location=Дубна report_id=6 categories=0 employees=2 duration_ms=15.2
+2026-03-20 13:37:43,175 INFO [httpx] HTTP Request: GET http://testserver/api/report?location=%D0%94%D1%83%D0%B1%D0%BD%D0%B0&report_id=6 "HTTP/1.1 200 OK"
+2026-03-20 13:37:43,179 INFO [app.main] [req:29353e6ea0] GET /api/report start user_id=1 location=Дмитров report_id=7
+2026-03-20 13:37:43,190 INFO [app.logic] Загрузка inventory завершена. location=Дмитров source=mock categories=2 duration_ms=0.0
+2026-03-20 13:37:43,191 INFO [app.main] [req:29353e6ea0] GET /api/report ok user_id=1 location=Дмитров report_id=7 categories=0 employees=1 duration_ms=12.2
+2026-03-20 13:37:43,194 INFO [httpx] HTTP Request: GET http://testserver/api/report?location=%D0%94%D0%BC%D0%B8%D1%82%D1%80%D0%BE%D0%B2&report_id=7 "HTTP/1.1 200 OK"
+2026-03-20 16:41:26,087 INFO [app.moysklad] Inventory cache miss. Начинаем полную сборку. location=Дмитров ttl_seconds=60
+2026-03-20 16:41:26,933 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/productfolder?limit=1000&offset=0 "HTTP/1.1 200 OK"
+2026-03-20 16:41:26,935 INFO [app.main] [req:7de202f6f8] GET /api/report start user_id=1 location=Дубна report_id=5
+2026-03-20 16:41:27,000 INFO [app.logic] Загрузка inventory началась. location=Дубна source=moysklad
+2026-03-20 16:41:27,000 INFO [app.moysklad] Inventory cache miss. Начинаем полную сборку. location=Дубна ttl_seconds=60
+2026-03-20 16:41:27,320 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/productfolder?limit=1000&offset=1000 "HTTP/1.1 200 OK"
+2026-03-20 16:41:27,331 INFO [app.moysklad] Получено 1205 записей из entity/productfolder
+2026-03-20 16:41:27,335 INFO [app.moysklad] Закешировано 1205 папок МоегоСклада
+2026-03-20 16:41:27,524 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=0 "HTTP/1.1 200 OK"
+2026-03-20 16:41:28,353 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=0 "HTTP/1.1 200 OK"
+2026-03-20 16:41:28,690 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=1000 "HTTP/1.1 200 OK"
+2026-03-20 16:41:29,792 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=1000 "HTTP/1.1 200 OK"
+2026-03-20 16:41:29,907 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=2000 "HTTP/1.1 200 OK"
+2026-03-20 16:41:31,132 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=2000 "HTTP/1.1 200 OK"
+2026-03-20 16:41:31,220 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=3000 "HTTP/1.1 200 OK"
+2026-03-20 16:41:32,345 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=4000 "HTTP/1.1 200 OK"
+2026-03-20 16:41:32,420 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=3000 "HTTP/1.1 200 OK"
+2026-03-20 16:41:33,491 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=5000 "HTTP/1.1 200 OK"
+2026-03-20 16:41:33,624 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=4000 "HTTP/1.1 200 OK"
+2026-03-20 16:41:34,707 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=6000 "HTTP/1.1 200 OK"
+2026-03-20 16:41:34,957 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=5000 "HTTP/1.1 200 OK"
+2026-03-20 16:41:36,152 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=7000 "HTTP/1.1 200 OK"
+2026-03-20 16:41:36,222 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=6000 "HTTP/1.1 200 OK"
+2026-03-20 16:41:37,574 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=8000 "HTTP/1.1 200 OK"
+2026-03-20 16:41:37,632 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=7000 "HTTP/1.1 200 OK"
+2026-03-20 16:41:38,781 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=9000 "HTTP/1.1 200 OK"
+2026-03-20 16:41:39,096 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=8000 "HTTP/1.1 200 OK"
+2026-03-20 16:41:39,821 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=10000 "HTTP/1.1 200 OK"
+2026-03-20 16:41:40,671 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=9000 "HTTP/1.1 200 OK"
+2026-03-20 16:41:40,825 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=11000 "HTTP/1.1 200 OK"
+2026-03-20 16:41:40,877 INFO [app.moysklad] Получено 11674 записей из report/stock/all
+2026-03-20 16:41:42,143 INFO [app.moysklad] Для точки Дмитров собрано 18 категорий и 11674 товаров
+2026-03-20 16:41:42,192 INFO [app.moysklad] Inventory сохранён в кеш. location=Дмитров categories=18 duration_ms=16109.0 ttl_seconds=60
+2026-03-20 16:41:42,211 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=10000 "HTTP/1.1 200 OK"
+2026-03-20 16:41:43,501 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F0dffb3f6-c934-11eb-0a80-05e10011ab38&limit=1000&offset=11000 "HTTP/1.1 200 OK"
+2026-03-20 16:41:43,542 INFO [app.moysklad] Получено 11674 записей из report/stock/all
+2026-03-20 16:41:44,835 INFO [app.moysklad] Для точки Дубна собрано 18 категорий и 11674 товаров
+2026-03-20 16:41:44,864 INFO [app.moysklad] Inventory сохранён в кеш. location=Дубна categories=18 duration_ms=17875.0 ttl_seconds=60
+2026-03-20 16:41:44,897 INFO [app.logic] Загрузка inventory завершена. location=Дубна source=moysklad categories=16 duration_ms=17906.0
+2026-03-20 16:41:45,000 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/12911 "HTTP/1.1 404 Not Found"
+2026-03-20 16:41:45,008 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/12911 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/12911'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:41:45,015 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 12911
+2026-03-20 16:41:45,191 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D12911&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:41:45,194 INFO [app.moysklad] Себестоимость для 12911 (Дубна) получена через поиск по коду 12911
+2026-03-20 16:41:45,238 INFO [app.main] [req:7de202f6f8] GET /api/report ok user_id=1 location=Дубна report_id=5 categories=3 employees=1 duration_ms=18313.0
+2026-03-20 16:42:16,873 INFO [app.main] [req:fae6cb0125] GET /api/report start user_id=1 location=Дмитров report_id=7
+2026-03-20 16:42:16,914 INFO [app.logic] Загрузка inventory началась. location=Дмитров source=moysklad
+2026-03-20 16:42:17,163 INFO [app.logic] Загрузка inventory завершена. location=Дмитров source=moysklad categories=16 duration_ms=250.0
+2026-03-20 16:42:17,348 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/10382 "HTTP/1.1 404 Not Found"
+2026-03-20 16:42:17,352 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/10382 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/10382'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:42:17,356 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 10382
+2026-03-20 16:42:17,362 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/10383 "HTTP/1.1 404 Not Found"
+2026-03-20 16:42:17,365 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/10383 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/10383'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:42:17,370 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 10383
+2026-03-20 16:42:17,385 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/10418 "HTTP/1.1 404 Not Found"
+2026-03-20 16:42:17,392 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/10418 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/10418'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-20 16:42:17,392 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 10418
+2026-03-20 16:42:17,536 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D10382&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:42:17,538 INFO [app.moysklad] Себестоимость для 10382 (Дмитров) получена через поиск по коду 10382
+2026-03-20 16:42:17,549 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D10383&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:42:17,557 INFO [app.moysklad] Себестоимость для 10383 (Дмитров) получена через поиск по коду 10383
+2026-03-20 16:42:17,601 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D10418&limit=100 "HTTP/1.1 200 OK"
+2026-03-20 16:42:17,607 INFO [app.moysklad] Себестоимость для 10418 (Дмитров) получена через поиск по коду 10418
+2026-03-20 16:42:17,620 INFO [app.main] [req:fae6cb0125] GET /api/report ok user_id=1 location=Дмитров report_id=7 categories=3 employees=1 duration_ms=750.0
+2026-03-20 16:42:39,728 INFO [app.logic] Загрузка inventory началась. location=Дмитров source=moysklad
+2026-03-20 16:42:39,732 INFO [app.logic] Загрузка inventory завершена. location=Дмитров source=moysklad categories=16 duration_ms=0.0
+2026-03-20 16:42:39,802 INFO [app.logic] Загрузка inventory началась. location=Дмитров source=moysklad
+2026-03-20 16:42:39,804 INFO [app.logic] Загрузка inventory завершена. location=Дмитров source=moysklad categories=16 duration_ms=0.0
+2026-03-20 16:42:53,578 INFO [app.logic] Загрузка inventory началась. location=Дмитров source=moysklad
+2026-03-20 16:42:53,578 INFO [app.moysklad] Inventory cache miss. Начинаем полную сборку. location=Дмитров ttl_seconds=60
+2026-03-20 16:42:54,788 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=0 "HTTP/1.1 200 OK"
+2026-03-20 16:42:56,114 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=1000 "HTTP/1.1 200 OK"
+2026-03-20 16:42:57,237 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=2000 "HTTP/1.1 200 OK"
+2026-03-20 16:42:58,283 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=3000 "HTTP/1.1 200 OK"
+2026-03-20 16:42:59,385 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=4000 "HTTP/1.1 200 OK"
+2026-03-20 16:43:00,617 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=5000 "HTTP/1.1 200 OK"
+2026-03-20 16:43:01,837 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=6000 "HTTP/1.1 200 OK"
+2026-03-20 16:43:03,036 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=7000 "HTTP/1.1 200 OK"
+2026-03-20 16:43:04,306 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=8000 "HTTP/1.1 200 OK"
+2026-03-20 16:43:05,632 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=9000 "HTTP/1.1 200 OK"
+2026-03-20 16:43:07,042 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=10000 "HTTP/1.1 200 OK"
+2026-03-20 16:43:08,193 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=11000 "HTTP/1.1 200 OK"
+2026-03-20 16:43:08,233 INFO [app.moysklad] Получено 11674 записей из report/stock/all
+2026-03-20 16:43:09,434 INFO [app.moysklad] Для точки Дмитров собрано 18 категорий и 11674 товаров
+2026-03-20 16:43:09,465 INFO [app.moysklad] Inventory сохранён в кеш. location=Дмитров categories=18 duration_ms=15891.0 ttl_seconds=60
+2026-03-20 16:43:09,496 INFO [app.logic] Загрузка inventory завершена. location=Дмитров source=moysklad categories=16 duration_ms=15922.0
+2026-03-20 16:43:09,574 INFO [app.logic] Загрузка inventory началась. location=Дмитров source=moysklad
+2026-03-20 16:43:09,574 INFO [app.logic] Загрузка inventory завершена. location=Дмитров source=moysklad categories=16 duration_ms=0.0
+2026-03-20 16:43:11,194 INFO [app.logic] Загрузка inventory началась. location=Дмитров source=moysklad
+2026-03-20 16:43:11,194 INFO [app.logic] Загрузка inventory завершена. location=Дмитров source=moysklad categories=16 duration_ms=0.0
+2026-03-20 16:43:11,264 INFO [app.logic] Загрузка inventory началась. location=Дмитров source=moysklad
+2026-03-20 16:43:11,267 INFO [app.logic] Загрузка inventory завершена. location=Дмитров source=moysklad categories=16 duration_ms=0.0

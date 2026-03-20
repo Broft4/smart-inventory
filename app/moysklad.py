@@ -841,18 +841,30 @@ class MoySkladClient:
         normalized = location.strip().title()
         cached = self._inventory_cache.get(normalized)
         if self._cache_alive(cached):
+            logger.debug('Inventory cache hit. location=%s', normalized)
             return cached.value
 
         lock = self._inventory_locks.setdefault(normalized, asyncio.Lock())
         async with lock:
             cached = self._inventory_cache.get(normalized)
             if self._cache_alive(cached):
+                logger.debug('Inventory cache hit after lock. location=%s', normalized)
                 return cached.value
 
+            started = monotonic()
+            logger.info('Inventory cache miss. Начинаем полную сборку. location=%s ttl_seconds=%s', normalized, self.inventory_cache_ttl)
             inventory = await self._build_inventory(normalized)
             self._inventory_cache[normalized] = CacheEntry(
                 value=inventory,
                 expires_at=monotonic() + self.inventory_cache_ttl,
+            )
+            duration_ms = round((monotonic() - started) * 1000, 1)
+            logger.info(
+                'Inventory сохранён в кеш. location=%s categories=%s duration_ms=%s ttl_seconds=%s',
+                normalized,
+                len(inventory.get('categories', [])),
+                duration_ms,
+                self.inventory_cache_ttl,
             )
             return inventory
 

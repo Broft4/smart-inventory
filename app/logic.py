@@ -5,6 +5,7 @@ import hashlib
 import httpx
 import hmac
 import os
+import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from time import monotonic
@@ -18,6 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.moysklad import DEFAULT_CATEGORY_NAME, DEFAULT_SUBCATEGORY_NAME, ms_client
 from app.models import AdminLocationAccess, CategoryAssignment, CheckResult, LocationPoint, Report, ReportEmployeeCompletion, ReportTargetSnapshot, SelectionCycle, SelectionTarget, User, VerifyAttemptProgress
+logger = logging.getLogger(__name__)
+
+
 from app.schemas import (
     AdminCycleTargetCategory,
     AdminCycleTargetItem,
@@ -796,18 +800,46 @@ async def delete_user(user_id: int, db: AsyncSession, current_user: User) -> Del
 
 async def _get_inventory_for(location: str) -> dict[str, Any]:
     normalized = _normalize_location(location)
+    started = monotonic()
     if ms_client.enabled:
+        logger.info('Загрузка inventory началась. location=%s source=moysklad', normalized)
         try:
             inventory = await ms_client.get_inventory(normalized)
-            return _get_cached_stripped_inventory(normalized, inventory)
+            stripped = _get_cached_stripped_inventory(normalized, inventory)
+            duration_ms = round((monotonic() - started) * 1000, 1)
+            logger.info(
+                'Загрузка inventory завершена. location=%s source=moysklad categories=%s duration_ms=%s',
+                normalized,
+                len(stripped.get('categories', [])),
+                duration_ms,
+            )
+            return stripped
         except ValueError as exc:
+            duration_ms = round((monotonic() - started) * 1000, 1)
+            logger.warning('Inventory не найден. location=%s duration_ms=%s detail=%s', normalized, duration_ms, exc)
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except httpx.HTTPError as exc:
+            duration_ms = round((monotonic() - started) * 1000, 1)
+            logger.exception('Ошибка загрузки inventory из МойСклад. location=%s duration_ms=%s', normalized, duration_ms)
             raise HTTPException(status_code=502, detail='Не удалось получить данные из МойСклад. Попробуйте ещё раз.') from exc
+        except Exception:
+            duration_ms = round((monotonic() - started) * 1000, 1)
+            logger.exception('Непредвиденная ошибка загрузки inventory. location=%s duration_ms=%s', normalized, duration_ms)
+            raise
 
     if normalized not in MOCK_INVENTORY:
+        logger.warning('Inventory не найден в mock-данных. location=%s', normalized)
         raise HTTPException(status_code=404, detail='Неизвестная точка.')
-    return _get_cached_stripped_inventory(normalized, MOCK_INVENTORY[normalized])
+
+    stripped = _get_cached_stripped_inventory(normalized, MOCK_INVENTORY[normalized])
+    duration_ms = round((monotonic() - started) * 1000, 1)
+    logger.info(
+        'Загрузка inventory завершена. location=%s source=mock categories=%s duration_ms=%s',
+        normalized,
+        len(stripped.get('categories', [])),
+        duration_ms,
+    )
+    return stripped
 
 
 async def _find_category(location: str, category_id: str) -> dict[str, Any]:
@@ -1296,6 +1328,31 @@ def _selection_target_maps(targets: list[SelectionTarget]) -> tuple[set[str], di
         elif row.target_type == 'subcategory' and row.subcategory_id:
             subcategory_ids[row.category_id].add(row.subcategory_id)
     return category_ids, subcategory_ids
+
+
+def _report_history_target_maps(
+    report_snapshots: list[ReportTargetSnapshot],
+    results: list[CheckResult],
+) -> tuple[set[str], dict[str, set[str]], dict[str, dict[str, set[str]]]]:
+    category_ids: set[str] = set()
+    subcategory_ids: dict[str, set[str]] = defaultdict(set)
+    item_ids: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+
+    def absorb(target_type: str, category_id: str, subcategory_id: str | None, target_id: str) -> None:
+        if target_type == 'category':
+            category_ids.add(category_id)
+        elif target_type == 'subcategory' and subcategory_id:
+            subcategory_ids[category_id].add(subcategory_id)
+        elif target_type == 'item' and subcategory_id:
+            item_ids[category_id][subcategory_id].add(target_id)
+
+    for row in report_snapshots:
+        absorb(row.target_type, row.category_id, row.subcategory_id, row.target_id)
+
+    for row in results:
+        absorb(row.target_type, row.category_id, row.subcategory_id, row.target_id)
+
+    return category_ids, subcategory_ids, item_ids
 
 
 def _is_categoryless_subcategory(category: dict[str, Any], subcategory: dict[str, Any]) -> bool:
@@ -2581,6 +2638,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
     targets = await _load_selection_targets(normalized, report.cycle_version, db)
     inventory = await _get_inventory_for(normalized)
     discrepancy_financials = await _load_discrepancy_financials(normalized, results)
+    historical_category_ids, historical_subcategory_ids, historical_item_ids = _report_history_target_maps(report_snapshots, results)
 
     rows_by_category_target: dict[str, dict[str, CheckResult]] = defaultdict(dict)
     for row in results:
@@ -2643,7 +2701,14 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         for target in targets
         if target.target_type == 'subcategory' and target.subcategory_name
     })
-    inventory = _filter_inventory_by_targets(inventory, selected_category_ids, selected_subcategory_ids)
+    inventory = _filter_inventory_by_targets(
+        inventory,
+        selected_category_ids,
+        selected_subcategory_ids,
+        retained_category_ids=historical_category_ids,
+        retained_subcategory_ids=historical_subcategory_ids,
+        retained_item_ids=historical_item_ids,
+    )
     for raw_category in inventory['categories']:
         result_map = rows_by_category_target.get(raw_category['id'], {})
         is_completed, status = (True, StatusEnum.GREEN) if _category_is_complete(raw_category, result_map) else (False, StatusEnum.GREY)
@@ -2669,7 +2734,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         completed_subcategories: list[CompletedSubcategoryInfo] = []
         for raw_sub in raw_category['subcategories']:
             sub_completed, sub_status = _subcategory_is_complete(raw_sub, result_map)
-            if not sub_completed:
+            if not sub_completed or sub_status != StatusEnum.GREEN:
                 continue
             sub_row = result_map.get(raw_sub['id'])
             checked_by = sub_row.checked_by_name_snapshot if sub_row else None
