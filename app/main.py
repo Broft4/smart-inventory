@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 
@@ -8,6 +9,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -31,10 +33,12 @@ from app.logic import (
     get_admin_report,
     get_cycle_targets,
     get_inventory_data,
+    get_user_accessible_locations,
     get_inventory_diagnostics_rows,
     get_me_response,
     get_reports_history,
     list_locations,
+    prewarm_inventory_cache,
     list_moysklad_stores_by_token,
     list_users,
     save_cycle_targets,
@@ -44,6 +48,7 @@ from app.logic import (
     verify_item_or_category,
 )
 from app.models import User
+from app.moysklad import ms_client
 from app.schemas import (
     AdminCycleTargetsResponse,
     AdminReport,
@@ -83,11 +88,15 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(bootstrap_schema_and_admin)
     async with AsyncSession(bind=engine, expire_on_commit=False) as session:
         await ensure_default_admin(session)
-    yield
+    try:
+        yield
+    finally:
+        await ms_client.aclose()
 
 
 app = FastAPI(title='Умная ревизия', lifespan=lifespan)
 app.add_middleware(SessionMiddleware, secret_key=settings.session_secret_key)
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=['*'],
@@ -98,7 +107,20 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260318-report-finalization'
+templates.env.globals['asset_version'] = '20260320-verify-fix-and-cache'
+
+
+def _spawn_prewarm(location: str | None) -> None:
+    if not location:
+        return
+
+    async def runner() -> None:
+        try:
+            await prewarm_inventory_cache(location)
+        except Exception:
+            pass
+
+    asyncio.create_task(runner())
 
 
 async def get_current_user(request: Request, db: AsyncSession = Depends(get_db)) -> User | None:
@@ -143,6 +165,7 @@ async def inventory_page(request: Request, user: User | None = Depends(get_curre
         return RedirectResponse(url='/login', status_code=302)
     if user.role in {'admin', 'superadmin'}:
         return RedirectResponse(url='/admin', status_code=302)
+    _spawn_prewarm(user.location)
     return templates.TemplateResponse(
         'index.html',
         {'request': request, 'user': user, 'no_location_assigned': not bool(user.location)},
@@ -150,11 +173,14 @@ async def inventory_page(request: Request, user: User | None = Depends(get_curre
 
 
 @app.get('/admin')
-async def admin_page(request: Request, user: User | None = Depends(get_current_user)):
+async def admin_page(request: Request, user: User | None = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     if not user:
         return RedirectResponse(url='/login', status_code=302)
     if user.role not in {'admin', 'superadmin'}:
         return RedirectResponse(url='/', status_code=302)
+    accessible_locations = await get_user_accessible_locations(user, db)
+    if accessible_locations:
+        _spawn_prewarm(accessible_locations[0])
     return templates.TemplateResponse('admin.html', {'request': request, 'user': user})
 
 
@@ -164,6 +190,7 @@ async def api_login(payload: LoginRequest, request: Request, db: AsyncSession = 
     if not user:
         raise HTTPException(status_code=401, detail='Неверный логин или пароль.')
     request.session['user_id'] = user.id
+    _spawn_prewarm(user.location)
     return LoginResponse(
         success=True,
         message='Вход выполнен.',
@@ -185,7 +212,10 @@ async def api_me(user: User | None = Depends(get_current_user)):
 
 @app.get('/api/locations', response_model=LocationListResponse)
 async def api_list_locations(admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
-    return await list_locations(db, admin)
+    response = await list_locations(db, admin)
+    if response.locations:
+        _spawn_prewarm(response.locations[0].name)
+    return response
 
 
 @app.post('/api/locations/stores', response_model=StoreListResponse)

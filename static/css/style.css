@@ -270,7 +270,7 @@ body.modal-open {
 .employee-card-head h3 { margin: 0; font-size: 18px; }
 .employee-meta-grid {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 10px;
     margin-bottom: 12px;
 }
@@ -554,7 +554,7 @@ body.modal-open {
     .admin-toolbar-grid { grid-template-columns: 1fr; }
     .summary-topline,
     .summary-kpi-grid { grid-template-columns: 1fr; }
-    .employee-meta-grid { grid-template-columns: 1fr 1fr 1fr; }
+    .employee-meta-grid { grid-template-columns: 1fr; }
     .admin-category-header { flex-direction: column; }
     .admin-category-header-right { width: 100%; justify-content: space-between; }
 }

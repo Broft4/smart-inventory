@@ -2,6 +2,7 @@ let inventoryState = null;
 let subcategoryAttempts = {};
 let itemAttempts = {};
 let inventoryLoading = false;
+const pendingVerificationTargets = new Set();
 
 function getInventoryStatusElement() {
     return document.getElementById('inventory-status');
@@ -768,18 +769,50 @@ window.takeItem = async function (categoryId, subcategoryId, itemId) {
 };
 
 
+
+function setVerificationBusyState(targetId, isBusy) {
+    const inputElement = document.getElementById(`input-${targetId}`);
+    const actionButton = inputElement?.closest('.input-group')?.querySelector('button');
+    if (inputElement) {
+        inputElement.disabled = Boolean(isBusy);
+    }
+    if (actionButton) {
+        actionButton.disabled = Boolean(isBusy);
+        actionButton.dataset.originalText = actionButton.dataset.originalText || actionButton.textContent;
+        actionButton.textContent = isBusy ? '...' : actionButton.dataset.originalText;
+    }
+}
+
+function normalizeServerError(result, fallbackMessage) {
+    return result?.detail || result?.message || fallbackMessage;
+}
+
+async function parseJsonSafe(response) {
+    try {
+        return await response.json();
+    } catch {
+        return null;
+    }
+}
+
 window.verifySubcategory = async function (subId) {
     if (!employeeRevisionIsActive()) {
         alert('Сначала нажмите «Начать ревизию».');
         return;
     }
+    if (inventoryLoading || pendingVerificationTargets.has(subId)) return;
+
     const found = findSubcategory(subId);
     if (!found) return;
     const inputElement = document.getElementById(`input-${subId}`);
     const msgElement = document.getElementById(`msg-${subId}`);
+    if (!inputElement || !msgElement) return;
+
     const inputValue = parseFloat(inputElement.value);
     if (Number.isNaN(inputValue)) return;
     subcategoryAttempts[subId] = (subcategoryAttempts[subId] || 0) + 1;
+    pendingVerificationTargets.add(subId);
+    setVerificationBusyState(subId, true);
 
     try {
         const response = await fetch('/verify', {
@@ -787,7 +820,16 @@ window.verifySubcategory = async function (subId) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ report_id: inventoryState.report_id, target_id: subId, is_category: true, quantity: inputValue, attempt_number: subcategoryAttempts[subId] }),
         });
-        const result = await response.json();
+        const result = await parseJsonSafe(response);
+        if (!response.ok) {
+            msgElement.textContent = normalizeServerError(result, 'Не удалось сохранить результат проверки.');
+            msgElement.style.color = 'red';
+            if ([403, 409].includes(response.status)) {
+                await loadInventory({ forceReload: true });
+            }
+            return;
+        }
+
         msgElement.textContent = result.message;
         msgElement.style.color = result.is_correct ? 'green' : 'red';
         if (result.expand_category || result.is_correct) {
@@ -798,6 +840,12 @@ window.verifySubcategory = async function (subId) {
     } catch (error) {
         console.error(error);
         msgElement.textContent = 'Ошибка сервера';
+        msgElement.style.color = 'red';
+    } finally {
+        pendingVerificationTargets.delete(subId);
+        if (!inventoryLoading) {
+            setVerificationBusyState(subId, false);
+        }
     }
 };
 
@@ -806,18 +854,33 @@ window.verifyItem = async function (itemId) {
         alert('Сначала нажмите «Начать ревизию».');
         return;
     }
+    if (inventoryLoading || pendingVerificationTargets.has(itemId)) return;
+
     const inputElement = document.getElementById(`input-${itemId}`);
     const msgElement = document.getElementById(`msg-${itemId}`);
+    if (!inputElement || !msgElement) return;
+
     const inputValue = parseFloat(inputElement.value);
     if (Number.isNaN(inputValue)) return;
     itemAttempts[itemId] = (itemAttempts[itemId] || 0) + 1;
+    pendingVerificationTargets.add(itemId);
+    setVerificationBusyState(itemId, true);
     try {
         const response = await fetch('/verify', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ report_id: inventoryState.report_id, target_id: itemId, is_category: false, quantity: inputValue, attempt_number: itemAttempts[itemId] }),
         });
-        const result = await response.json();
+        const result = await parseJsonSafe(response);
+        if (!response.ok) {
+            msgElement.textContent = normalizeServerError(result, 'Не удалось сохранить результат проверки.');
+            msgElement.style.color = 'red';
+            if ([403, 409].includes(response.status)) {
+                await loadInventory({ forceReload: true });
+            }
+            return;
+        }
+
         msgElement.textContent = result.message;
         msgElement.style.color = result.is_correct ? 'green' : 'red';
         if (result.is_correct || result.attempts_left === 0) {
@@ -829,6 +892,12 @@ window.verifyItem = async function (itemId) {
     } catch (error) {
         console.error(error);
         msgElement.textContent = 'Ошибка сервера';
+        msgElement.style.color = 'red';
+    } finally {
+        pendingVerificationTargets.delete(itemId);
+        if (!inventoryLoading) {
+            setVerificationBusyState(itemId, false);
+        }
     }
 };
 
@@ -921,6 +990,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('employee-search-input')?.addEventListener('input', (event) => {
         employeePageState.searchQuery = event.target.value.trim();
         renderCategories();
+    });
+    document.getElementById('categories-container')?.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return;
+        const input = event.target;
+        if (!(input instanceof HTMLInputElement) || !input.id.startsWith('input-')) return;
+        event.preventDefault();
+        const targetId = input.id.slice('input-'.length);
+        const found = findSubcategory(targetId);
+        if (found) {
+            verifySubcategory(targetId);
+            return;
+        }
+        verifyItem(targetId);
     });
     await loadInventory();
 });

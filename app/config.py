@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     ms_inventory_cache_ttl_seconds: int = 120
     ms_request_timeout_seconds: int = 30
     ms_retry_attempts: int = 4
+    ms_max_concurrent_requests: int = 4
+    ms_financial_cache_ttl_seconds: int = 900
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

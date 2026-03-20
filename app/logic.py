@@ -6,6 +6,8 @@ import httpx
 import hmac
 import os
 from collections import defaultdict
+from dataclasses import dataclass
+from time import monotonic
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -56,6 +58,94 @@ from app.schemas import (
     VerifyRequest,
     VerifyResponse,
 )
+
+
+
+@dataclass(slots=True)
+class RuntimeCacheEntry:
+    value: Any
+    expires_at: float
+    inventory_identity: int | None = None
+
+
+STRIPPED_INVENTORY_CACHE_TTL = max(15, int(settings.ms_inventory_cache_ttl_seconds or 120))
+TARGET_LOOKUP_CACHE_TTL = max(60, STRIPPED_INVENTORY_CACHE_TTL)
+
+_stripped_inventory_cache: dict[str, RuntimeCacheEntry] = {}
+_target_lookup_cache: dict[str, RuntimeCacheEntry] = {}
+
+
+def _get_cached_stripped_inventory(location: str, raw_inventory: dict[str, Any]) -> dict[str, Any]:
+    cache_key = _normalize_location(location)
+    inventory_identity = id(raw_inventory)
+    cached = _stripped_inventory_cache.get(cache_key)
+    now = monotonic()
+    if cached and cached.inventory_identity == inventory_identity and cached.expires_at > now:
+        return cached.value
+
+    stripped = _strip_ignored_inventory_branches(raw_inventory)
+    _stripped_inventory_cache[cache_key] = RuntimeCacheEntry(
+        value=stripped,
+        expires_at=now + STRIPPED_INVENTORY_CACHE_TTL,
+        inventory_identity=inventory_identity,
+    )
+    return stripped
+
+
+def _build_target_lookup(inventory: dict[str, Any]) -> dict[str, tuple[str, str, str | None, str | None, str, str, float]]:
+    lookup: dict[str, tuple[str, str, str | None, str | None, str, str, float]] = {}
+    for category in inventory.get('categories', []):
+        for subcategory in category.get('subcategories', []):
+            expected_total = float(sum(float(item.get('expected_qty') or 0) for item in subcategory.get('items', [])))
+            lookup[subcategory['id']] = (
+                category['id'],
+                category['name'],
+                subcategory['id'],
+                subcategory['name'],
+                'subcategory',
+                subcategory['name'],
+                expected_total,
+            )
+            for item in subcategory.get('items', []):
+                lookup[item['id']] = (
+                    category['id'],
+                    category['name'],
+                    subcategory['id'],
+                    subcategory['name'],
+                    'item',
+                    item['name'],
+                    float(item.get('expected_qty') or 0),
+                )
+    return lookup
+
+
+def _get_target_lookup(location: str, inventory: dict[str, Any]) -> dict[str, tuple[str, str, str | None, str | None, str, str, float]]:
+    cache_key = _normalize_location(location)
+    inventory_identity = id(inventory)
+    cached = _target_lookup_cache.get(cache_key)
+    now = monotonic()
+    if cached and cached.inventory_identity == inventory_identity and cached.expires_at > now:
+        return cached.value
+
+    lookup = _build_target_lookup(inventory)
+    _target_lookup_cache[cache_key] = RuntimeCacheEntry(
+        value=lookup,
+        expires_at=now + TARGET_LOOKUP_CACHE_TTL,
+        inventory_identity=inventory_identity,
+    )
+    return lookup
+
+
+def _invalidate_runtime_inventory_cache(location: str | None = None) -> None:
+    if location is None:
+        _stripped_inventory_cache.clear()
+        _target_lookup_cache.clear()
+        return
+
+    normalized = _normalize_location(location)
+    _stripped_inventory_cache.pop(normalized, None)
+    _target_lookup_cache.pop(normalized, None)
+
 
 MOCK_INVENTORY: dict[str, dict[str, Any]] = {
     'Дубна': {
@@ -709,7 +799,7 @@ async def _get_inventory_for(location: str) -> dict[str, Any]:
     if ms_client.enabled:
         try:
             inventory = await ms_client.get_inventory(normalized)
-            return _strip_ignored_inventory_branches(inventory)
+            return _get_cached_stripped_inventory(normalized, inventory)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except httpx.HTTPError as exc:
@@ -717,7 +807,7 @@ async def _get_inventory_for(location: str) -> dict[str, Any]:
 
     if normalized not in MOCK_INVENTORY:
         raise HTTPException(status_code=404, detail='Неизвестная точка.')
-    return _strip_ignored_inventory_branches(MOCK_INVENTORY[normalized])
+    return _get_cached_stripped_inventory(normalized, MOCK_INVENTORY[normalized])
 
 
 async def _find_category(location: str, category_id: str) -> dict[str, Any]:
@@ -738,14 +828,9 @@ async def _find_subcategory(location: str, category_id: str, subcategory_id: str
 
 async def _find_target(location: str, target_id: str) -> tuple[str, str, str | None, str | None, str, str, float]:
     inventory = await _get_inventory_for(location)
-    for category in inventory['categories']:
-        for subcategory in category['subcategories']:
-            if subcategory['id'] == target_id:
-                expected_total = float(sum(item['expected_qty'] for item in subcategory['items']))
-                return category['id'], category['name'], subcategory['id'], subcategory['name'], 'subcategory', subcategory['name'], expected_total
-            for item in subcategory['items']:
-                if item['id'] == target_id:
-                    return category['id'], category['name'], subcategory['id'], subcategory['name'], 'item', item['name'], float(item['expected_qty'])
+    target = _get_target_lookup(location, inventory).get(target_id)
+    if target is not None:
+        return target
     raise HTTPException(status_code=404, detail='Цель проверки не найдена.')
 
 
@@ -1339,6 +1424,7 @@ async def create_location_point(payload: CreateLocationRequest, db: AsyncSession
     await db.commit()
     await db.refresh(point)
     ms_client.invalidate_inventory(point.name)
+    _invalidate_runtime_inventory_cache(point.name)
     return CreateLocationResponse(success=True, message='Точка создана.', location=LocationPointModel.model_validate(point))
 
 
@@ -1369,6 +1455,8 @@ async def update_location_point(location_id: int, payload: UpdateLocationRequest
     await db.refresh(point)
     ms_client.invalidate_inventory(old_name)
     ms_client.invalidate_inventory(point.name)
+    _invalidate_runtime_inventory_cache(old_name)
+    _invalidate_runtime_inventory_cache(point.name)
     return UpdateLocationResponse(success=True, message='Точка обновлена.', location=LocationPointModel.model_validate(point))
 
 
@@ -1404,6 +1492,7 @@ async def delete_location_point(location_id: int, db: AsyncSession) -> DeleteRes
     await db.delete(point)
     await db.commit()
     ms_client.invalidate_inventory(old_name)
+    _invalidate_runtime_inventory_cache(old_name)
     return DeleteResponse(success=True, message='Точка удалена.')
 
 
@@ -1521,6 +1610,7 @@ async def save_cycle_targets(payload: SaveCycleTargetsRequest, db: AsyncSession)
         ))
 
     await db.commit()
+    _invalidate_runtime_inventory_cache(normalized)
     message = 'Изменения сохранены.'
     if skipped_completed_subcategories:
         message = f'{message} Уже пройденных подкатегорий, пропущенных при сохранении: {skipped_completed_subcategories}.'
@@ -1925,6 +2015,7 @@ async def assign_selection_to_user(report_id: int, category_id: str, target_type
             db=db,
         )
         await db.commit()
+        _invalidate_runtime_inventory_cache(report.location)
         return AssignSelectionResponse(success=True, message='Категория закреплена за вами на сегодня.')
 
     if target_type == 'subcategory':
@@ -1980,6 +2071,7 @@ async def assign_selection_to_user(report_id: int, category_id: str, target_type
             db=db,
         )
         await db.commit()
+        _invalidate_runtime_inventory_cache(report.location)
         return AssignSelectionResponse(success=True, message='Подкатегория закреплена за вами на сегодня.')
 
     if target_type == 'item':
@@ -2039,6 +2131,7 @@ async def assign_selection_to_user(report_id: int, category_id: str, target_type
             db=db,
         )
         await db.commit()
+        _invalidate_runtime_inventory_cache(report.location)
         return AssignSelectionResponse(success=True, message='Товар закреплён за вами на сегодня.')
 
     raise HTTPException(status_code=400, detail='Некорректный тип выбора.')
@@ -2232,6 +2325,7 @@ async def verify_item_or_category(data: VerifyRequest, db: AsyncSession, checked
             db=db,
         )
         await db.commit()
+        _invalidate_runtime_inventory_cache(report.location)
         await _refresh_report_status(report, db)
         return VerifyResponse(is_correct=True, attempts_left=0, message='Верно!', expand_category=False)
 
@@ -2280,6 +2374,7 @@ async def verify_item_or_category(data: VerifyRequest, db: AsyncSession, checked
         db=db,
     )
     await db.commit()
+    _invalidate_runtime_inventory_cache(report.location)
     await _refresh_report_status(report, db)
     return VerifyResponse(
         is_correct=False,
@@ -2318,6 +2413,7 @@ async def finish_report(report_id: int, db: AsyncSession, user: User) -> tuple[b
     await db.flush()
     await _sync_report_status(report, db)
     await db.commit()
+    _invalidate_runtime_inventory_cache(report.location)
 
     if report.status == 'completed':
         return True, 'Ревизия завершена.'
@@ -2427,12 +2523,15 @@ async def _load_discrepancy_financials(location: str, results: list[CheckResult]
     if not unique_item_ids:
         return {}
 
+    semaphore = asyncio.Semaphore(getattr(ms_client, 'max_concurrent_requests', 4))
+
     async def fetch(item_id: str) -> tuple[str, dict[str, float | None]]:
-        try:
-            values = await ms_client.get_item_financials(location, item_id)
-        except Exception:
-            return item_id, {'cost_price': None, 'retail_price': None}
-        return item_id, values
+        async with semaphore:
+            try:
+                values = await ms_client.get_item_financials(location, item_id)
+            except Exception:
+                return item_id, {'cost_price': None, 'retail_price': None}
+            return item_id, values
 
     loaded = await asyncio.gather(*(fetch(item_id) for item_id in unique_item_ids))
     return {item_id: values for item_id, values in loaded}
@@ -2479,8 +2578,6 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
             )
             if row.category_name not in bucket.categories:
                 bucket.categories.append(row.category_name)
-            if row.target_type == 'item' and row.status == 'red':
-                bucket.discrepancy_items += 1
 
         if row.target_type == 'item' and row.status == 'red':
             financials = discrepancy_financials.get(row.target_id, {})
@@ -2492,6 +2589,16 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
             lost_profit = None
             if cost_total is not None and retail_total is not None:
                 lost_profit = round(retail_total - cost_total, 2)
+
+            if row.checked_by_name_snapshot:
+                bucket = employee_bucket.setdefault(
+                    row.checked_by_name_snapshot,
+                    EmployeeReportSummary(full_name=row.checked_by_name_snapshot, categories=[], completed_categories=0, discrepancy_items=0),
+                )
+                bucket.discrepancy_items += 1
+                bucket.total_cost = float(round(float(bucket.total_cost or 0.0) + float(cost_total or 0.0), 2))
+                bucket.total_retail = float(round(float(bucket.total_retail or 0.0) + float(retail_total or 0.0), 2))
+                bucket.total_lost_profit = float(round(float(bucket.total_lost_profit or 0.0) + float(lost_profit or 0.0), 2))
 
             grouped_problem_items[row.category_name].append(
                 DiscrepancyItem(
@@ -2579,7 +2686,11 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
                 employee_bucket[owner].categories.append(category.name)
 
     for summary in employee_bucket.values():
+        summary.categories = sorted(summary.categories, key=str.lower)
         summary.completed_categories = sum(1 for category in categories if category.assigned_to == summary.full_name and category.status in {StatusEnum.GREEN, StatusEnum.RED})
+        summary.total_cost = float(round(float(summary.total_cost or 0.0), 2))
+        summary.total_retail = float(round(float(summary.total_retail or 0.0), 2))
+        summary.total_lost_profit = float(round(float(summary.total_lost_profit or 0.0), 2))
 
     total_plus = sum(max(float(item.diff), 0.0) for items in grouped_problem_items.values() for item in items)
     total_minus = abs(sum(min(float(item.diff), 0.0) for items in grouped_problem_items.values() for item in items))
@@ -2613,6 +2724,8 @@ async def delete_report(report_id: int, db: AsyncSession, current_user: User | N
         raise HTTPException(status_code=404, detail='Ревизия не найдена.')
     if current_user is not None:
         await ensure_user_can_access_location(current_user, report.location, db)
+    location = report.location
     await db.delete(report)
     await db.commit()
+    _invalidate_runtime_inventory_cache(location)
     return DeleteResponse(success=True, message='Ревизия удалена.')

@@ -248,6 +248,9 @@ class EmployeeReportSummary(BaseModel):
     categories: list[str] = Field(default_factory=list)
     completed_categories: int = 0
     discrepancy_items: int = 0
+    total_cost: float = 0.0
+    total_retail: float = 0.0
+    total_lost_profit: float = 0.0
 
 
 class AdminReport(BaseModel):

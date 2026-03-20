@@ -35,7 +35,7 @@ class MoySkladClient:
         self.retry_attempts = max(1, configured_retries)
 
         configured_inventory_ttl = int(settings.ms_inventory_cache_ttl_seconds or 300)
-        self.inventory_cache_ttl = max(30, configured_inventory_ttl)
+        self.inventory_cache_ttl = max(15, configured_inventory_ttl)
 
         self.folder_cache_ttl = max(1800, self.inventory_cache_ttl)
         self.assortment_item_cache_ttl = max(900, self.inventory_cache_ttl)
@@ -56,9 +56,16 @@ class MoySkladClient:
         self._product_locks: dict[str, asyncio.Lock] = {}
 
         self._financials_by_location_cache: dict[str, CacheEntry] = {}
+        self._financial_result_cache: dict[str, CacheEntry] = {}
+        self._financial_result_locks: dict[str, asyncio.Lock] = {}
 
         self._assortment_search_cache: dict[str, CacheEntry] = {}
         self._assortment_search_locks: dict[str, asyncio.Lock] = {}
+
+        self.max_concurrent_requests = max(1, min(4, int(settings.ms_max_concurrent_requests or 4)))
+        self.financial_cache_ttl = max(120, int(settings.ms_financial_cache_ttl_seconds or 900))
+        self._client: httpx.AsyncClient | None = None
+        self._client_lock = asyncio.Lock()
 
     @property
     def enabled(self) -> bool:
@@ -82,6 +89,29 @@ class MoySkladClient:
             write=self.request_timeout,
             pool=connect_timeout,
         )
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        client = self._client
+        if client is not None and not client.is_closed:
+            return client
+
+        async with self._client_lock:
+            client = self._client
+            if client is not None and not client.is_closed:
+                return client
+
+            limits = httpx.Limits(
+                max_connections=self.max_concurrent_requests,
+                max_keepalive_connections=self.max_concurrent_requests,
+            )
+            self._client = httpx.AsyncClient(timeout=self._build_timeout(), limits=limits)
+            return self._client
+
+    async def aclose(self) -> None:
+        client = self._client
+        if client is not None and not client.is_closed:
+            await client.aclose()
+        self._client = None
 
     def _cache_alive(self, entry: CacheEntry | None) -> bool:
         return bool(entry and entry.expires_at > monotonic())
@@ -114,89 +144,87 @@ class MoySkladClient:
         absolute: bool = False,
     ) -> dict[str, Any]:
         url = url_or_endpoint if absolute else f"{self.base_url}/{url_or_endpoint.lstrip('/')}"
-        limits = httpx.Limits(max_connections=4, max_keepalive_connections=2)
-        timeout = self._build_timeout()
+        client = await self._get_client()
 
         last_error: Exception | None = None
 
-        async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
-            for attempt in range(1, self.retry_attempts + 1):
-                try:
-                    response = await client.get(url, headers=self.headers, params=params)
+        for attempt in range(1, self.retry_attempts + 1):
+            try:
+                response = await client.get(url, headers=self.headers, params=params)
 
-                    if response.status_code == 429:
-                        delay = self._get_retry_delay(response, attempt)
-                        logger.warning(
-                            'МойСклад вернул 429 для %s. Попытка %s/%s. Повтор через %.2f сек.',
-                            url,
-                            attempt,
-                            self.retry_attempts,
-                            delay,
-                        )
-                        if attempt < self.retry_attempts:
-                            await asyncio.sleep(delay)
-                            continue
-                        response.raise_for_status()
-
+                if response.status_code == 429:
+                    delay = self._get_retry_delay(response, attempt)
+                    logger.warning(
+                        'МойСклад вернул 429 для %s. Попытка %s/%s. Повтор через %.2f сек.',
+                        url,
+                        attempt,
+                        self.retry_attempts,
+                        delay,
+                    )
+                    if attempt < self.retry_attempts:
+                        await asyncio.sleep(delay)
+                        continue
                     response.raise_for_status()
-                    return response.json()
 
-                except httpx.ReadTimeout as exc:
-                    last_error = exc
-                    delay = self._get_exception_retry_delay(attempt)
-                    logger.warning(
-                        'Таймаут чтения при запросе к МойСклад: %s. Попытка %s/%s. Повтор через %.2f сек.',
-                        url,
-                        attempt,
-                        self.retry_attempts,
-                        delay,
-                    )
-                    if attempt < self.retry_attempts:
-                        await asyncio.sleep(delay)
-                        continue
-                    raise
+                response.raise_for_status()
+                return response.json()
 
-                except httpx.ConnectTimeout as exc:
-                    last_error = exc
-                    delay = self._get_exception_retry_delay(attempt)
-                    logger.warning(
-                        'Таймаут подключения к МойСклад: %s. Попытка %s/%s. Повтор через %.2f сек.',
-                        url,
-                        attempt,
-                        self.retry_attempts,
-                        delay,
-                    )
-                    if attempt < self.retry_attempts:
-                        await asyncio.sleep(delay)
-                        continue
-                    raise
+            except httpx.ReadTimeout as exc:
+                last_error = exc
+                delay = self._get_exception_retry_delay(attempt)
+                logger.warning(
+                    'Таймаут чтения при запросе к МойСклад: %s. Попытка %s/%s. Повтор через %.2f сек.',
+                    url,
+                    attempt,
+                    self.retry_attempts,
+                    delay,
+                )
+                if attempt < self.retry_attempts:
+                    await asyncio.sleep(delay)
+                    continue
+                raise
 
-                except httpx.HTTPStatusError as exc:
-                    last_error = exc
-                    status_code = exc.response.status_code if exc.response is not None else 'unknown'
-                    logger.exception(
-                        'HTTP-ошибка МойСклад %s для %s на попытке %s/%s.',
-                        status_code,
-                        url,
-                        attempt,
-                        self.retry_attempts,
-                    )
-                    raise
+            except httpx.ConnectTimeout as exc:
+                last_error = exc
+                delay = self._get_exception_retry_delay(attempt)
+                logger.warning(
+                    'Таймаут подключения к МойСклад: %s. Попытка %s/%s. Повтор через %.2f сек.',
+                    url,
+                    attempt,
+                    self.retry_attempts,
+                    delay,
+                )
+                if attempt < self.retry_attempts:
+                    await asyncio.sleep(delay)
+                    continue
+                raise
 
-                except httpx.RequestError as exc:
-                    last_error = exc
-                    delay = self._get_exception_retry_delay(attempt)
-                    logger.warning(
-                        'Сетевая ошибка при запросе к МойСклад: %s. Попытка %s/%s. Повтор через %.2f сек.',
-                        url,
-                        attempt,
-                        self.retry_attempts,
-                        delay,
-                    )
-                    if attempt < self.retry_attempts:
-                        await asyncio.sleep(delay)
-                        continue
-                    raise
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                status_code = exc.response.status_code if exc.response is not None else 'unknown'
+                logger.exception(
+                    'HTTP-ошибка МойСклад %s для %s на попытке %s/%s.',
+                    status_code,
+                    url,
+                    attempt,
+                    self.retry_attempts,
+                )
+                raise
+
+            except httpx.RequestError as exc:
+                last_error = exc
+                delay = self._get_exception_retry_delay(attempt)
+                logger.warning(
+                    'Сетевая ошибка при запросе к МойСклад: %s. Попытка %s/%s. Повтор через %.2f сек.',
+                    url,
+                    attempt,
+                    self.retry_attempts,
+                    delay,
+                )
+                if attempt < self.retry_attempts:
+                    await asyncio.sleep(delay)
+                    continue
+                raise
 
         if last_error:
             raise last_error
@@ -636,60 +664,77 @@ class MoySkladClient:
         if not item_id:
             return {'cost_price': None, 'retail_price': None}
 
-        seed = self._get_financial_seed(location, item_id)
-        if seed is None:
-            try:
-                await self.get_inventory(location)
-            except Exception:
-                logger.exception('Не удалось прогреть инвентарь для финансов товара %s (%s)', item_id, location)
-            seed = self._get_financial_seed(location, item_id)
+        normalized_location = location.strip().title()
+        cache_key = f"{normalized_location.lower()}::{item_id}"
+        cached = self._financial_result_cache.get(cache_key)
+        if self._cache_alive(cached):
+            return cached.value
 
-        retail_price = seed.get('retail_price') if seed else None
-        code = (seed or {}).get('code')
+        lock = self._financial_result_locks.setdefault(cache_key, asyncio.Lock())
+        async with lock:
+            cached = self._financial_result_cache.get(cache_key)
+            if self._cache_alive(cached):
+                return cached.value
 
-        assortment_meta = None
-        if seed and (seed.get('assortment_href') or seed.get('assortment_id')):
-            assortment_meta = {
-                'href': seed.get('assortment_href'),
-                'id': seed.get('assortment_id'),
+            seed = self._get_financial_seed(normalized_location, item_id)
+            if seed is None:
+                try:
+                    await self.get_inventory(normalized_location)
+                except Exception:
+                    logger.exception('Не удалось прогреть инвентарь для финансов товара %s (%s)', item_id, normalized_location)
+                seed = self._get_financial_seed(normalized_location, item_id)
+
+            retail_price = seed.get('retail_price') if seed else None
+            code = (seed or {}).get('code')
+
+            assortment_meta = None
+            if seed and (seed.get('assortment_href') or seed.get('assortment_id')):
+                assortment_meta = {
+                    'href': seed.get('assortment_href'),
+                    'id': seed.get('assortment_id'),
+                }
+            elif item_id:
+                assortment_meta = {'id': item_id}
+
+            assortment_row, assortment_source = await self._get_assortment_row_by_meta(assortment_meta)
+            product_meta = assortment_row.get('product') if isinstance((assortment_row or {}).get('product'), dict) else None
+            product_row, _ = await self._get_product_row_by_meta((product_meta or {}).get('meta') if isinstance(product_meta, dict) else None)
+
+            cost_price, fallback_retail_price = self._extract_financials_from_sources(assortment_row, product_row, product_meta)
+
+            if cost_price is None and code:
+                search_row, search_source = await self._search_assortment_row_by_code(code)
+                search_product_meta = search_row.get('product') if isinstance((search_row or {}).get('product'), dict) else None
+                search_product_row, _ = await self._get_product_row_by_meta((search_product_meta or {}).get('meta') if isinstance(search_product_meta, dict) else None)
+                searched_cost_price, searched_retail_price = self._extract_financials_from_sources(search_row, search_product_row, search_product_meta)
+                if searched_cost_price is not None:
+                    cost_price = searched_cost_price
+                    logger.info('Себестоимость для %s (%s) получена через поиск по коду %s', item_id, normalized_location, code)
+                if fallback_retail_price is None and searched_retail_price is not None:
+                    fallback_retail_price = searched_retail_price
+                if assortment_row is None and search_row is not None:
+                    assortment_row = search_row
+                    assortment_source = search_source
+
+            if cost_price is None:
+                logger.warning(
+                    'Не удалось определить себестоимость для товара %s (%s). seed=%s assortment_source=%s code=%s',
+                    item_id,
+                    normalized_location,
+                    bool(seed),
+                    assortment_source,
+                    code,
+                )
+
+            result = {
+                'cost_price': cost_price,
+                'retail_price': retail_price if retail_price is not None else fallback_retail_price,
             }
-        elif item_id:
-            assortment_meta = {'id': item_id}
-
-        assortment_row, assortment_source = await self._get_assortment_row_by_meta(assortment_meta)
-        product_meta = assortment_row.get('product') if isinstance((assortment_row or {}).get('product'), dict) else None
-        product_row, _ = await self._get_product_row_by_meta((product_meta or {}).get('meta') if isinstance(product_meta, dict) else None)
-
-        cost_price, fallback_retail_price = self._extract_financials_from_sources(assortment_row, product_row, product_meta)
-
-        if cost_price is None and code:
-            search_row, search_source = await self._search_assortment_row_by_code(code)
-            search_product_meta = search_row.get('product') if isinstance((search_row or {}).get('product'), dict) else None
-            search_product_row, _ = await self._get_product_row_by_meta((search_product_meta or {}).get('meta') if isinstance(search_product_meta, dict) else None)
-            searched_cost_price, searched_retail_price = self._extract_financials_from_sources(search_row, search_product_row, search_product_meta)
-            if searched_cost_price is not None:
-                cost_price = searched_cost_price
-                logger.info('Себестоимость для %s (%s) получена через поиск по коду %s', item_id, location, code)
-            if fallback_retail_price is None and searched_retail_price is not None:
-                fallback_retail_price = searched_retail_price
-            if assortment_row is None and search_row is not None:
-                assortment_row = search_row
-                assortment_source = search_source
-
-        if cost_price is None:
-            logger.warning(
-                'Не удалось определить себестоимость для товара %s (%s). seed=%s assortment_source=%s code=%s',
-                item_id,
-                location,
-                bool(seed),
-                assortment_source,
-                code,
+            self._financial_result_cache[cache_key] = CacheEntry(
+                value=result,
+                expires_at=monotonic() + self.financial_cache_ttl,
             )
-
-        return {
-            'cost_price': cost_price,
-            'retail_price': retail_price if retail_price is not None else fallback_retail_price,
-        }
+            return result
 
     async def _build_inventory(self, location: str) -> dict[str, Any]:
         normalized, store_id = await self._resolve_store(location)
@@ -705,13 +750,15 @@ class MoySkladClient:
 
         categories_map: dict[str, dict[str, Any]] = {}
         financial_index: dict[str, dict[str, Any]] = {}
+        semaphore = asyncio.Semaphore(self.max_concurrent_requests)
 
-        for stock_row in stock_rows:
+        async def prepare_stock_row(stock_row: dict[str, Any]) -> dict[str, Any]:
             item_id, item_name = self._extract_item_identity(normalized, stock_row)
             expected_qty = self._extract_expected_qty(stock_row)
-            financial_index[item_id] = self._build_financial_seed(stock_row, item_id)
 
-            folder_id, diagnostics = await self._extract_folder_id(stock_row, folder_by_id)
+            async with semaphore:
+                folder_id, diagnostics = await self._extract_folder_id(stock_row, folder_by_id)
+
             folder_chain = self._resolve_folder_chain(folder_id, folder_by_id)
             item_diagnostics = self._build_item_diagnostics(stock_row, diagnostics, folder_id, folder_chain)
 
@@ -733,19 +780,37 @@ class MoySkladClient:
                 subcategory_name = DEFAULT_SUBCATEGORY_NAME
                 subcategory_id = f'{category_id}-sub-root'
 
+            return {
+                'item_id': item_id,
+                'item_name': item_name,
+                'expected_qty': expected_qty,
+                'financial_seed': self._build_financial_seed(stock_row, item_id),
+                'category_id': category_id,
+                'category_name': category_name,
+                'subcategory_id': subcategory_id,
+                'subcategory_name': subcategory_name,
+                'item_diagnostics': item_diagnostics,
+            }
+
+        prepared_rows = await asyncio.gather(*(prepare_stock_row(stock_row) for stock_row in stock_rows))
+
+        for prepared in prepared_rows:
+            item_id = prepared['item_id']
+            financial_index[item_id] = prepared['financial_seed']
+
             category_bucket = categories_map.setdefault(
-                category_id,
-                {'id': category_id, 'name': category_name, 'subcategories': {}},
+                prepared['category_id'],
+                {'id': prepared['category_id'], 'name': prepared['category_name'], 'subcategories': {}},
             )
             subcategory_bucket = category_bucket['subcategories'].setdefault(
-                subcategory_id,
-                {'id': subcategory_id, 'name': subcategory_name, 'items': []},
+                prepared['subcategory_id'],
+                {'id': prepared['subcategory_id'], 'name': prepared['subcategory_name'], 'items': []},
             )
             subcategory_bucket['items'].append({
                 'id': item_id,
-                'name': item_name,
-                'expected_qty': expected_qty,
-                'diagnostics': item_diagnostics,
+                'name': prepared['item_name'],
+                'expected_qty': prepared['expected_qty'],
+                'diagnostics': prepared['item_diagnostics'],
             })
 
         categories: list[dict[str, Any]] = []
@@ -796,12 +861,18 @@ class MoySkladClient:
             self._inventory_cache.clear()
             self._inventory_locks.clear()
             self._financials_by_location_cache.clear()
+            self._financial_result_cache.clear()
+            self._financial_result_locks.clear()
             return
 
         normalized = location.strip().title()
+        normalized_prefix = f"{normalized.lower()}::"
         self._inventory_cache.pop(normalized, None)
         self._inventory_locks.pop(normalized, None)
         self._financials_by_location_cache.pop(normalized, None)
+        for key in [key for key in self._financial_result_cache if key.startswith(normalized_prefix)]:
+            self._financial_result_cache.pop(key, None)
+            self._financial_result_locks.pop(key, None)
 
     async def prewarm_inventory(self, location: str) -> None:
         if not self.enabled or not location:

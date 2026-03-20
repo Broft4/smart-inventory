@@ -50,6 +50,51 @@ function renderMoneyBreakdown(unitValue, totalValue, quantity, { highlight = fal
     `;
 }
 
+
+function getEmployeeMoneyTotals(employee) {
+    const discrepancyItems = Array.isArray(employee?.discrepancyItems) ? employee.discrepancyItems : [];
+    const fallback = {
+        total_cost: Number(employee?.total_cost || 0),
+        total_retail: Number(employee?.total_retail || 0),
+        total_lost_profit: Number(employee?.total_lost_profit || 0),
+    };
+
+    if (!discrepancyItems.length) {
+        return fallback;
+    }
+
+    return discrepancyItems.reduce((totals, item) => ({
+        total_cost: totals.total_cost + Number(item.cost_total || 0),
+        total_retail: totals.total_retail + Number(item.retail_total || 0),
+        total_lost_profit: totals.total_lost_profit + Number(item.lost_profit || 0),
+    }), { total_cost: 0, total_retail: 0, total_lost_profit: 0 });
+}
+
+function buildSubcategoryFinancialSummaries(problemItems) {
+    const groups = new Map();
+
+    (problemItems || []).forEach(item => {
+        const name = item.subcategory_name || 'Без подкатегории';
+        if (!groups.has(name)) {
+            groups.set(name, {
+                subcategory_name: name,
+                items_count: 0,
+                total_cost: 0,
+                total_retail: 0,
+                total_lost_profit: 0,
+            });
+        }
+
+        const bucket = groups.get(name);
+        bucket.items_count += 1;
+        bucket.total_cost += Number(item.cost_total || 0);
+        bucket.total_retail += Number(item.retail_total || 0);
+        bucket.total_lost_profit += Number(item.lost_profit || 0);
+    });
+
+    return [...groups.values()].sort((a, b) => a.subcategory_name.localeCompare(b.subcategory_name, 'ru'));
+}
+
 function escapeHtml(value) {
     return String(value ?? '')
         .replaceAll('&', '&amp;')
@@ -1254,6 +1299,9 @@ function buildEmployeeDetailGroups(report) {
             discrepancyItems: [],
             completed: employee.completed_categories || 0,
             discrepancyCount: employee.discrepancy_items || 0,
+            total_cost: Number(employee.total_cost || 0),
+            total_retail: Number(employee.total_retail || 0),
+            total_lost_profit: Number(employee.total_lost_profit || 0),
         });
     });
 
@@ -1266,6 +1314,9 @@ function buildEmployeeDetailGroups(report) {
                 discrepancyItems: [],
                 completed: 0,
                 discrepancyCount: 0,
+                total_cost: 0,
+                total_retail: 0,
+                total_lost_profit: 0,
             });
         }
 
@@ -1285,14 +1336,28 @@ function buildEmployeeDetailGroups(report) {
         });
 
         (category.problem_items || []).forEach(item => {
-            bucket.discrepancyItems.push({
+            const responsibleEmployee = item.checked_by || owner || 'Без закрепления';
+            if (!employeeMap.has(responsibleEmployee)) {
+                employeeMap.set(responsibleEmployee, {
+                    full_name: responsibleEmployee,
+                    categories: [],
+                    discrepancyItems: [],
+                    completed: 0,
+                    discrepancyCount: 0,
+                    total_cost: 0,
+                    total_retail: 0,
+                    total_lost_profit: 0,
+                });
+            }
+
+            employeeMap.get(responsibleEmployee).discrepancyItems.push({
                 category_name: category.name,
                 subcategory_name: item.subcategory_name || '-',
                 name: item.name,
                 expected: item.expected,
                 actual: item.actual,
                 diff: item.diff,
-                checked_by: item.checked_by || owner,
+                checked_by: item.checked_by || responsibleEmployee,
                 cost_price: item.cost_price,
                 retail_price: item.retail_price,
                 cost_total: item.cost_total,
@@ -1387,6 +1452,7 @@ function renderEmployeeDetails(report) {
     }
 
     container.innerHTML = employees.map(employee => {
+        const moneyTotals = getEmployeeMoneyTotals(employee);
         const categoriesHtml = employee.categories.length
             ? `<div class="employee-detail-category-list">${employee.categories.map(category => {
                 const selectedScopeHtml = category.selected_on_cycle
@@ -1464,6 +1530,20 @@ function renderEmployeeDetails(report) {
                     <div class="employee-detail-kpis">
                         <div><span class="summary-label">Категорий</span><strong>${employee.categories.length}</strong></div>
                         <div><span class="summary-label">Расхождений</span><strong>${employee.discrepancyItems.length}</strong></div>
+                    </div>
+                </div>
+                <div class="employee-detail-economics">
+                    <div class="employee-detail-economics-card">
+                        <span class="summary-label">Себестоимость</span>
+                        <strong>${formatMoney(moneyTotals.total_cost)}</strong>
+                    </div>
+                    <div class="employee-detail-economics-card">
+                        <span class="summary-label">Розница</span>
+                        <strong>${formatMoney(moneyTotals.total_retail)}</strong>
+                    </div>
+                    <div class="employee-detail-economics-card accent">
+                        <span class="summary-label">Утерянная прибыль</span>
+                        <strong>${formatMoney(moneyTotals.total_lost_profit)}</strong>
                     </div>
                 </div>
                 <div class="employee-detail-section">
@@ -1550,6 +1630,18 @@ function renderEmployees(report) {
                             <span class="summary-label">Расхождений</span>
                             <strong>${employee.discrepancy_items}</strong>
                         </div>
+                        <div>
+                            <span class="summary-label">Себестоимость</span>
+                            <strong>${formatMoney(employee.total_cost)}</strong>
+                        </div>
+                        <div>
+                            <span class="summary-label">Розница</span>
+                            <strong>${formatMoney(employee.total_retail)}</strong>
+                        </div>
+                        <div>
+                            <span class="summary-label">Утерянная прибыль</span>
+                            <strong>${formatMoney(employee.total_lost_profit)}</strong>
+                        </div>
                     </div>
                     <div class="employee-category-chips">
                         ${employee.categories.length
@@ -1587,6 +1679,7 @@ function renderCategories(report) {
             : (problemItems.length
                 ? `Проблемных товаров: ${problemItems.length}`
                 : (cat.status === 'green' ? 'Без расхождений' : getCategoryStatusLabel(cat.status, cat)));
+        const subcategoryFinancialSummaries = buildSubcategoryFinancialSummaries(problemItems);
         const statusClass = getCategoryStatusClass(cat.status, cat);
         const statusLabel = getCategoryStatusLabel(cat.status, cat);
         const articleStatusClass = isDiagnostic ? 'status-grey' : `status-${cat.status}`;
@@ -1625,6 +1718,18 @@ function renderCategories(report) {
                     ` : ''}
                     ${problemItems.length ? `
                         ${isDiagnostic ? '' : '<div class="discrepancy-banner">⚠️ Зафиксированы расхождения</div>'}
+                        ${subcategoryFinancialSummaries.length ? `
+                            <div class="admin-category-economics">
+                                ${subcategoryFinancialSummaries.map(summary => `
+                                    <div class="admin-category-economics-card">
+                                        <span class="summary-label">${highlightMatch(summary.subcategory_name, adminState.searchQuery)} · товаров: ${summary.items_count}</span>
+                                        <strong>Себестоимость: ${formatMoney(summary.total_cost)}</strong>
+                                        <div class="muted-text">Розница: ${formatMoney(summary.total_retail)}</div>
+                                        <div class="muted-text">Утерянная прибыль: ${formatMoney(summary.total_lost_profit)}</div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        ` : ''}
                         <div class="table-scroll">
                             <table class="admin-table">
                                 <thead>
