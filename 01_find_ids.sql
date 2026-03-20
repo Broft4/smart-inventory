@@ -2,17 +2,17 @@
 SELECT id, name FROM location_points ORDER BY name;
 
 -- Посмотреть активных сотрудников по точке
--- ЗАМЕНИ 'Дмитров' на свою точку
+-- ЗАМЕНИ 'Дубна' на свою точку
 SELECT id, full_name, username, location, is_active
 FROM users
-WHERE role = 'employee' AND location = 'Дмитров'
+WHERE role = 'employee' AND location = 'Дубна'
 ORDER BY full_name;
 
 -- Посмотреть последние отчёты по точке
--- ЗАМЕНИ 'Дмитров' на свою точку
+-- ЗАМЕНИ 'Дубна' на свою точку
 SELECT id, location, report_date, cycle_version, status, date_created
 FROM reports
-WHERE location = 'Дмитров'
+WHERE location = 'Дубна'
 ORDER BY report_date DESC, id DESC
 LIMIT 20;
 
@@ -20,7 +20,7 @@ LIMIT 20;
 -- ЗАМЕНИ location и user_id
 SELECT id, location, cycle_version, target_type, category_name, subcategory_name, target_name, user_id, user_full_name_snapshot, assigned_at
 FROM category_assignments
-WHERE location = 'Дмитров' AND user_id = 1
+WHERE location = 'Дубна' AND user_id = 1
 ORDER BY target_type, category_name, subcategory_name, target_name;
 
 -- Посмотреть сегодняшние snapshots по сотруднику
