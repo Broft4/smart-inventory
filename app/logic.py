@@ -78,6 +78,9 @@ TARGET_LOOKUP_CACHE_TTL = max(60, STRIPPED_INVENTORY_CACHE_TTL)
 _stripped_inventory_cache: dict[str, RuntimeCacheEntry] = {}
 _target_lookup_cache: dict[str, RuntimeCacheEntry] = {}
 
+DAILY_REPORT_TYPE = 'daily'
+FINAL_REPORT_TYPE = 'final'
+
 
 def _get_cached_stripped_inventory(location: str, raw_inventory: dict[str, Any]) -> dict[str, Any]:
     cache_key = _normalize_location(location)
@@ -355,6 +358,8 @@ def bootstrap_schema_and_admin(sync_conn) -> None:
         cols = {c['name'] for c in inspector.get_columns('reports')}
         if not {'id', 'location', 'report_date', 'cycle_version', 'status', 'date_created'}.issubset(cols):
             reset_reports = True
+        elif 'report_type' not in cols:
+            sync_conn.execute(text("ALTER TABLE reports ADD COLUMN report_type VARCHAR(20) NOT NULL DEFAULT 'daily'"))
 
     if 'check_results' in tables:
         cols = {c['name'] for c in inspector.get_columns('check_results')}
@@ -1143,6 +1148,60 @@ def _category_is_complete(raw_category: dict[str, Any], results_by_target: dict[
     return bool(relevant_subcategories) and all(_subcategory_is_complete(sub, results_by_target)[0] for sub in relevant_subcategories)
 
 
+async def _find_available_report_date(location: str, preferred_date: date, db: AsyncSession) -> date:
+    used_dates = set(
+        await db.scalars(
+            select(Report.report_date).where(Report.location == location)
+        )
+    )
+    candidate = preferred_date
+    while candidate in used_dates:
+        candidate -= timedelta(days=1)
+    return candidate
+
+
+async def _ensure_cycle_final_report(location: str, cycle_version: int, cycle_started_at: date, db: AsyncSession) -> Report | None:
+    normalized = _normalize_location(location)
+    existing = await db.scalar(
+        select(Report).where(
+            Report.location == normalized,
+            Report.cycle_version == cycle_version,
+            Report.report_type == FINAL_REPORT_TYPE,
+        ).limit(1)
+    )
+    if existing:
+        if existing.status != 'completed':
+            existing.status = 'completed'
+            await db.commit()
+            await db.refresh(existing)
+        return existing
+
+    daily_reports = (
+        await db.scalars(
+            select(Report).where(
+                Report.location == normalized,
+                Report.cycle_version == cycle_version,
+                Report.report_type == DAILY_REPORT_TYPE,
+            )
+        )
+    ).all()
+    if not daily_reports:
+        return None
+
+    report_date = await _find_available_report_date(normalized, cycle_started_at - timedelta(days=1), db)
+    final_report = Report(
+        location=normalized,
+        report_date=report_date,
+        cycle_version=cycle_version,
+        report_type=FINAL_REPORT_TYPE,
+        status='completed',
+    )
+    db.add(final_report)
+    await db.commit()
+    await db.refresh(final_report)
+    return final_report
+
+
 async def _get_or_create_selection_cycle(location: str, db: AsyncSession) -> SelectionCycle:
     normalized = _normalize_location(location)
     cycle = await db.scalar(select(SelectionCycle).where(SelectionCycle.location == normalized).limit(1))
@@ -1157,6 +1216,8 @@ async def _get_or_create_selection_cycle(location: str, db: AsyncSession) -> Sel
 
     if (today - cycle.started_at).days >= SELECTION_CYCLE_DAYS:
         old_version = cycle.cycle_version
+        old_started_at = cycle.started_at
+        await _ensure_cycle_final_report(normalized, old_version, old_started_at, db)
         cycle.cycle_version += 1
         cycle.started_at = today
         cycle.updated_at = datetime.utcnow()
@@ -1170,6 +1231,8 @@ async def _get_or_create_selection_cycle(location: str, db: AsyncSession) -> Sel
 async def reset_selection_cycle(location: str, db: AsyncSession) -> ResetSelectionCycleResponse:
     cycle = await _get_or_create_selection_cycle(location, db)
     old_version = cycle.cycle_version
+    old_started_at = cycle.started_at
+    await _ensure_cycle_final_report(_normalize_location(location), old_version, old_started_at, db)
     cycle.cycle_version += 1
     cycle.started_at = date.today()
     cycle.updated_at = datetime.utcnow()
@@ -1186,6 +1249,10 @@ async def reset_selection_cycle(location: str, db: AsyncSession) -> ResetSelecti
 
 
 async def _sync_report_status(report: Report, db: AsyncSession) -> None:
+    if (report.report_type or DAILY_REPORT_TYPE) == FINAL_REPORT_TYPE:
+        report.status = 'completed'
+        return
+
     results_count = await db.scalar(
         select(func.count()).select_from(CheckResult).where(
             CheckResult.report_id == report.id,
@@ -1219,6 +1286,7 @@ async def _complete_previous_reports(location: str, current_report_date: date, d
             select(Report).where(
                 Report.location == location,
                 Report.report_date < current_report_date,
+                Report.report_type == DAILY_REPORT_TYPE,
                 Report.status != 'completed',
             )
         )
@@ -1235,6 +1303,7 @@ async def get_or_create_daily_report(location: str, cycle_version: int, db: Asyn
         select(Report).where(
             Report.location == normalized,
             Report.report_date == today,
+            Report.report_type == DAILY_REPORT_TYPE,
         ).limit(1)
     )
     if report:
@@ -1242,7 +1311,7 @@ async def get_or_create_daily_report(location: str, cycle_version: int, db: Asyn
         await db.commit()
         return report
 
-    report = Report(location=normalized, report_date=today, cycle_version=cycle_version, status='created')
+    report = Report(location=normalized, report_date=today, cycle_version=cycle_version, report_type=DAILY_REPORT_TYPE, status='created')
     db.add(report)
     await db.execute(
         delete(CategoryAssignment).where(
@@ -1262,6 +1331,30 @@ async def _load_assignments(location: str, cycle_version: int, db: AsyncSession)
 
 async def _load_results(report_id: int, db: AsyncSession) -> list[CheckResult]:
     return (await db.scalars(select(CheckResult).where(CheckResult.report_id == report_id).order_by(CheckResult.id.asc()))).all()
+
+
+async def _load_results_for_report_ids(report_ids: list[int], db: AsyncSession) -> list[CheckResult]:
+    if not report_ids:
+        return []
+    return (
+        await db.scalars(
+            select(CheckResult)
+            .where(CheckResult.report_id.in_(report_ids))
+            .order_by(CheckResult.created_at.asc(), CheckResult.id.asc())
+        )
+    ).all()
+
+
+async def _load_report_target_snapshots_for_report_ids(report_ids: list[int], db: AsyncSession) -> list[ReportTargetSnapshot]:
+    if not report_ids:
+        return []
+    return (
+        await db.scalars(
+            select(ReportTargetSnapshot)
+            .where(ReportTargetSnapshot.report_id.in_(report_ids))
+            .order_by(ReportTargetSnapshot.created_at.asc(), ReportTargetSnapshot.id.asc())
+        )
+    ).all()
 
 
 async def _load_selection_targets(location: str, cycle_version: int, db: AsyncSession) -> list[SelectionTarget]:
@@ -2509,22 +2602,32 @@ async def get_reports_history(location: str, db: AsyncSession) -> ReportHistoryR
 
     report_numbers = _build_report_numbers(reports)
 
-    return ReportHistoryResponse(
-        location=normalized,
-        reports=[
+    history_items: list[ReportHistoryItem] = []
+    for report in reports:
+        report_type = report.report_type or DAILY_REPORT_TYPE
+        report_number = report_numbers.get(report.id) if report_type != FINAL_REPORT_TYPE else None
+        if report_type == FINAL_REPORT_TYPE:
+            label = (
+                f"Цикл {report.cycle_version} · Итоговая · "
+                f"{_format_moscow_datetime(report.date_created)} — {_report_status_label(report.status)}"
+            )
+        else:
+            label = (
+                f"Цикл {report.cycle_version} · №{report_number or '-'} · "
+                f"{_format_moscow_datetime(report.date_created)} — {_report_status_label(report.status)}"
+            )
+        history_items.append(
             ReportHistoryItem(
                 report_id=report.id,
-                report_number=report_numbers.get(report.id),
+                report_number=report_number,
+                report_type=report_type,
                 date=_format_moscow_datetime(report.date_created),
                 status=report.status,
-                label=(
-                    f"Цикл {report.cycle_version} · №{report_numbers.get(report.id, '-')} · "
-                    f"{_format_moscow_datetime(report.date_created)} — {_report_status_label(report.status)}"
-                ),
+                label=label,
             )
-            for report in reports
-        ],
-    )
+        )
+
+    return ReportHistoryResponse(location=normalized, reports=history_items)
 
 
 def _category_assignment_label(category_id: str, report_assignments: list[CategoryAssignment]) -> str | None:
@@ -2559,7 +2662,7 @@ def _category_snapshot_assignment_label(category_id: str, report_snapshots: list
 
 
 def _build_report_numbers(reports: list[Report]) -> dict[int, int]:
-    ordered = sorted(reports, key=lambda item: (item.cycle_version, item.date_created, item.id))
+    ordered = sorted((item for item in reports if (item.report_type or DAILY_REPORT_TYPE) != FINAL_REPORT_TYPE), key=lambda item: (item.cycle_version, item.date_created, item.id))
     counters: dict[int, int] = defaultdict(int)
     numbers: dict[int, int] = {}
 
@@ -2572,12 +2675,16 @@ def _build_report_numbers(reports: list[Report]) -> dict[int, int]:
 
 
 async def _get_report_number(report: Report, db: AsyncSession) -> int:
+    if (report.report_type or DAILY_REPORT_TYPE) == FINAL_REPORT_TYPE:
+        return 0
+
     result = await db.scalar(
         select(func.count())
         .select_from(Report)
         .where(
             Report.location == report.location,
             Report.cycle_version == report.cycle_version,
+            Report.report_type == DAILY_REPORT_TYPE,
             or_(
                 Report.date_created < report.date_created,
                 and_(Report.date_created == report.date_created, Report.id <= report.id),
@@ -2624,19 +2731,43 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         report = await db.scalar(select(Report).where(Report.location == normalized).order_by(Report.date_created.desc(), Report.id.desc()).limit(1))
 
     if not report:
-        return AdminReport(report_id=None, report_number=None, date='-', location=normalized, status='-', categories=[], total_plus=0.0, total_minus=0.0, employees=[])
+        return AdminReport(report_id=None, report_number=None, report_type=DAILY_REPORT_TYPE, date='-', location=normalized, status='-', categories=[], total_plus=0.0, total_minus=0.0, employees=[])
 
     await _sync_report_status(report, db)
     await db.commit()
 
-    assignments = await _load_assignments(report.location, report.cycle_version, db)
-    report_snapshots = await _bootstrap_report_target_snapshots(report, assignments, [], db)
-    results = [
-        row for row in await _load_results(report.id, db)
-        if row.category_name != DEFAULT_CATEGORY_NAME and (row.subcategory_name is None or row.subcategory_name != DEFAULT_SUBCATEGORY_NAME)
-    ]
     targets = await _load_selection_targets(normalized, report.cycle_version, db)
     inventory = await _get_inventory_for(normalized)
+
+    report_type = report.report_type or DAILY_REPORT_TYPE
+    if report_type == FINAL_REPORT_TYPE:
+        cycle_reports = (
+            await db.scalars(
+                select(Report).where(
+                    Report.location == normalized,
+                    Report.cycle_version == report.cycle_version,
+                    Report.report_type == DAILY_REPORT_TYPE,
+                ).order_by(Report.date_created.asc(), Report.id.asc())
+            )
+        ).all()
+        cycle_report_ids = [row.id for row in cycle_reports]
+        report_snapshots = await _load_report_target_snapshots_for_report_ids(cycle_report_ids, db)
+        raw_results = [
+            row for row in await _load_results_for_report_ids(cycle_report_ids, db)
+            if row.category_name != DEFAULT_CATEGORY_NAME and (row.subcategory_name is None or row.subcategory_name != DEFAULT_SUBCATEGORY_NAME)
+        ]
+        results_by_target_key: dict[tuple[str, str], CheckResult] = {}
+        for row in raw_results:
+            results_by_target_key[(row.target_type, row.target_id)] = row
+        results = list(results_by_target_key.values())
+    else:
+        assignments = await _load_assignments(report.location, report.cycle_version, db)
+        report_snapshots = await _bootstrap_report_target_snapshots(report, assignments, [], db)
+        results = [
+            row for row in await _load_results(report.id, db)
+            if row.category_name != DEFAULT_CATEGORY_NAME and (row.subcategory_name is None or row.subcategory_name != DEFAULT_SUBCATEGORY_NAME)
+        ]
+
     discrepancy_financials = await _load_discrepancy_financials(normalized, results)
     historical_category_ids, historical_subcategory_ids, historical_item_ids = _report_history_target_maps(report_snapshots, results)
 
@@ -2713,7 +2844,6 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         result_map = rows_by_category_target.get(raw_category['id'], {})
         is_completed, status = (True, StatusEnum.GREEN) if _category_is_complete(raw_category, result_map) else (False, StatusEnum.GREY)
         if not is_completed:
-            # If any subcategory has progress/problem reflect it
             statuses = [_subcategory_is_complete(sub, result_map)[1] for sub in raw_category['subcategories']]
             if any(s == StatusEnum.RED for s in statuses):
                 status = StatusEnum.RED
@@ -2786,7 +2916,8 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
 
     return AdminReport(
         report_id=report.id,
-        report_number=report_number,
+        report_number=report_number or None,
+        report_type=report_type,
         date=_format_moscow_datetime(report.date_created),
         location=report.location,
         status=_report_status_label(report.status),

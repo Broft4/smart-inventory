@@ -54,6 +54,9 @@ const employeeUiState = {
     openSubcategories: new Set(),
 };
 
+let inventoryReloadQueued = false;
+const selectionBusyTargets = new Set();
+
 function getRevisionStorageKey(reportDate) {
     const userId = window.currentUser?.id || 'unknown';
     const location = window.currentUser?.location || 'unknown';
@@ -170,11 +173,23 @@ function highlightMatch(text, query) {
     return safe.replace(regex, '<span class="search-highlight">$1</span>');
 }
 
+function categoryHasFreeWork(category) {
+    if (!category) return false;
+    if (category.can_take) return true;
+    if ((category.subcategories || []).some(sub => sub.can_take)) return true;
+    return categoryHasFreeDiagnosticItems(category);
+}
+
+function categoryHasBusyWork(category) {
+    if (!category) return false;
+    return Boolean(category.is_blocked_by_other || category.has_other_subcategories || category.has_other_items);
+}
+
 function getCategoryBucket(category) {
     if (categoryHasPendingMineWork(category)) return 'mine';
-    if (category.can_take || category.subcategories.some(sub => sub.can_take) || categoryHasFreeDiagnosticItems(category)) return 'free';
+    if (categoryHasFreeWork(category)) return 'free';
     if (categoryHasCompletedMineWork(category)) return 'completed';
-    if (category.is_blocked_by_other || category.has_other_subcategories || category.has_other_items) return 'busy';
+    if (categoryHasBusyWork(category)) return 'busy';
     return 'other';
 }
 
@@ -293,9 +308,10 @@ function getVisibleSubcategories(category, query) {
 
 function categoryPassesFilter(category) {
     const mode = employeePageState.filter;
-    if (mode === 'mine' || mode === 'completed' || mode === 'free' || mode === 'busy') {
-        return getCategoryBucket(category) === mode;
-    }
+    if (mode === 'mine') return categoryHasPendingMineWork(category);
+    if (mode === 'completed') return categoryHasCompletedMineWork(category);
+    if (mode === 'free') return categoryHasFreeWork(category);
+    if (mode === 'busy') return categoryHasBusyWork(category);
     if (mode === 'problem') return categoryHasProblems(category);
     return true;
 }
@@ -315,10 +331,10 @@ function renderSummary() {
     const dateLine = document.getElementById('report-date-line');
     const cycleLine = document.getElementById('cycle-line');
     const allCategories = inventoryState?.categories || [];
-    const myCategories = allCategories.filter(category => getCategoryBucket(category) === 'mine');
-    const completedCategories = allCategories.filter(category => getCategoryBucket(category) === 'completed');
-    const freeCategories = allCategories.filter(category => getCategoryBucket(category) === 'free');
-    const occupiedCategories = allCategories.filter(category => getCategoryBucket(category) === 'busy');
+    const myCategories = allCategories.filter(categoryHasPendingMineWork);
+    const completedCategories = allCategories.filter(categoryHasCompletedMineWork);
+    const freeCategories = allCategories.filter(categoryHasFreeWork);
+    const occupiedCategories = allCategories.filter(categoryHasBusyWork);
     const problemCategories = allCategories.filter(categoryHasProblems);
 
     if (dateLine) dateLine.textContent = `Общая ревизия за ${inventoryState.report_date}`;
@@ -372,6 +388,44 @@ function isDiagnosticSubcategory(category, sub) {
 
 function categoryHasFreeDiagnosticItems(category) {
     return (category?.subcategories || []).some(sub => (sub?.items || []).some(item => item.can_take));
+}
+
+function getSelectionBusyKey(kind, categoryId, subcategoryId = null, itemId = null) {
+    return [kind, categoryId || '', subcategoryId || '', itemId || ''].join('::');
+}
+
+function setSelectionButtonsBusyState(categoryId, subcategoryId, itemId, isBusy) {
+    const selectors = [];
+    if (categoryId && !subcategoryId && !itemId) {
+        selectors.push(`button[onclick="takeCategory('${categoryId}')"]`);
+    }
+    if (categoryId && subcategoryId && !itemId) {
+        selectors.push(`button[onclick="takeSubcategory('${categoryId}', '${subcategoryId}')"]`);
+    }
+    if (categoryId && subcategoryId && itemId) {
+        selectors.push(`button[onclick="takeItem('${categoryId}', '${subcategoryId}', '${itemId}')"]`);
+    }
+    for (const selector of selectors) {
+        document.querySelectorAll(selector).forEach(button => {
+            button.disabled = Boolean(isBusy);
+            button.dataset.originalText = button.dataset.originalText || button.textContent;
+            button.textContent = isBusy ? '...' : button.dataset.originalText;
+        });
+    }
+}
+
+function beginSelectionRequest(kind, categoryId, subcategoryId = null, itemId = null) {
+    const key = getSelectionBusyKey(kind, categoryId, subcategoryId, itemId);
+    if (selectionBusyTargets.has(key)) return false;
+    selectionBusyTargets.add(key);
+    setSelectionButtonsBusyState(categoryId, subcategoryId, itemId, true);
+    return true;
+}
+
+function finishSelectionRequest(kind, categoryId, subcategoryId = null, itemId = null) {
+    const key = getSelectionBusyKey(kind, categoryId, subcategoryId, itemId);
+    selectionBusyTargets.delete(key);
+    setSelectionButtonsBusyState(categoryId, subcategoryId, itemId, false);
 }
 
 function buildSelectionConfirmMessage(kind, label) {
@@ -633,10 +687,10 @@ function renderCategories() {
     }
 
     if (employeePageState.filter === 'all') {
-        const mine = filtered.filter(cat => getCategoryBucket(cat) === 'mine');
-        const free = filtered.filter(cat => getCategoryBucket(cat) === 'free');
-        const completed = filtered.filter(cat => getCategoryBucket(cat) === 'completed');
-        const busy = filtered.filter(cat => getCategoryBucket(cat) === 'busy');
+        const mine = filtered.filter(categoryHasPendingMineWork);
+        const free = filtered.filter(categoryHasFreeWork);
+        const completed = filtered.filter(categoryHasCompletedMineWork);
+        const busy = filtered.filter(categoryHasBusyWork);
         container.innerHTML = [
             renderCategorySection('Мои выборы', 'Категории, подкатегории или отдельные товары, закреплённые за вами.', mine, query),
             renderCategorySection('Свободные категории и подкатегории', 'Их можно взять в работу. В служебных ветках выбираются отдельные товары.', free, query),
@@ -697,6 +751,7 @@ window.takeCategory = async function (categoryId) {
     }
     const category = getCategory(categoryId);
     if (!window.confirm(buildSelectionConfirmMessage('category', category?.name))) return;
+    if (!beginSelectionRequest('category', categoryId)) return;
     try {
         const response = await fetch('/assign-selection', {
             method: 'POST',
@@ -708,10 +763,12 @@ window.takeCategory = async function (categoryId) {
             alert(result.detail || result.message || 'Не удалось взять категорию.');
             return;
         }
-        await loadInventory();
+        await loadInventory({ forceReload: true });
     } catch (error) {
         console.error(error);
         alert(describeSelectionTransportError('категории', error));
+    } finally {
+        finishSelectionRequest('category', categoryId);
     }
 };
 
@@ -722,6 +779,7 @@ window.takeSubcategory = async function (categoryId, subcategoryId) {
     }
     const found = findSubcategory(subcategoryId);
     if (!window.confirm(buildSelectionConfirmMessage('subcategory', found?.sub?.name))) return;
+    if (!beginSelectionRequest('subcategory', categoryId, subcategoryId)) return;
     try {
         const response = await fetch('/assign-selection', {
             method: 'POST',
@@ -733,10 +791,12 @@ window.takeSubcategory = async function (categoryId, subcategoryId) {
             alert(result.detail || result.message || 'Не удалось взять подкатегорию.');
             return;
         }
-        await loadInventory();
+        await loadInventory({ forceReload: true });
     } catch (error) {
         console.error(error);
         alert(describeSelectionTransportError('подкатегории', error));
+    } finally {
+        finishSelectionRequest('subcategory', categoryId, subcategoryId);
     }
 };
 
@@ -750,6 +810,7 @@ window.takeItem = async function (categoryId, subcategoryId, itemId) {
     const found = findSubcategory(subcategoryId);
     const item = found?.sub?.items?.find(row => row.id === itemId);
     if (!window.confirm(buildSelectionConfirmMessage('item', item?.name))) return;
+    if (!beginSelectionRequest('item', categoryId, subcategoryId, itemId)) return;
     try {
         const response = await fetch('/assign-selection', {
             method: 'POST',
@@ -761,10 +822,12 @@ window.takeItem = async function (categoryId, subcategoryId, itemId) {
             alert(result.detail || result.message || 'Не удалось взять товар.');
             return;
         }
-        await loadInventory();
+        await loadInventory({ forceReload: true });
     } catch (error) {
         console.error(error);
         alert(describeSelectionTransportError('товара', error));
+    } finally {
+        finishSelectionRequest('item', categoryId, subcategoryId, itemId);
     }
 };
 
@@ -979,11 +1042,15 @@ window.verifyItem = async function (itemId) {
 
 
 async function loadInventory(options = {}) {
-    if (inventoryLoading) return;
+    const { forceReload = false } = options;
+    if (inventoryLoading) {
+        inventoryReloadQueued = true;
+        return;
+    }
 
+    inventoryReloadQueued = false;
     captureEmployeeUiState();
 
-    const { forceReload = false } = options;
     const summary = document.getElementById('inventory-summary');
     const container = document.getElementById('categories-container');
     inventoryLoading = true;
@@ -1023,6 +1090,11 @@ async function loadInventory(options = {}) {
     } finally {
         inventoryLoading = false;
         setRefreshButtonState(false);
+    }
+
+    if (inventoryReloadQueued) {
+        inventoryReloadQueued = false;
+        await loadInventory({ forceReload: true });
     }
 }
 

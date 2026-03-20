@@ -135,7 +135,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260320-report-history-fix'
+templates.env.globals['asset_version'] = '20260320-employee-selection-fix'
 
 
 @app.middleware('http')

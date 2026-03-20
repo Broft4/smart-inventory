@@ -1622,7 +1622,7 @@ function updateSummary(report) {
     document.getElementById('report-location').textContent = report.location;
     document.getElementById('report-date').textContent = formatDateTime(report.date);
     document.getElementById('report-status').textContent = `${report.status || '-'}${report.report_type === 'final' ? ' · итоговая' : ''}`;
-    document.getElementById('report-id').textContent = report.report_number ?? report.report_id ?? '-';
+    document.getElementById('report-id').textContent = report.report_type === 'final' ? 'Итоговая' : (report.report_number ?? report.report_id ?? '-');
     document.getElementById('total-plus').textContent = `+${report.total_plus}`;
     document.getElementById('total-minus').textContent = report.total_minus;
     document.getElementById('report-status-chip').textContent = report.status || '-';

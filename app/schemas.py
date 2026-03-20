@@ -256,6 +256,7 @@ class EmployeeReportSummary(BaseModel):
 class AdminReport(BaseModel):
     report_id: Optional[int] = None
     report_number: Optional[int] = None
+    report_type: str = 'daily'
     date: str
     location: str
     status: str
@@ -273,6 +274,7 @@ class AdminReport(BaseModel):
 class ReportHistoryItem(BaseModel):
     report_id: int
     report_number: Optional[int] = None
+    report_type: str = 'daily'
     date: str
     status: str
     label: str
