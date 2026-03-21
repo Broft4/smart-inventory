@@ -35,6 +35,7 @@ from app.logic import (
     ensure_user_can_access_location,
     finish_report,
     get_admin_report,
+    reopen_employee_report_access,
     get_cycle_targets,
     get_inventory_data,
     get_user_accessible_locations,
@@ -50,7 +51,6 @@ from app.logic import (
     update_user,
     user_to_schema,
     verify_item_or_category,
-    update_discrepancy_actual_qty,
 )
 from app.models import User
 from app.moysklad import ms_client
@@ -70,6 +70,8 @@ from app.schemas import (
     LoginResponse,
     LogoutResponse,
     MeResponse,
+    ReopenEmployeeAccessRequest,
+    ReopenEmployeeAccessResponse,
     ReportHistoryResponse,
     SaveCycleTargetsRequest,
     SaveCycleTargetsResponse,
@@ -82,8 +84,6 @@ from app.schemas import (
     UserUpdateRequest,
     VerifyRequest,
     VerifyResponse,
-    UpdateDiscrepancyRequest,
-    UpdateDiscrepancyResponse,
 )
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -138,7 +138,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260320-admin-discrepancy-edit'
+templates.env.globals['asset_version'] = '20260321-admin-reopen-employee-access'
 
 
 @app.middleware('http')
@@ -502,16 +502,9 @@ async def api_delete_report(report_id: int, admin: User = Depends(require_admin_
     return await delete_report(report_id, db, current_user=admin)
 
 
-
-
-@app.patch('/api/report/discrepancy/{check_result_id}', response_model=UpdateDiscrepancyResponse)
-async def api_update_discrepancy(
-    check_result_id: int,
-    payload: UpdateDiscrepancyRequest,
-    admin: User = Depends(require_admin_or_superadmin),
-    db: AsyncSession = Depends(get_db),
-):
-    return await update_discrepancy_actual_qty(check_result_id, payload, db, current_user=admin)
+@app.post('/api/report/{report_id}/reopen-employee-access', response_model=ReopenEmployeeAccessResponse)
+async def api_reopen_employee_access(report_id: int, payload: ReopenEmployeeAccessRequest, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await reopen_employee_report_access(report_id, payload.employee_user_id, db, admin)
 
 
 @app.get('/api/inventory-diagnostics')

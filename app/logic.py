@@ -41,6 +41,7 @@ from app.schemas import (
     LocationListResponse,
     LocationPointModel,
     MeResponse,
+    ReopenEmployeeAccessResponse,
     ReportHistoryItem,
     ReportHistoryResponse,
     ResetSelectionCycleResponse,
@@ -61,8 +62,6 @@ from app.schemas import (
     UserUpdateRequest,
     VerifyRequest,
     VerifyResponse,
-    UpdateDiscrepancyRequest,
-    UpdateDiscrepancyResponse,
 )
 
 
@@ -1822,6 +1821,12 @@ async def _load_report_employee_completions(report_id: int, db: AsyncSession) ->
     ).all()
 
 
+def _format_completion_datetime(value: datetime | None) -> str | None:
+    if not value:
+        return None
+    return _format_moscow_datetime(value)
+
+
 async def _active_employee_users_for_location(location: str, db: AsyncSession) -> list[User]:
     return (
         await db.scalars(
@@ -2595,6 +2600,47 @@ async def finish_report(report_id: int, db: AsyncSession, user: User) -> tuple[b
     return True, f'Ваша ревизия завершена.'
 
 
+async def reopen_employee_report_access(report_id: int, employee_user_id: int, db: AsyncSession, current_user: User) -> ReopenEmployeeAccessResponse:
+    report = await db.get(Report, report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail='Ревизия не найдена.')
+
+    await ensure_user_can_access_location(current_user, report.location, db)
+
+    if (report.report_type or DAILY_REPORT_TYPE) != DAILY_REPORT_TYPE:
+        raise HTTPException(status_code=400, detail='Вернуть доступ можно только для обычной дневной ревизии.')
+
+    if report.report_date != get_moscow_today():
+        raise HTTPException(status_code=400, detail='Вернуть доступ можно только для текущей ревизии за сегодня.')
+
+    employee = await db.get(User, employee_user_id)
+    if not employee or employee.role != RoleEnum.EMPLOYEE.value:
+        raise HTTPException(status_code=404, detail='Сотрудник не найден.')
+
+    employee_location = _normalize_location(employee.location or '') if employee.location else ''
+    if not employee_location or employee_location != report.location:
+        raise HTTPException(status_code=403, detail='Нельзя вернуть в ревизию сотрудника из другой точки.')
+
+    completion = await db.scalar(
+        select(ReportEmployeeCompletion)
+        .where(ReportEmployeeCompletion.report_id == report.id)
+        .where(ReportEmployeeCompletion.user_id == employee.id)
+        .limit(1)
+    )
+
+    if completion is None:
+        await _sync_report_status(report, db)
+        await db.commit()
+        return ReopenEmployeeAccessResponse(success=True, message=f'У сотрудника {employee.full_name} уже открыт доступ к ревизии.')
+
+    await db.delete(completion)
+    await db.flush()
+    await _sync_report_status(report, db)
+    await db.commit()
+    _invalidate_runtime_inventory_cache(report.location)
+    return ReopenEmployeeAccessResponse(success=True, message=f'Сотруднику {employee.full_name} снова открыт доступ к ревизии.')
+
+
 async def get_reports_history(location: str, db: AsyncSession) -> ReportHistoryResponse:
     normalized = _normalize_location(location)
     reports = (await db.scalars(select(Report).where(Report.location == normalized).order_by(Report.date_created.desc(), Report.id.desc()))).all()
@@ -2733,7 +2779,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         report = await db.scalar(select(Report).where(Report.location == normalized).order_by(Report.date_created.desc(), Report.id.desc()).limit(1))
 
     if not report:
-        return AdminReport(report_id=None, report_number=None, report_type=DAILY_REPORT_TYPE, date='-', location=normalized, status='-', categories=[], total_plus=0.0, total_minus=0.0, employees=[])
+        return AdminReport(report_id=None, report_number=None, report_type=DAILY_REPORT_TYPE, date='-', location=normalized, status='-', categories=[], total_plus=0.0, total_minus=0.0, can_manage_employee_completion=False, employees=[])
 
     await _sync_report_status(report, db)
     await db.commit()
@@ -2772,21 +2818,55 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
 
     discrepancy_financials = await _load_discrepancy_financials(normalized, results)
     historical_category_ids, historical_subcategory_ids, historical_item_ids = _report_history_target_maps(report_snapshots, results)
+    active_employees = await _active_employee_users_for_location(report.location, db)
+    completions = await _load_report_employee_completions(report.id, db)
+    can_manage_employee_completion = (report.report_type or DAILY_REPORT_TYPE) == DAILY_REPORT_TYPE and report.report_date == get_moscow_today()
 
     rows_by_category_target: dict[str, dict[str, CheckResult]] = defaultdict(dict)
     for row in results:
         rows_by_category_target[row.category_id][row.target_id] = row
 
+    completion_by_user_id = {completion.user_id: completion for completion in completions}
+    active_employee_by_name = {employee.full_name: employee for employee in active_employees}
     grouped_problem_items: dict[str, list[DiscrepancyItem]] = defaultdict(list)
     employee_bucket: dict[str, EmployeeReportSummary] = {}
 
+    def ensure_employee_bucket(full_name: str | None, user_id: int | None = None) -> EmployeeReportSummary | None:
+        if not full_name:
+            return None
+        summary = employee_bucket.get(full_name)
+        active_employee = active_employee_by_name.get(full_name)
+        resolved_user_id = user_id or (active_employee.id if active_employee else None)
+        completion = completion_by_user_id.get(resolved_user_id) if resolved_user_id else None
+        if summary is None:
+            summary = EmployeeReportSummary(
+                user_id=resolved_user_id,
+                full_name=full_name,
+                categories=[],
+                completed_categories=0,
+                discrepancy_items=0,
+                finished_current_report=completion is not None,
+                finished_at=_format_completion_datetime(completion.finished_at) if completion else None,
+                can_reopen_access=bool(can_manage_employee_completion and completion is not None and resolved_user_id),
+            )
+            employee_bucket[full_name] = summary
+            return summary
+
+        if summary.user_id is None and resolved_user_id is not None:
+            summary.user_id = resolved_user_id
+        if completion is not None:
+            summary.finished_current_report = True
+            summary.finished_at = _format_completion_datetime(completion.finished_at)
+        summary.can_reopen_access = bool(can_manage_employee_completion and summary.finished_current_report and summary.user_id)
+        return summary
+
+    for employee in active_employees:
+        ensure_employee_bucket(employee.full_name, employee.id)
+
     for row in results:
         if row.checked_by_name_snapshot:
-            bucket = employee_bucket.setdefault(
-                row.checked_by_name_snapshot,
-                EmployeeReportSummary(full_name=row.checked_by_name_snapshot, categories=[], completed_categories=0, discrepancy_items=0),
-            )
-            if row.category_name not in bucket.categories:
+            bucket = ensure_employee_bucket(row.checked_by_name_snapshot, row.checked_by_user_id)
+            if bucket and row.category_name not in bucket.categories:
                 bucket.categories.append(row.category_name)
 
         if row.target_type == 'item' and row.status == 'red':
@@ -2801,18 +2881,15 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
                 lost_profit = round(retail_total - cost_total, 2)
 
             if row.checked_by_name_snapshot:
-                bucket = employee_bucket.setdefault(
-                    row.checked_by_name_snapshot,
-                    EmployeeReportSummary(full_name=row.checked_by_name_snapshot, categories=[], completed_categories=0, discrepancy_items=0),
-                )
-                bucket.discrepancy_items += 1
-                bucket.total_cost = float(round(float(bucket.total_cost or 0.0) + float(cost_total or 0.0), 2))
-                bucket.total_retail = float(round(float(bucket.total_retail or 0.0) + float(retail_total or 0.0), 2))
-                bucket.total_lost_profit = float(round(float(bucket.total_lost_profit or 0.0) + float(lost_profit or 0.0), 2))
+                bucket = ensure_employee_bucket(row.checked_by_name_snapshot, row.checked_by_user_id)
+                if bucket:
+                    bucket.discrepancy_items += 1
+                    bucket.total_cost = float(round(float(bucket.total_cost or 0.0) + float(cost_total or 0.0), 2))
+                    bucket.total_retail = float(round(float(bucket.total_retail or 0.0) + float(retail_total or 0.0), 2))
+                    bucket.total_lost_profit = float(round(float(bucket.total_lost_profit or 0.0) + float(lost_profit or 0.0), 2))
 
             grouped_problem_items[row.category_name].append(
                 DiscrepancyItem(
-                    check_result_id=row.id,
                     name=row.target_name,
                     expected=float(row.expected_qty),
                     actual=float(row.actual_qty or 0),
@@ -2898,9 +2975,9 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         owners = {item.checked_by for item in category.problem_items if item.checked_by}
         if len(owners) == 1:
             owner = next(iter(owners))
-            employee_bucket.setdefault(owner, EmployeeReportSummary(full_name=owner, categories=[], completed_categories=0, discrepancy_items=0))
-            if category.name not in employee_bucket[owner].categories:
-                employee_bucket[owner].categories.append(category.name)
+            owner_bucket = ensure_employee_bucket(owner)
+            if owner_bucket and category.name not in owner_bucket.categories:
+                owner_bucket.categories.append(category.name)
 
     for summary in employee_bucket.values():
         summary.categories = sorted(summary.categories, key=str.lower)
@@ -2932,52 +3009,8 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         total_cost=float(round(total_cost, 2)),
         total_retail=float(round(total_retail, 2)),
         total_lost_profit=float(round(total_lost_profit, 2)),
+        can_manage_employee_completion=can_manage_employee_completion,
         employees=sorted(employee_bucket.values(), key=lambda item: item.full_name.lower()),
-    )
-
-
-async def update_discrepancy_actual_qty(
-    check_result_id: int,
-    payload: UpdateDiscrepancyRequest,
-    db: AsyncSession,
-    current_user: User,
-) -> UpdateDiscrepancyResponse:
-    check_result = await db.get(CheckResult, check_result_id)
-    if not check_result:
-        raise HTTPException(status_code=404, detail='Строка расхождения не найдена.')
-    if check_result.target_type != 'item':
-        raise HTTPException(status_code=400, detail='Редактировать можно только товарные расхождения.')
-
-    report = await db.get(Report, check_result.report_id)
-    if not report:
-        raise HTTPException(status_code=404, detail='Ревизия для строки расхождения не найдена.')
-
-    await ensure_user_can_access_location(current_user, report.location, db)
-
-    password = str(payload.password or '').strip()
-    if not password or not verify_password(password, current_user.password_hash):
-        raise HTTPException(status_code=403, detail='Неверный пароль текущего администратора.')
-
-    actual_quantity = float(payload.actual_quantity)
-    expected_quantity = float(check_result.expected_qty or 0.0)
-    diff = float(actual_quantity - expected_quantity)
-    if abs(diff) < 1e-9:
-        diff = 0.0
-
-    check_result.actual_qty = actual_quantity
-    check_result.diff = diff
-    check_result.status = 'green' if diff == 0.0 else 'red'
-
-    await _refresh_report_status(report, db)
-    await db.commit()
-
-    return UpdateDiscrepancyResponse(
-        success=True,
-        message='Расхождение обновлено.',
-        check_result_id=check_result.id,
-        actual_quantity=float(actual_quantity),
-        diff=float(diff),
-        status=StatusEnum.GREEN if diff == 0.0 else StatusEnum.RED,
     )
 
 

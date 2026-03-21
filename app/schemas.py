@@ -105,6 +105,15 @@ class DeleteResponse(BaseModel):
     message: str
 
 
+class ReopenEmployeeAccessRequest(BaseModel):
+    employee_user_id: int = Field(..., ge=1)
+
+
+class ReopenEmployeeAccessResponse(BaseModel):
+    success: bool
+    message: str
+
+
 class ItemModel(BaseModel):
     id: str
     name: str
@@ -213,22 +222,7 @@ class FinishReportResponse(BaseModel):
     message: str
 
 
-class UpdateDiscrepancyRequest(BaseModel):
-    actual_quantity: float = Field(..., ge=0)
-    password: str = Field(..., min_length=1, max_length=255)
-
-
-class UpdateDiscrepancyResponse(BaseModel):
-    success: bool
-    message: str
-    check_result_id: int
-    actual_quantity: float
-    diff: float
-    status: StatusEnum
-
-
 class DiscrepancyItem(BaseModel):
-    check_result_id: int
     name: str
     expected: float
     actual: float
@@ -259,6 +253,7 @@ class CategoryResult(BaseModel):
 
 
 class EmployeeReportSummary(BaseModel):
+    user_id: Optional[int] = None
     full_name: str
     categories: list[str] = Field(default_factory=list)
     completed_categories: int = 0
@@ -266,6 +261,9 @@ class EmployeeReportSummary(BaseModel):
     total_cost: float = 0.0
     total_retail: float = 0.0
     total_lost_profit: float = 0.0
+    finished_current_report: bool = False
+    finished_at: Optional[str] = None
+    can_reopen_access: bool = False
 
 
 class AdminReport(BaseModel):
@@ -283,6 +281,7 @@ class AdminReport(BaseModel):
     total_cost: float = 0.0
     total_retail: float = 0.0
     total_lost_profit: float = 0.0
+    can_manage_employee_completion: bool = False
     employees: list[EmployeeReportSummary] = Field(default_factory=list)
 
 

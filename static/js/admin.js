@@ -47,7 +47,6 @@ const adminState = {
     locations: [],
     locationModalTab: 'create',
     editingLocationId: null,
-    editingDiscrepancy: null,
     cycleTargetsPreviousCategoryIds: new Set(),
     cycleTargetsPreviousSubcategoryIds: new Set(),
 };
@@ -73,19 +72,65 @@ function formatQty(value) {
     return Math.abs(number).toLocaleString('ru-RU', { minimumFractionDigits: 0, maximumFractionDigits: 3 });
 }
 
-function formatEditableQty(value) {
-    const number = Number(value ?? 0);
-    if (!Number.isFinite(number)) return '0';
-    if (Math.abs(number - Math.round(number)) < 1e-9) {
-        return String(Math.round(number));
-    }
-    return number.toFixed(3).replace(/\.?0+$/, '');
+function formatFinishedAt(value) {
+    if (!value) return '';
+    return value;
 }
 
-function getCurrentAdminReportId() {
-    const reportSelect = document.getElementById('admin-report-select');
-    if (reportSelect?.value) return Number(reportSelect.value);
-    return Number(adminState.report?.report_id || adminState.selectedReportId || 0) || null;
+function buildEmployeeRevisionStatus(employee, report) {
+    const canManage = Boolean(report?.can_manage_employee_completion && report?.report_type !== 'final');
+    if (employee?.finished_current_report) {
+        return {
+            label: employee.finished_at ? `Завершил: ${formatFinishedAt(employee.finished_at)}` : 'Завершил ревизию',
+            className: 'green',
+            actionHtml: employee.can_reopen_access && canManage && employee.user_id
+                ? `<button class="chip-button chip-button-warning" type="button" onclick="reopenEmployeeRevisionAccess(${Number(employee.user_id)}, '${escapeHtml(employee.full_name)}')">Вернуть в ревизию</button>`
+                : '',
+        };
+    }
+
+    return {
+        label: canManage ? 'Доступ к ревизии открыт' : 'Статус только для просмотра',
+        className: canManage ? 'grey' : 'orange',
+        actionHtml: '',
+    };
+}
+
+async function reopenEmployeeRevisionAccess(employeeUserId, employeeName) {
+    const report = adminState.report;
+    if (!report?.report_id || !report?.location) {
+        alert('Сначала загрузите ревизию.');
+        return;
+    }
+
+    if (!confirm(`Вернуть сотрудника «${employeeName}» в текущую ревизию?`)) {
+        return;
+    }
+
+    setAdminReportStatus(`Возвращаем сотрудника «${employeeName}» в ревизию...`, 'loading');
+
+    try {
+        const response = await fetch(`/api/report/${report.report_id}/reopen-employee-access`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ employee_user_id: employeeUserId }),
+        });
+        let payload = null;
+        try {
+            payload = await response.json();
+        } catch {
+            payload = null;
+        }
+        if (!response.ok) {
+            throw new Error(payload?.detail || payload?.message || 'Не удалось вернуть сотрудника в ревизию.');
+        }
+
+        await loadAdminReport(report.location, report.report_id);
+        setAdminReportStatus(payload?.message || `Сотрудник «${employeeName}» снова может продолжить ревизию.`, 'success');
+    } catch (error) {
+        console.error(error);
+        setAdminReportStatus(error?.message || 'Не удалось вернуть сотрудника в ревизию.', 'error');
+    }
 }
 
 function renderMoneyBreakdown(unitValue, totalValue, quantity, { highlight = false } = {}) {
@@ -1356,6 +1401,7 @@ function buildEmployeeDetailGroups(report) {
 
     (report.employees || []).forEach(employee => {
         employeeMap.set(employee.full_name, {
+            user_id: employee.user_id || null,
             full_name: employee.full_name,
             categories: [],
             discrepancyItems: [],
@@ -1364,6 +1410,9 @@ function buildEmployeeDetailGroups(report) {
             total_cost: Number(employee.total_cost || 0),
             total_retail: Number(employee.total_retail || 0),
             total_lost_profit: Number(employee.total_lost_profit || 0),
+            finished_current_report: Boolean(employee.finished_current_report),
+            finished_at: employee.finished_at || null,
+            can_reopen_access: Boolean(employee.can_reopen_access),
         });
     });
 
@@ -1413,7 +1462,6 @@ function buildEmployeeDetailGroups(report) {
             }
 
             employeeMap.get(responsibleEmployee).discrepancyItems.push({
-                check_result_id: item.check_result_id,
                 category_name: category.name,
                 subcategory_name: item.subcategory_name || '-',
                 name: item.name,
@@ -1556,7 +1604,6 @@ function renderEmployeeDetails(report) {
                                 <th>Розница</th>
                                 <th>Утерянная прибыль</th>
                                 <th>Сотрудник</th>
-                                <th class="actions-col"></th>
                             </tr>
                         </thead>
                         <tbody>
@@ -1575,21 +1622,6 @@ function renderEmployeeDetails(report) {
                                         <td class="num-cell">${renderMoneyBreakdown(item.retail_price, item.retail_total, item.diff)}</td>
                                         <td class="num-cell">${renderMoneyBreakdown((item.retail_price !== null && item.retail_price !== undefined && item.cost_price !== null && item.cost_price !== undefined) ? Number(item.retail_price) - Number(item.cost_price) : null, item.lost_profit, item.diff, { highlight: true })}</td>
                                         <td><span class="employee-pill">${highlightMatch(item.checked_by, adminState.searchQuery)}</span></td>
-                                        <td class="actions-cell">
-                                            <button
-                                                type="button"
-                                                class="icon-action-btn"
-                                                data-edit-discrepancy
-                                                data-check-result-id="${item.check_result_id}"
-                                                data-category-name="${escapeHtml(item.category_name)}"
-                                                data-subcategory-name="${escapeHtml(item.subcategory_name || '')}"
-                                                data-item-name="${escapeHtml(item.name)}"
-                                                data-expected="${item.expected}"
-                                                data-actual="${item.actual}"
-                                                aria-label="Изменить факт по товару ${escapeHtml(item.name)}"
-                                                title="Изменить факт"
-                                            >✏️</button>
-                                        </td>
                                     </tr>
                                 `;
                             }).join('')}
@@ -1599,12 +1631,19 @@ function renderEmployeeDetails(report) {
             `
             : '<div class="category-empty-state green">У этого сотрудника нет расхождений по текущим фильтрам.</div>';
 
+        const revisionStatus = buildEmployeeRevisionStatus(employee, report);
         return `
             <article class="category-card employee-detail-card">
                 <div class="employee-detail-header">
                     <div>
                         <h3>${highlightMatch(employee.full_name, adminState.searchQuery)}</h3>
                         <p class="muted-text">Категории сотрудника и проблемные позиции в одном месте.</p>
+                        ${(employee.user_id || employee.finished_current_report) ? `
+                        <div class="employee-revision-row" style="margin-top:8px;">
+                            <span class="status-chip ${revisionStatus.className}">${escapeHtml(revisionStatus.label)}</span>
+                            ${revisionStatus.actionHtml}
+                        </div>
+                        ` : ''}
                     </div>
                     <div class="employee-detail-kpis">
                         <div><span class="summary-label">Категорий</span><strong>${employee.categories.length}</strong></div>
@@ -1690,11 +1729,19 @@ function renderEmployees(report) {
 
     container.innerHTML = `
         <div class="employee-summary-grid">
-            ${employees.map(employee => `
+            ${employees.map(employee => {
+                const revisionStatus = buildEmployeeRevisionStatus(employee, report);
+                return `
                 <article class="employee-summary-card">
                     <div class="employee-card-head">
                         <h3>${highlightMatch(employee.full_name, adminState.viewMode === 'employees' ? adminState.searchQuery : '')}</h3>
-                        <button class="chip-button" type="button" onclick="filterByEmployee('${escapeHtml(employee.full_name)}')">Показать</button>
+                        <div class="employee-card-actions">
+                            ${revisionStatus.actionHtml}
+                            <button class="chip-button" type="button" onclick="filterByEmployee('${escapeHtml(employee.full_name)}')">Показать</button>
+                        </div>
+                    </div>
+                    <div class="employee-revision-row">
+                        <span class="status-chip ${revisionStatus.className}">${escapeHtml(revisionStatus.label)}</span>
                     </div>
                     <div class="employee-meta-grid">
                         <div>
@@ -1728,7 +1775,7 @@ function renderEmployees(report) {
                             : '<span class="muted-text">Категории ещё не закреплены</span>'}
                     </div>
                 </article>
-            `).join('')}
+            `; }).join('')}
         </div>
     `;
 }
@@ -1822,7 +1869,6 @@ function renderCategories(report) {
                                         <th>Розница</th>
                                         <th>Утерянная прибыль</th>
                                         <th>Сотрудник</th>
-                                        <th class="actions-col"></th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -1840,21 +1886,6 @@ function renderCategories(report) {
                                                 <td class="num-cell">${renderMoneyBreakdown(item.retail_price, item.retail_total, item.diff)}</td>
                                                 <td class="num-cell">${renderMoneyBreakdown((item.retail_price !== null && item.retail_price !== undefined && item.cost_price !== null && item.cost_price !== undefined) ? Number(item.retail_price) - Number(item.cost_price) : null, item.lost_profit, item.diff, { highlight: true })}</td>
                                                 <td><span class="employee-pill">${highlightMatch(item.checked_by || '-', adminState.searchQuery)}</span></td>
-                                                <td class="actions-cell">
-                                                    <button
-                                                        type="button"
-                                                        class="icon-action-btn"
-                                                        data-edit-discrepancy
-                                                        data-check-result-id="${item.check_result_id}"
-                                                        data-category-name="${escapeHtml(cat.name)}"
-                                                        data-subcategory-name="${escapeHtml(item.subcategory_name || '')}"
-                                                        data-item-name="${escapeHtml(item.name)}"
-                                                        data-expected="${item.expected}"
-                                                        data-actual="${item.actual}"
-                                                        aria-label="Изменить факт по товару ${escapeHtml(item.name)}"
-                                                        title="Изменить факт"
-                                                    >✏️</button>
-                                                </td>
                                             </tr>
                                         `;
                                     }).join('')}
@@ -2051,120 +2082,6 @@ async function logout() {
     location.href = '/login';
 }
 
-function openDiscrepancyEditModal(item) {
-    adminState.editingDiscrepancy = item;
-
-    const itemName = document.getElementById('edit-discrepancy-item-name');
-    const itemMeta = document.getElementById('edit-discrepancy-item-meta');
-    const actualInput = document.getElementById('edit-discrepancy-actual');
-    const passwordInput = document.getElementById('edit-discrepancy-password');
-    const message = document.getElementById('edit-discrepancy-message');
-
-    if (itemName) itemName.textContent = item.name || 'Товар';
-    if (itemMeta) {
-        itemMeta.textContent = `План: ${formatEditableQty(item.expected)} · Текущий факт: ${formatEditableQty(item.actual)} · ${item.category_name || 'Без категории'}${item.subcategory_name ? ` → ${item.subcategory_name}` : ''}`;
-    }
-    if (actualInput) actualInput.value = formatEditableQty(item.actual);
-    if (passwordInput) passwordInput.value = '';
-    if (message) {
-        message.textContent = '';
-        message.className = 'message';
-    }
-
-    showModal('edit-discrepancy-modal');
-    setTimeout(() => actualInput?.focus(), 0);
-}
-
-function closeDiscrepancyEditModal() {
-    adminState.editingDiscrepancy = null;
-    hideModal('edit-discrepancy-modal');
-
-    const form = document.getElementById('edit-discrepancy-form');
-    const message = document.getElementById('edit-discrepancy-message');
-    if (form) form.reset();
-    if (message) {
-        message.textContent = '';
-        message.className = 'message';
-    }
-}
-
-async function submitDiscrepancyEditForm(event) {
-    event.preventDefault();
-    const item = adminState.editingDiscrepancy;
-    if (!item?.check_result_id) return;
-
-    const actualInput = document.getElementById('edit-discrepancy-actual');
-    const passwordInput = document.getElementById('edit-discrepancy-password');
-    const submitButton = document.getElementById('save-discrepancy-edit-btn');
-    const message = document.getElementById('edit-discrepancy-message');
-
-    const actualQuantity = Number(actualInput?.value);
-    const password = String(passwordInput?.value || '');
-
-    if (!Number.isFinite(actualQuantity) || actualQuantity < 0) {
-        if (message) {
-            message.textContent = 'Введите корректный факт (0 или больше).';
-            message.className = 'message';
-        }
-        actualInput?.focus();
-        return;
-    }
-
-    if (!password.trim()) {
-        if (message) {
-            message.textContent = 'Введите пароль текущего администратора.';
-            message.className = 'message';
-        }
-        passwordInput?.focus();
-        return;
-    }
-
-    if (submitButton) submitButton.disabled = true;
-    if (message) {
-        message.textContent = 'Сохраняем изменения...';
-        message.className = 'message';
-    }
-
-    try {
-        const response = await fetch(`/api/report/discrepancy/${item.check_result_id}`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                actual_quantity: actualQuantity,
-                password,
-            }),
-        });
-
-        let payload = null;
-        try {
-            payload = await response.json();
-        } catch {
-            payload = null;
-        }
-
-        if (!response.ok) {
-            throw new Error(payload?.detail || payload?.message || 'Не удалось обновить расхождение.');
-        }
-
-        if (message) {
-            message.textContent = payload?.message || 'Расхождение обновлено.';
-            message.className = 'message success-text';
-        }
-
-        const location = getSelectedAdminLocation();
-        const currentReportId = getCurrentAdminReportId();
-        await loadAdminReport(location, currentReportId);
-        closeDiscrepancyEditModal();
-    } catch (error) {
-        if (message) {
-            message.textContent = error?.message || 'Не удалось обновить расхождение.';
-            message.className = 'message';
-        }
-    } finally {
-        if (submitButton) submitButton.disabled = false;
-    }
-}
-
 function initModalCloseBehavior() {
     document.querySelectorAll('.modal-overlay').forEach((overlay) => {
         overlay.addEventListener('click', (event) => {
@@ -2240,28 +2157,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         await downloadDiagnosticsCsv(location, document.getElementById('diagnostics-export-btn'));
     });
 
-    document.getElementById('close-edit-discrepancy-modal-btn')?.addEventListener('click', closeDiscrepancyEditModal);
-    document.getElementById('edit-discrepancy-cancel-btn')?.addEventListener('click', closeDiscrepancyEditModal);
-    document.getElementById('edit-discrepancy-form')?.addEventListener('submit', submitDiscrepancyEditForm);
-
     document.querySelectorAll('[data-view-mode]').forEach(button => {
         button.addEventListener('click', () => setViewMode(button.dataset.viewMode));
     });
 
     document.addEventListener('click', async (event) => {
-        const editDiscrepancyButton = event.target.closest('[data-edit-discrepancy]');
-        if (editDiscrepancyButton) {
-            openDiscrepancyEditModal({
-                check_result_id: Number(editDiscrepancyButton.dataset.checkResultId),
-                category_name: editDiscrepancyButton.dataset.categoryName || '',
-                subcategory_name: editDiscrepancyButton.dataset.subcategoryName || '',
-                name: editDiscrepancyButton.dataset.itemName || '',
-                expected: Number(editDiscrepancyButton.dataset.expected || 0),
-                actual: Number(editDiscrepancyButton.dataset.actual || 0),
-            });
-            return;
-        }
-
         const actionButton = event.target.closest('[data-open-modal-action]');
         if (!actionButton) return;
 
