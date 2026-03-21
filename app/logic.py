@@ -3102,20 +3102,21 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
             sub_completed, sub_status = _subcategory_is_complete(raw_sub, result_map)
             sub_taken_in_report = _subcategory_taken_in_report(raw_category['id'], raw_sub['id'], report_snapshots)
 
-            if sub_completed and sub_status == StatusEnum.GREEN:
-                sub_row = result_map.get(raw_sub['id'])
-                checked_by = sub_row.checked_by_name_snapshot if sub_row else None
-                if not checked_by:
-                    item_rows = [result_map.get(item['id']) for item in raw_sub['items']]
-                    item_rows = [row for row in item_rows if row and row.checked_by_name_snapshot]
-                    if item_rows:
-                        owners = {row.checked_by_name_snapshot for row in item_rows if row.checked_by_name_snapshot}
-                        checked_by = _owner_label(owners)
-                completed_subcategories.append(CompletedSubcategoryInfo(
-                    name=raw_sub['name'],
-                    checked_by=checked_by,
-                    status=sub_status,
-                ))
+            if sub_completed:
+                if sub_status == StatusEnum.GREEN:
+                    sub_row = result_map.get(raw_sub['id'])
+                    checked_by = sub_row.checked_by_name_snapshot if sub_row else None
+                    if not checked_by:
+                        item_rows = [result_map.get(item['id']) for item in raw_sub['items']]
+                        item_rows = [row for row in item_rows if row and row.checked_by_name_snapshot]
+                        if item_rows:
+                            owners = {row.checked_by_name_snapshot for row in item_rows if row.checked_by_name_snapshot}
+                            checked_by = _owner_label(owners)
+                    completed_subcategories.append(CompletedSubcategoryInfo(
+                        name=raw_sub['name'],
+                        checked_by=checked_by,
+                        status=sub_status,
+                    ))
                 continue
 
             if not sub_taken_in_report:

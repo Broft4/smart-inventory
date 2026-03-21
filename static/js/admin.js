@@ -1365,10 +1365,13 @@ function filterCategoriesBySearch(categories) {
 
             const categorySubcategories = Array.isArray(category.selected_subcategories) ? category.selected_subcategories : [];
             const completedSubcategories = Array.isArray(category.completed_subcategories) ? category.completed_subcategories : [];
+            const inProgressSubcategories = Array.isArray(category.in_progress_subcategories) ? category.in_progress_subcategories : [];
             const subcategoryMatched = categorySubcategories.some(subName =>
                 normalizeSearch(subName).includes(q)
             ) || completedSubcategories.some(sub =>
                 normalizeSearch(sub.name).includes(q) || normalizeSearch(sub.checked_by || '').includes(q)
+            ) || inProgressSubcategories.some(sub =>
+                normalizeSearch(sub.name).includes(q) || normalizeSearch(sub.assigned_to || '').includes(q)
             );
 
             const matchedProblemItems = (category.problem_items || []).filter(item => {
@@ -1406,13 +1409,33 @@ function filterCategoriesBySearch(categories) {
 function buildEmployeeDetailGroups(report) {
     const employeeMap = new Map();
     const categories = getFilteredCategories(report);
+    const knownEmployeeNames = new Set((report.employees || []).map(employee => employee.full_name));
+
+    const ensureEmployeeBucket = (name, base = {}) => {
+        if (!employeeMap.has(name)) {
+            employeeMap.set(name, {
+                user_id: base.user_id || null,
+                full_name: name,
+                categories: [],
+                discrepancyItems: [],
+                completed: base.completed || 0,
+                discrepancyCount: base.discrepancyCount || 0,
+                total_cost: Number(base.total_cost || 0),
+                total_retail: Number(base.total_retail || 0),
+                total_lost_profit: Number(base.total_lost_profit || 0),
+                started_current_report: Boolean(base.started_current_report),
+                started_at: base.started_at || null,
+                finished_current_report: Boolean(base.finished_current_report),
+                finished_at: base.finished_at || null,
+                can_reopen_access: Boolean(base.can_reopen_access),
+            });
+        }
+        return employeeMap.get(name);
+    };
 
     (report.employees || []).forEach(employee => {
-        employeeMap.set(employee.full_name, {
+        ensureEmployeeBucket(employee.full_name, {
             user_id: employee.user_id || null,
-            full_name: employee.full_name,
-            categories: [],
-            discrepancyItems: [],
             completed: employee.completed_categories || 0,
             discrepancyCount: employee.discrepancy_items || 0,
             total_cost: Number(employee.total_cost || 0),
@@ -1427,55 +1450,76 @@ function buildEmployeeDetailGroups(report) {
     });
 
     categories.forEach(category => {
-        const owner = category.assigned_to || 'Без закрепления';
-        if (!employeeMap.has(owner)) {
-            employeeMap.set(owner, {
-                full_name: owner,
-                categories: [],
-                discrepancyItems: [],
-                completed: 0,
-                discrepancyCount: 0,
-                total_cost: 0,
-                total_retail: 0,
-                total_lost_profit: 0,
-                started_current_report: false,
-                started_at: null,
-            });
+        const categoryOwner = category.assigned_to || 'Без закрепления';
+        const completedSubcategories = Array.isArray(category.completed_subcategories) ? category.completed_subcategories : [];
+        const inProgressSubcategories = Array.isArray(category.in_progress_subcategories) ? category.in_progress_subcategories : [];
+        const problemItems = Array.isArray(category.problem_items) ? category.problem_items : [];
+        const ownerNames = new Set();
+
+        if (category.assigned_to && knownEmployeeNames.has(category.assigned_to)) {
+            ownerNames.add(category.assigned_to);
         }
 
-        const bucket = employeeMap.get(owner);
-        const completedSubcategories = (Array.isArray(category.completed_subcategories) ? category.completed_subcategories : []).filter(sub => {
-            if (!sub?.checked_by) return owner === 'Без закрепления';
-            return sub.checked_by === owner || (owner === 'Без закрепления' && !sub.checked_by);
+        completedSubcategories.forEach(sub => {
+            if (sub?.checked_by && knownEmployeeNames.has(sub.checked_by)) {
+                ownerNames.add(sub.checked_by);
+            }
         });
 
-        bucket.categories.push({
-            name: category.name,
-            status: category.status,
-            problemCount: (category.problem_items || []).length,
-            selected_on_cycle: Boolean(category.selected_on_cycle),
-            selected_subcategories: Array.isArray(category.selected_subcategories) ? category.selected_subcategories : [],
-            completed_subcategories: completedSubcategories,
+        inProgressSubcategories.forEach(sub => {
+            if (sub?.assigned_to && knownEmployeeNames.has(sub.assigned_to)) {
+                ownerNames.add(sub.assigned_to);
+            }
         });
 
-        (category.problem_items || []).forEach(item => {
-            const responsibleEmployee = item.checked_by || owner || 'Без закрепления';
-            if (!employeeMap.has(responsibleEmployee)) {
-                employeeMap.set(responsibleEmployee, {
-                    full_name: responsibleEmployee,
-                    categories: [],
-                    discrepancyItems: [],
-                    completed: 0,
-                    discrepancyCount: 0,
-                    total_cost: 0,
-                    total_retail: 0,
-                    total_lost_profit: 0,
-                    started_current_report: false,
-                    started_at: null,
-                });
+        problemItems.forEach(item => {
+            if (item?.checked_by && knownEmployeeNames.has(item.checked_by)) {
+                ownerNames.add(item.checked_by);
+            }
+        });
+
+        if (!ownerNames.size) {
+            ownerNames.add(categoryOwner);
+        }
+
+        ownerNames.forEach(owner => {
+            const bucket = ensureEmployeeBucket(owner);
+            const employeeCompletedSubcategories = completedSubcategories.filter(sub => {
+                if (!sub?.checked_by) return owner === 'Без закрепления';
+                return sub.checked_by === owner;
+            });
+            const employeeInProgressSubcategories = inProgressSubcategories.filter(sub => {
+                if (!sub?.assigned_to) return owner === 'Без закрепления';
+                return sub.assigned_to === owner;
+            });
+            const employeeProblemItems = problemItems.filter(item => {
+                const responsibleEmployee = item.checked_by || categoryOwner || 'Без закрепления';
+                return responsibleEmployee === owner;
+            });
+
+            const shouldIncludeCategory =
+                category.assigned_to === owner ||
+                employeeCompletedSubcategories.length > 0 ||
+                employeeInProgressSubcategories.length > 0 ||
+                employeeProblemItems.length > 0;
+
+            if (!shouldIncludeCategory) {
+                return;
             }
 
-            employeeMap.get(responsibleEmployee).discrepancyItems.push({
+            bucket.categories.push({
+                name: category.name,
+                status: category.status,
+                problemCount: employeeProblemItems.length,
+                in_progress_subcategories: employeeInProgressSubcategories,
+                completed_subcategories: employeeCompletedSubcategories,
+            });
+        });
+
+        problemItems.forEach(item => {
+            const responsibleEmployee = item.checked_by || categoryOwner || 'Без закрепления';
+            const bucket = ensureEmployeeBucket(responsibleEmployee);
+            bucket.discrepancyItems.push({
                 category_name: category.name,
                 subcategory_name: item.subcategory_name || '-',
                 name: item.name,
@@ -1509,7 +1553,12 @@ function filterEmployeeGroupsBySearch(employees) {
 
             const matchedCategories = (employee.categories || []).filter(category =>
                 normalizeSearch(category.name).includes(q) ||
-                (category.completed_subcategories || []).some(sub => normalizeSearch(sub.name).includes(q))
+                (category.completed_subcategories || []).some(sub =>
+                    normalizeSearch(sub.name).includes(q) || normalizeSearch(sub.checked_by || '').includes(q)
+                ) ||
+                (category.in_progress_subcategories || []).some(sub =>
+                    normalizeSearch(sub.name).includes(q) || normalizeSearch(sub.assigned_to || '').includes(q)
+                )
             );
 
             const matchedDiscrepancies = (employee.discrepancyItems || []).filter(item => {
@@ -1580,21 +1629,35 @@ function renderEmployeeDetails(report) {
         const moneyTotals = getEmployeeMoneyTotals(employee);
         const categoriesHtml = employee.categories.length
             ? `<div class="employee-detail-category-list">${employee.categories.map(category => {
-                const selectedScopeHtml = category.selected_on_cycle
-                    ? '<div class="employee-category-chips" style="margin-top:8px;"><span class="category-chip">Выбрана вся категория на цикл</span></div>'
-                    : (category.selected_subcategories || []).length
-                        ? `<div class="employee-category-chips" style="margin-top:8px;">${category.selected_subcategories.map(sub => `<span class="category-chip">${highlightMatch(sub, adminState.searchQuery)}</span>`).join('')}</div>`
-                        : '';
-                const completedSubcategoriesHtml = (category.completed_subcategories || []).length
-                    ? `<div class="employee-category-chips" style="margin-top:8px;">${category.completed_subcategories.map(sub => `<span class="category-chip">${highlightMatch(sub.name, adminState.searchQuery)}</span>`).join('')}</div>`
+                const inProgressSubcategories = Array.isArray(category.in_progress_subcategories) ? category.in_progress_subcategories : [];
+                const completedSubcategories = Array.isArray(category.completed_subcategories) ? category.completed_subcategories : [];
+                const inProgressSubcategoriesHtml = inProgressSubcategories.length
+                    ? `
+                        <div class="category-card" style="margin-top:10px;padding:12px 14px;box-shadow:none;border:1px solid rgba(148,163,184,.24);">
+                            <div class="muted-text" style="margin-bottom:8px;">Взято сотрудником в этой ревизии</div>
+                            <div class="employee-category-chips">${inProgressSubcategories.map(sub => `<span class="category-chip category-chip--warning">${highlightMatch(sub.name, adminState.searchQuery)}</span>`).join('')}</div>
+                        </div>
+                    `
+                    : '';
+                const completedSubcategoriesHtml = completedSubcategories.length
+                    ? `
+                        <div class="category-card category-card--success" style="margin-top:10px;padding:12px 14px;box-shadow:none;">
+                            <div class="success-text" style="margin-bottom:8px;font-weight:600;">Успешно пройденные в этой ревизии</div>
+                            <div class="employee-category-chips">${completedSubcategories.map(sub => `<span class="category-chip category-chip--success">${highlightMatch(sub.name, adminState.searchQuery)}</span>`).join('')}</div>
+                        </div>
+                    `
+                    : '';
+                const emptyStateHtml = !inProgressSubcategories.length && !completedSubcategories.length
+                    ? '<div class="muted-text" style="margin-top:10px;">По этой категории у сотрудника пока нет взятых или успешно завершённых подкатегорий.</div>'
                     : '';
                 return `
                 <div class="employee-detail-category-row">
                     <div>
                         <strong>${highlightMatch(category.name, adminState.searchQuery)}</strong>
                         <div class="muted-text">${category.problemCount ? `Проблемных товаров: ${category.problemCount}` : 'Без расхождений'}</div>
-                        ${selectedScopeHtml}
+                        ${inProgressSubcategoriesHtml}
                         ${completedSubcategoriesHtml}
+                        ${emptyStateHtml}
                     </div>
                     <span class="${getCategoryStatusClass(category.status, category)}">${getCategoryStatusLabel(category.status, category)}</span>
                 </div>
