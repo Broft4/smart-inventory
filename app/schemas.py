@@ -114,6 +114,15 @@ class ReopenEmployeeAccessResponse(BaseModel):
     message: str
 
 
+class StartReportRequest(BaseModel):
+    report_id: int
+
+
+class StartReportResponse(BaseModel):
+    success: bool
+    message: str
+
+
 class ItemModel(BaseModel):
     id: str
     name: str
@@ -175,7 +184,9 @@ class InventoryStructureResponse(BaseModel):
     cycle_started_at: str
     cycle_days_left: int
     report_status: str = 'created'
+    employee_started: bool = False
     employee_finished: bool = False
+    report_started: bool = False
     report_completed: bool = False
 
 
@@ -248,6 +259,7 @@ class CategoryResult(BaseModel):
     assigned_to: Optional[str] = None
     selected_on_cycle: bool = False
     selected_subcategories: list[str] = Field(default_factory=list)
+    remaining_subcategories: list[str] = Field(default_factory=list)
     completed_subcategories: list[CompletedSubcategoryInfo] = Field(default_factory=list)
     problem_items: list[DiscrepancyItem] = Field(default_factory=list)
 
@@ -261,6 +273,8 @@ class EmployeeReportSummary(BaseModel):
     total_cost: float = 0.0
     total_retail: float = 0.0
     total_lost_profit: float = 0.0
+    started_current_report: bool = False
+    started_at: Optional[str] = None
     finished_current_report: bool = False
     finished_at: Optional[str] = None
     can_reopen_access: bool = False

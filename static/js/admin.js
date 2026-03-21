@@ -89,8 +89,16 @@ function buildEmployeeRevisionStatus(employee, report) {
         };
     }
 
+    if (employee?.started_current_report) {
+        return {
+            label: employee.started_at ? `В ревизии с ${formatFinishedAt(employee.started_at)}` : 'Ревизия начата',
+            className: 'orange',
+            actionHtml: '',
+        };
+    }
+
     return {
-        label: canManage ? 'Доступ к ревизии открыт' : 'Статус только для просмотра',
+        label: canManage ? 'Ревизия не начата' : 'Статус только для просмотра',
         className: canManage ? 'grey' : 'orange',
         actionHtml: '',
     };
@@ -1410,6 +1418,8 @@ function buildEmployeeDetailGroups(report) {
             total_cost: Number(employee.total_cost || 0),
             total_retail: Number(employee.total_retail || 0),
             total_lost_profit: Number(employee.total_lost_profit || 0),
+            started_current_report: Boolean(employee.started_current_report),
+            started_at: employee.started_at || null,
             finished_current_report: Boolean(employee.finished_current_report),
             finished_at: employee.finished_at || null,
             can_reopen_access: Boolean(employee.can_reopen_access),
@@ -1428,6 +1438,8 @@ function buildEmployeeDetailGroups(report) {
                 total_cost: 0,
                 total_retail: 0,
                 total_lost_profit: 0,
+                started_current_report: false,
+                started_at: null,
             });
         }
 
@@ -1458,6 +1470,8 @@ function buildEmployeeDetailGroups(report) {
                     total_cost: 0,
                     total_retail: 0,
                     total_lost_profit: 0,
+                    started_current_report: false,
+                    started_at: null,
                 });
             }
 
@@ -1479,7 +1493,7 @@ function buildEmployeeDetailGroups(report) {
     });
 
     return [...employeeMap.values()]
-        .filter(employee => employee.categories.length || employee.discrepancyItems.length)
+        .filter(employee => employee.categories.length || employee.discrepancyItems.length || employee.started_current_report || employee.finished_current_report)
         .sort((a, b) => a.full_name.localeCompare(b.full_name, 'ru'));
 }
 
@@ -1790,12 +1804,13 @@ function renderCategories(report) {
         return;
     }
 
-    categoriesContainer.innerHTML = categories.map((cat, index) => {
+    categoriesContainer.innerHTML = categories.map((cat) => {
         const key = `${report.report_id || 'none'}:${cat.name}`;
         const isDiagnostic = isDiagnosticsCategoryName(cat.name);
-        const isOpen = adminState.expandedCategories.has(key) || (!isDiagnostic && index === 0);
+        const isOpen = adminState.expandedCategories.has(key);
         const problemItems = cat.problem_items || [];
         const selectedSubcategories = Array.isArray(cat.selected_subcategories) ? cat.selected_subcategories : [];
+        const remainingSubcategories = Array.isArray(cat.remaining_subcategories) ? cat.remaining_subcategories : [];
         const completedSubcategories = Array.isArray(cat.completed_subcategories) ? cat.completed_subcategories : [];
         const selectionText = cat.selected_on_cycle
             ? 'На цикл выбрана вся категория'
@@ -1830,13 +1845,16 @@ function renderCategories(report) {
                         <div class="category-card" style="margin-bottom:12px;padding:14px 16px;box-shadow:none;border:1px solid rgba(148,163,184,.24);">
                             <div class="muted-text" style="margin-bottom:8px;">Выбрано в текущем цикле</div>
                             ${cat.selected_on_cycle
-                                ? '<div class="employee-category-chips"><span class="category-chip">Выбрана вся категория</span></div>'
-                                : `<div class="employee-category-chips">${selectedSubcategories.map(sub => `<span class="category-chip">${highlightMatch(sub, adminState.searchQuery)}</span>`).join('')}</div>`}
+                                ? '<div class="employee-category-chips" style="margin-bottom:8px;"><span class="category-chip">Выбрана вся категория</span></div>'
+                                : ''}
+                            ${remainingSubcategories.length
+                                ? `<div class="employee-category-chips">${remainingSubcategories.map(sub => `<span class="category-chip category-chip--warning">${highlightMatch(sub, adminState.searchQuery)}</span>`).join('')}</div>`
+                                : '<div class="muted-text">На сегодня по выбранным подкатегориям всё выполнено.</div>'}
                         </div>
                     ` : ''}
                     ${completedSubcategories.length ? `
                         <div class="category-card category-card--success" style="margin-bottom:12px;padding:14px 16px;box-shadow:none;">
-                            <div class="success-text" style="margin-bottom:8px;font-weight:600;">Успешно пройденные подкатегории</div>
+                            <div class="success-text" style="margin-bottom:8px;font-weight:600;">Успешно пройденные подкатегории в этой ревизии</div>
                             <div class="employee-category-chips">
                                 ${completedSubcategories.map(sub => `<span class="category-chip category-chip--success">${highlightMatch(sub.name, adminState.searchQuery)}${sub.checked_by ? ` · ${highlightMatch(sub.checked_by, adminState.searchQuery)}` : ''}</span>`).join('')}
                             </div>

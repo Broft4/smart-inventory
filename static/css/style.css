@@ -1235,6 +1235,12 @@ body.modal-open {
     color: #166534;
 }
 
+.category-chip--warning {
+    background: #fef3c7;
+    border: 1px solid #fcd34d;
+    color: #92400e;
+}
+
 .success-text {
     color: #166534;
 }

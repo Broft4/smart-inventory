@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.moysklad import DEFAULT_CATEGORY_NAME, DEFAULT_SUBCATEGORY_NAME, ms_client
-from app.models import AdminLocationAccess, CategoryAssignment, CheckResult, LocationPoint, Report, ReportEmployeeCompletion, ReportTargetSnapshot, SelectionCycle, SelectionTarget, User, VerifyAttemptProgress
+from app.models import AdminLocationAccess, CategoryAssignment, CheckResult, LocationPoint, Report, ReportEmployeeCompletion, ReportEmployeeStart, ReportTargetSnapshot, SelectionCycle, SelectionTarget, User, VerifyAttemptProgress
 logger = logging.getLogger(__name__)
 
 
@@ -48,6 +48,7 @@ from app.schemas import (
     SaveCycleTargetsRequest,
     SaveCycleTargetsResponse,
     RoleEnum,
+    StartReportResponse,
     StatusEnum,
     StoreListResponse,
     UpdateLocationRequest,
@@ -338,7 +339,7 @@ def _format_moscow_datetime(dt: datetime | None) -> str:
 
 def _report_status_label(status: str) -> str:
     if status == 'created':
-        return 'Создана'
+        return 'Не начата'
     if status == 'completed':
         return 'Завершена'
     return 'В процессе'
@@ -418,6 +419,12 @@ def bootstrap_schema_and_admin(sync_conn) -> None:
         required = {'id', 'report_id', 'user_id', 'user_full_name_snapshot', 'finished_at'}
         if not required.issubset(cols):
             sync_conn.execute(text('DROP TABLE IF EXISTS report_employee_completions'))
+
+    if 'report_employee_starts' in tables:
+        cols = {c['name'] for c in inspector.get_columns('report_employee_starts')}
+        required = {'id', 'report_id', 'user_id', 'user_full_name_snapshot', 'started_at'}
+        if not required.issubset(cols):
+            sync_conn.execute(text('DROP TABLE IF EXISTS report_employee_starts'))
 
     if reset_reports:
         sync_conn.execute(text('DROP TABLE IF EXISTS check_results'))
@@ -1254,16 +1261,11 @@ async def _sync_report_status(report: Report, db: AsyncSession) -> None:
         report.status = 'completed'
         return
 
-    results_count = await db.scalar(
-        select(func.count()).select_from(CheckResult).where(
-            CheckResult.report_id == report.id,
-            CheckResult.category_name != DEFAULT_CATEGORY_NAME,
-            or_(CheckResult.subcategory_name.is_(None), CheckResult.subcategory_name != DEFAULT_SUBCATEGORY_NAME),
-        )
+    participant_user_ids = await _get_report_participant_user_ids(report.id, db)
+    completion_count = await db.scalar(
+        select(func.count()).select_from(ReportEmployeeCompletion).where(ReportEmployeeCompletion.report_id == report.id)
     )
-    completion_count = await db.scalar(select(func.count()).select_from(ReportEmployeeCompletion).where(ReportEmployeeCompletion.report_id == report.id))
-    active_employees = await _active_employee_users_for_location(report.location, db)
-    required_finish_count = len(active_employees)
+    required_finish_count = len(participant_user_ids)
     newer_report_exists = await db.scalar(
         select(func.count()).select_from(Report).where(
             Report.location == report.location,
@@ -1275,7 +1277,7 @@ async def _sync_report_status(report: Report, db: AsyncSession) -> None:
         report.status = 'completed'
     elif (newer_report_exists or 0) > 0:
         report.status = 'completed'
-    elif (results_count or 0) == 0 and (completion_count or 0) == 0:
+    elif not participant_user_ids:
         report.status = 'created'
     else:
         report.status = 'in_progress'
@@ -1821,6 +1823,59 @@ async def _load_report_employee_completions(report_id: int, db: AsyncSession) ->
     ).all()
 
 
+async def _load_report_employee_starts(report_id: int, db: AsyncSession) -> list[ReportEmployeeStart]:
+    return (
+        await db.scalars(
+            select(ReportEmployeeStart)
+            .where(ReportEmployeeStart.report_id == report_id)
+            .order_by(ReportEmployeeStart.started_at.asc(), ReportEmployeeStart.id.asc())
+        )
+    ).all()
+
+
+async def _is_employee_started_report(report_id: int, user_id: int, db: AsyncSession) -> bool:
+    started = await db.scalar(
+        select(ReportEmployeeStart)
+        .where(ReportEmployeeStart.report_id == report_id)
+        .where(ReportEmployeeStart.user_id == user_id)
+        .limit(1)
+    )
+    return started is not None
+
+
+async def _get_report_participant_user_ids(report_id: int, db: AsyncSession) -> set[int]:
+    started_ids = {
+        int(value)
+        for value in (
+            await db.scalars(
+                select(ReportEmployeeStart.user_id).where(ReportEmployeeStart.report_id == report_id)
+            )
+        ).all()
+        if value is not None
+    }
+    completion_ids = {
+        int(value)
+        for value in (
+            await db.scalars(
+                select(ReportEmployeeCompletion.user_id).where(ReportEmployeeCompletion.report_id == report_id)
+            )
+        ).all()
+        if value is not None
+    }
+    result_user_ids = {
+        int(value)
+        for value in (
+            await db.scalars(
+                select(CheckResult.checked_by_user_id)
+                .where(CheckResult.report_id == report_id)
+                .where(CheckResult.checked_by_user_id.is_not(None))
+            )
+        ).all()
+        if value is not None
+    }
+    return started_ids | completion_ids | result_user_ids
+
+
 def _format_completion_datetime(value: datetime | None) -> str | None:
     if not value:
         return None
@@ -1865,8 +1920,10 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
     ]
     targets = await _load_selection_targets(normalized, cycle.cycle_version, db)
     report_snapshots = await _bootstrap_report_target_snapshots(report, assignments, results, db)
+    employee_started = await _is_employee_started_report(report.id, user.id, db)
     employee_finished = await _is_employee_finished_report(report.id, user.id, db)
     await _sync_report_status(report, db)
+    report_started = report.status != 'created'
     report_completed = report.status == 'completed'
 
     category_assignments, subcategory_assignments, item_assignments = _category_assignments_map(assignments)
@@ -2100,7 +2157,9 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
         cycle_started_at=cycle.started_at.strftime('%d.%m.%Y'),
         cycle_days_left=days_left,
         report_status=report.status,
+        employee_started=employee_started,
         employee_finished=employee_finished,
+        report_started=report_started,
         report_completed=report_completed,
     )
 
@@ -2115,6 +2174,8 @@ async def assign_selection_to_user(report_id: int, category_id: str, target_type
     await _sync_report_status(report, db)
     if report.status == 'completed':
         raise HTTPException(status_code=409, detail='Ревизия по этой точке уже завершена на сегодня.')
+    if not await _is_employee_started_report(report.id, user.id, db):
+        raise HTTPException(status_code=409, detail='Сначала нажмите «Начать ревизию».')
     if await _is_employee_finished_report(report.id, user.id, db):
         raise HTTPException(status_code=409, detail='Вы уже завершили свою ревизию на сегодня. Продолжить работу нельзя.')
 
@@ -2444,6 +2505,8 @@ async def verify_item_or_category(data: VerifyRequest, db: AsyncSession, checked
     await _sync_report_status(report, db)
     if report.status == 'completed':
         raise HTTPException(status_code=409, detail='Ревизия по этой точке уже завершена на сегодня.')
+    if not await _is_employee_started_report(report.id, checked_by_user.id, db):
+        raise HTTPException(status_code=409, detail='Сначала нажмите «Начать ревизию».')
     if await _is_employee_finished_report(report.id, checked_by_user.id, db):
         raise HTTPException(status_code=409, detail='Вы уже завершили свою ревизию на сегодня. Продолжить работу нельзя.')
 
@@ -2560,6 +2623,39 @@ async def verify_item_or_category(data: VerifyRequest, db: AsyncSession, checked
     )
 
 
+async def start_report(report_id: int, db: AsyncSession, user: User) -> StartReportResponse:
+    report = await db.get(Report, report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail='Ревизия не найдена.')
+    if user.role != RoleEnum.EMPLOYEE.value or user.location != report.location:
+        raise HTTPException(status_code=403, detail='Можно начать только свою ревизию по назначенной точке.')
+
+    await _sync_report_status(report, db)
+    if report.status == 'completed':
+        return StartReportResponse(success=True, message='Ревизия по этой точке уже завершена на сегодня.')
+
+    existing = await db.scalar(
+        select(ReportEmployeeStart)
+        .where(ReportEmployeeStart.report_id == report.id)
+        .where(ReportEmployeeStart.user_id == user.id)
+        .limit(1)
+    )
+    if existing:
+        return StartReportResponse(success=True, message='Ревизия уже начата. Можно продолжать работу.')
+
+    db.add(ReportEmployeeStart(
+        report_id=report.id,
+        user_id=user.id,
+        user_full_name_snapshot=user.full_name,
+        started_at=datetime.utcnow(),
+    ))
+    await db.flush()
+    await _sync_report_status(report, db)
+    await db.commit()
+    _invalidate_runtime_inventory_cache(report.location)
+    return StartReportResponse(success=True, message='Ревизия начата. Можно приступать к работе.')
+
+
 async def finish_report(report_id: int, db: AsyncSession, user: User) -> tuple[bool, str]:
     report = await db.get(Report, report_id)
     if not report:
@@ -2570,6 +2666,8 @@ async def finish_report(report_id: int, db: AsyncSession, user: User) -> tuple[b
     await _sync_report_status(report, db)
     if report.status == 'completed':
         return True, 'Ревизия по этой точке уже завершена на сегодня.'
+    if not await _is_employee_started_report(report.id, user.id, db):
+        raise HTTPException(status_code=409, detail='Сначала нажмите «Начать ревизию».')
 
     existing = await db.scalar(
         select(ReportEmployeeCompletion)
@@ -2593,10 +2691,6 @@ async def finish_report(report_id: int, db: AsyncSession, user: User) -> tuple[b
 
     if report.status == 'completed':
         return True, 'Ревизия завершена.'
-
-    active_employees = await _active_employee_users_for_location(report.location, db)
-    completion_count = await db.scalar(select(func.count()).select_from(ReportEmployeeCompletion).where(ReportEmployeeCompletion.report_id == report.id))
-    remaining = max(0, len(active_employees) - int(completion_count or 0))
     return True, f'Ваша ревизия завершена.'
 
 
@@ -2817,9 +2911,18 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         ]
 
     discrepancy_financials = await _load_discrepancy_financials(normalized, results)
+    participant_user_ids = await _get_report_participant_user_ids(report.id, db) if report_type == DAILY_REPORT_TYPE else set()
+    if participant_user_ids and report_type == DAILY_REPORT_TYPE:
+        report_snapshots = [
+            row for row in report_snapshots
+            if row.assigned_user_id_snapshot is None or row.assigned_user_id_snapshot in participant_user_ids
+        ]
     historical_category_ids, historical_subcategory_ids, historical_item_ids = _report_history_target_maps(report_snapshots, results)
     active_employees = await _active_employee_users_for_location(report.location, db)
+    active_employee_by_id = {employee.id: employee for employee in active_employees}
+    report_employees = [active_employee_by_id[user_id] for user_id in sorted(participant_user_ids) if user_id in active_employee_by_id]
     completions = await _load_report_employee_completions(report.id, db)
+    starts = await _load_report_employee_starts(report.id, db)
     can_manage_employee_completion = (report.report_type or DAILY_REPORT_TYPE) == DAILY_REPORT_TYPE and report.report_date == get_moscow_today()
 
     rows_by_category_target: dict[str, dict[str, CheckResult]] = defaultdict(dict)
@@ -2827,6 +2930,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         rows_by_category_target[row.category_id][row.target_id] = row
 
     completion_by_user_id = {completion.user_id: completion for completion in completions}
+    start_by_user_id = {start.user_id: start for start in starts}
     active_employee_by_name = {employee.full_name: employee for employee in active_employees}
     grouped_problem_items: dict[str, list[DiscrepancyItem]] = defaultdict(list)
     employee_bucket: dict[str, EmployeeReportSummary] = {}
@@ -2838,6 +2942,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         active_employee = active_employee_by_name.get(full_name)
         resolved_user_id = user_id or (active_employee.id if active_employee else None)
         completion = completion_by_user_id.get(resolved_user_id) if resolved_user_id else None
+        start = start_by_user_id.get(resolved_user_id) if resolved_user_id else None
         if summary is None:
             summary = EmployeeReportSummary(
                 user_id=resolved_user_id,
@@ -2845,6 +2950,8 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
                 categories=[],
                 completed_categories=0,
                 discrepancy_items=0,
+                started_current_report=start is not None,
+                started_at=_format_completion_datetime(start.started_at) if start else None,
                 finished_current_report=completion is not None,
                 finished_at=_format_completion_datetime(completion.finished_at) if completion else None,
                 can_reopen_access=bool(can_manage_employee_completion and completion is not None and resolved_user_id),
@@ -2854,13 +2961,16 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
 
         if summary.user_id is None and resolved_user_id is not None:
             summary.user_id = resolved_user_id
+        if start is not None:
+            summary.started_current_report = True
+            summary.started_at = _format_completion_datetime(start.started_at)
         if completion is not None:
             summary.finished_current_report = True
             summary.finished_at = _format_completion_datetime(completion.finished_at)
         summary.can_reopen_access = bool(can_manage_employee_completion and summary.finished_current_report and summary.user_id)
         return summary
 
-    for employee in active_employees:
+    for employee in report_employees:
         ensure_employee_bucket(employee.full_name, employee.id)
 
     for row in results:
@@ -2941,6 +3051,18 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
             for sub in raw_category['subcategories']
             if sub['id'] in selected_subcategory_ids.get(raw_category['id'], set())
         ])
+        if raw_category['id'] in selected_category_ids:
+            cycle_scope_subcategories = [
+                sub['name']
+                for sub in raw_category['subcategories']
+                if not _is_categoryless_subcategory(raw_category, sub)
+            ]
+        else:
+            cycle_scope_subcategories = [
+                sub['name']
+                for sub in raw_category['subcategories']
+                if sub['id'] in selected_subcategory_ids.get(raw_category['id'], set())
+            ]
         completed_subcategories: list[CompletedSubcategoryInfo] = []
         for raw_sub in raw_category['subcategories']:
             sub_completed, sub_status = _subcategory_is_complete(raw_sub, result_map)
@@ -2960,6 +3082,11 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
                 status=sub_status,
             ))
         completed_subcategories.sort(key=lambda item: item.name.lower())
+        completed_subcategory_names = {item.name for item in completed_subcategories}
+        remaining_subcategories = sorted(
+            [name for name in cycle_scope_subcategories if name not in completed_subcategory_names],
+            key=str.lower,
+        )
 
         categories.append(CategoryResult(
             name=raw_category['name'],
@@ -2967,6 +3094,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
             assigned_to=_category_snapshot_assignment_label(raw_category['id'], report_snapshots),
             selected_on_cycle=raw_category['id'] in selected_category_ids,
             selected_subcategories=selected_sub_names,
+            remaining_subcategories=remaining_subcategories,
             completed_subcategories=completed_subcategories,
             problem_items=grouped_problem_items.get(raw_category['name'], []),
         ))

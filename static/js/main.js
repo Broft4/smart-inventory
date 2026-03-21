@@ -65,6 +65,7 @@ function getRevisionStorageKey(reportDate) {
 
 function getEmployeeRevisionState(reportDate = inventoryState?.report_date) {
     if (inventoryState?.employee_finished || inventoryState?.report_completed) return 'finished';
+    if (inventoryState?.report_id) return inventoryState?.employee_started ? 'started' : 'idle';
     if (!reportDate) return 'idle';
     return localStorage.getItem(getRevisionStorageKey(reportDate)) || 'idle';
 }
@@ -114,7 +115,9 @@ function renderEmployeeRevisionControls() {
         hint.textContent = 'Кнопка «Завершить ревизию» фиксирует завершение на сервере и блокирует продолжение работы до следующего дня.';
     } else if (!active) {
         banner.className = 'employee-revision-banner idle';
-        banner.innerHTML = '<strong>Ревизия ещё не начата.</strong> Нажмите «Начать ревизию», чтобы открыть категории и приступить к работе.';
+        banner.innerHTML = inventoryState?.report_started
+            ? '<strong>Вы ещё не начали свою ревизию.</strong> Нажмите «Начать ревизию», чтобы открыть категории и приступить к работе.'
+            : '<strong>Ревизия ещё не начата.</strong> Нажмите «Начать ревизию», чтобы открыть категории и приступить к работе.';
         hint.textContent = 'После завершения ревизии на текущий день продолжить её уже будет нельзя.';
     } else {
         banner.className = 'employee-revision-banner hidden';
@@ -128,6 +131,10 @@ function ensureRevisionStateForCurrentDay() {
     const key = getRevisionStorageKey(inventoryState.report_date);
     if (inventoryState?.employee_finished || inventoryState?.report_completed) {
         localStorage.setItem(key, 'finished');
+        return;
+    }
+    if (inventoryState?.employee_started) {
+        localStorage.setItem(key, 'started');
         return;
     }
     if (!localStorage.getItem(key)) {
@@ -1106,10 +1113,26 @@ async function logout() {
 document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('logout-btn')?.addEventListener('click', logout);
     document.getElementById('refresh-btn')?.addEventListener('click', loadInventory);
-    document.getElementById('start-revision-btn')?.addEventListener('click', () => {
-        if (inventoryState?.employee_finished || inventoryState?.report_completed) return;
-        setEmployeeRevisionState('started');
-        renderEmployeeRevisionControls();
+    document.getElementById('start-revision-btn')?.addEventListener('click', async () => {
+        if (!inventoryState?.report_id || inventoryState?.employee_finished || inventoryState?.report_completed) return;
+        try {
+            const response = await fetch('/start-report', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ report_id: inventoryState.report_id }),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || data.success === false) {
+                throw new Error(data.detail || data.message || 'Не удалось начать ревизию.');
+            }
+            inventoryState.employee_started = true;
+            inventoryState.report_started = true;
+            setEmployeeRevisionState('started');
+            renderEmployeeRevisionControls();
+            await loadInventory({ forceReload: true });
+        } catch (error) {
+            alert(error.message || 'Не удалось начать ревизию.');
+        }
     });
     document.getElementById('finish-revision-btn')?.addEventListener('click', async () => {
         if (!inventoryState?.report_id) return;

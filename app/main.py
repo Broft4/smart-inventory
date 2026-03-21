@@ -47,6 +47,7 @@ from app.logic import (
     list_moysklad_stores_by_token,
     list_users,
     save_cycle_targets,
+    start_report,
     update_location_point,
     update_user,
     user_to_schema,
@@ -75,6 +76,8 @@ from app.schemas import (
     ReportHistoryResponse,
     SaveCycleTargetsRequest,
     SaveCycleTargetsResponse,
+    StartReportRequest,
+    StartReportResponse,
     StoreListResponse,
     UpdateLocationRequest,
     UpdateLocationResponse,
@@ -138,7 +141,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260321-admin-reopen-employee-access'
+templates.env.globals['asset_version'] = '20260321-started-participants-and-admin-categories'
 
 
 @app.middleware('http')
@@ -434,6 +437,11 @@ async def verify_count(request: Request, req: VerifyRequest, user: User = Depend
 async def complete_report(req: FinishReportRequest, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
     success, message = await finish_report(req.report_id, db, user)
     return FinishReportResponse(success=success, message=message)
+
+
+@app.post('/start-report', response_model=StartReportResponse)
+async def begin_report(req: StartReportRequest, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
+    return await start_report(req.report_id, db, user)
 
 
 @app.get('/api/reports', response_model=ReportHistoryResponse)
