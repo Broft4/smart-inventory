@@ -48,6 +48,7 @@ from app.logic import (
     list_users,
     save_cycle_targets,
     start_report,
+    update_discrepancy_actual_qty,
     update_location_point,
     update_user,
     user_to_schema,
@@ -79,6 +80,8 @@ from app.schemas import (
     StartReportRequest,
     StartReportResponse,
     StoreListResponse,
+    UpdateDiscrepancyRequest,
+    UpdateDiscrepancyResponse,
     UpdateLocationRequest,
     UpdateLocationResponse,
     UserActionResponse,
@@ -141,7 +144,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260321-admin-detail-yellow-success-fix'
+templates.env.globals['asset_version'] = '20260321-unified-admin-discrepancy-edit'
 
 
 @app.middleware('http')
@@ -508,6 +511,16 @@ async def api_get_report(request: Request, location: str | None = None, report_i
 @app.delete('/api/report/{report_id}', response_model=DeleteResponse)
 async def api_delete_report(report_id: int, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
     return await delete_report(report_id, db, current_user=admin)
+
+
+@app.patch('/api/report/discrepancy/{check_result_id}', response_model=UpdateDiscrepancyResponse)
+async def api_update_discrepancy(
+    check_result_id: int,
+    payload: UpdateDiscrepancyRequest,
+    admin: User = Depends(require_admin_or_superadmin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await update_discrepancy_actual_qty(check_result_id, payload, db, current_user=admin)
 
 
 @app.post('/api/report/{report_id}/reopen-employee-access', response_model=ReopenEmployeeAccessResponse)

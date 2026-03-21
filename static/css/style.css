@@ -1254,3 +1254,59 @@ body.modal-open {
 #close-cycle-targets-modal-btn:hover {
     background: #bb2d3b;
 }
+
+.actions-col {
+    width: 52px;
+}
+
+.actions-cell {
+    text-align: center;
+    vertical-align: middle;
+}
+
+.icon-action-btn {
+    width: 34px;
+    height: 34px;
+    border: 1px solid #dbe4f0;
+    background: #f8fbff;
+    border-radius: 10px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    line-height: 1;
+    transition: transform .12s ease, box-shadow .12s ease, background .12s ease;
+}
+
+.icon-action-btn:hover {
+    background: #eef4ff;
+    box-shadow: 0 8px 18px rgba(31, 42, 55, 0.10);
+    transform: translateY(-1px);
+}
+
+.icon-action-btn:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 2px;
+}
+
+.discrepancy-edit-modal-card {
+    width: min(560px, 100%);
+}
+
+.discrepancy-edit-summary {
+    margin-bottom: 14px;
+    padding: 12px 14px;
+    border: 1px solid #e3e8f0;
+    border-radius: 12px;
+    background: #f8fafc;
+}
+
+.discrepancy-edit-summary strong {
+    display: block;
+    margin-bottom: 6px;
+}
+
+.message.success-text {
+    color: #137333;
+}

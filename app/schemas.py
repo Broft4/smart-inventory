@@ -233,7 +233,23 @@ class FinishReportResponse(BaseModel):
     message: str
 
 
+class UpdateDiscrepancyRequest(BaseModel):
+    actual_quantity: float = Field(..., ge=0)
+    password: str = Field(..., min_length=1, max_length=255)
+
+
+class UpdateDiscrepancyResponse(BaseModel):
+    success: bool
+    message: str
+    check_result_id: int
+    actual_quantity: float
+    diff: float
+    status: StatusEnum
+
+
 class DiscrepancyItem(BaseModel):
+    check_result_id: Optional[int] = None
+    category_name: Optional[str] = None
     name: str
     expected: float
     actual: float
