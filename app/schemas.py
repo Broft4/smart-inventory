@@ -253,6 +253,11 @@ class CompletedSubcategoryInfo(BaseModel):
     status: StatusEnum = StatusEnum.GREEN
 
 
+class InProgressSubcategoryInfo(BaseModel):
+    name: str
+    assigned_to: Optional[str] = None
+
+
 class CategoryResult(BaseModel):
     name: str
     status: StatusEnum
@@ -260,6 +265,7 @@ class CategoryResult(BaseModel):
     selected_on_cycle: bool = False
     selected_subcategories: list[str] = Field(default_factory=list)
     remaining_subcategories: list[str] = Field(default_factory=list)
+    in_progress_subcategories: list[InProgressSubcategoryInfo] = Field(default_factory=list)
     completed_subcategories: list[CompletedSubcategoryInfo] = Field(default_factory=list)
     problem_items: list[DiscrepancyItem] = Field(default_factory=list)
 

@@ -35,6 +35,7 @@ from app.schemas import (
     DeleteResponse,
     DiscrepancyItem,
     CompletedSubcategoryInfo,
+    InProgressSubcategoryInfo,
     EmployeeReportSummary,
     InventoryStructureResponse,
     ItemModel,
@@ -2784,23 +2785,64 @@ def _category_assignment_label(category_id: str, report_assignments: list[Catego
     return 'Несколько сотрудников'
 
 
-def _category_snapshot_assignment_label(category_id: str, report_snapshots: list[ReportTargetSnapshot]) -> str | None:
-    category_level = [
-        row for row in report_snapshots
-        if row.category_id == category_id and row.target_type == 'category' and row.assigned_user_name_snapshot
-    ]
-    if category_level:
-        return category_level[0].assigned_user_name_snapshot
-    owners = sorted({
-        row.assigned_user_name_snapshot
-        for row in report_snapshots
-        if row.category_id == category_id and row.assigned_user_name_snapshot
-    })
+def _owner_label(owner_names: set[str]) -> str | None:
+    owners = sorted({name for name in owner_names if name}, key=str.lower)
     if not owners:
         return None
     if len(owners) == 1:
         return owners[0]
     return 'Несколько сотрудников'
+
+
+def _category_snapshot_assignment_label(category_id: str, report_snapshots: list[ReportTargetSnapshot]) -> str | None:
+    category_level = {
+        row.assigned_user_name_snapshot
+        for row in report_snapshots
+        if row.category_id == category_id and row.target_type == 'category' and row.assigned_user_name_snapshot
+    }
+    if category_level:
+        return _owner_label(category_level)
+    owners = {
+        row.assigned_user_name_snapshot
+        for row in report_snapshots
+        if row.category_id == category_id and row.assigned_user_name_snapshot
+    }
+    return _owner_label(owners)
+
+
+def _subcategory_snapshot_assignment_label(category_id: str, subcategory_id: str, report_snapshots: list[ReportTargetSnapshot]) -> str | None:
+    category_level = {
+        row.assigned_user_name_snapshot
+        for row in report_snapshots
+        if row.category_id == category_id and row.target_type == 'category' and row.assigned_user_name_snapshot
+    }
+    if category_level:
+        return _owner_label(category_level)
+
+    subcategory_level = {
+        row.assigned_user_name_snapshot
+        for row in report_snapshots
+        if row.category_id == category_id and row.subcategory_id == subcategory_id and row.target_type == 'subcategory' and row.assigned_user_name_snapshot
+    }
+    if subcategory_level:
+        return _owner_label(subcategory_level)
+
+    item_level = {
+        row.assigned_user_name_snapshot
+        for row in report_snapshots
+        if row.category_id == category_id and row.subcategory_id == subcategory_id and row.target_type == 'item' and row.assigned_user_name_snapshot
+    }
+    return _owner_label(item_level)
+
+
+def _subcategory_taken_in_report(category_id: str, subcategory_id: str, report_snapshots: list[ReportTargetSnapshot]) -> bool:
+    return any(
+        row.category_id == category_id and (
+            row.target_type == 'category'
+            or (row.subcategory_id == subcategory_id and row.target_type in {'subcategory', 'item'})
+        )
+        for row in report_snapshots
+    )
 
 
 def _build_report_numbers(reports: list[Report]) -> dict[int, int]:
@@ -3051,42 +3093,42 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
             for sub in raw_category['subcategories']
             if sub['id'] in selected_subcategory_ids.get(raw_category['id'], set())
         ])
-        if raw_category['id'] in selected_category_ids:
-            cycle_scope_subcategories = [
-                sub['name']
-                for sub in raw_category['subcategories']
-                if not _is_categoryless_subcategory(raw_category, sub)
-            ]
-        else:
-            cycle_scope_subcategories = [
-                sub['name']
-                for sub in raw_category['subcategories']
-                if sub['id'] in selected_subcategory_ids.get(raw_category['id'], set())
-            ]
         completed_subcategories: list[CompletedSubcategoryInfo] = []
+        in_progress_subcategories: list[InProgressSubcategoryInfo] = []
         for raw_sub in raw_category['subcategories']:
-            sub_completed, sub_status = _subcategory_is_complete(raw_sub, result_map)
-            if not sub_completed or sub_status != StatusEnum.GREEN:
+            if _is_categoryless_subcategory(raw_category, raw_sub):
                 continue
-            sub_row = result_map.get(raw_sub['id'])
-            checked_by = sub_row.checked_by_name_snapshot if sub_row else None
-            if not checked_by:
-                item_rows = [result_map.get(item['id']) for item in raw_sub['items']]
-                item_rows = [row for row in item_rows if row and row.checked_by_name_snapshot]
-                if item_rows:
-                    owners = sorted({row.checked_by_name_snapshot for row in item_rows if row.checked_by_name_snapshot})
-                    checked_by = owners[0] if len(owners) == 1 else 'Несколько сотрудников'
-            completed_subcategories.append(CompletedSubcategoryInfo(
+
+            sub_completed, sub_status = _subcategory_is_complete(raw_sub, result_map)
+            sub_taken_in_report = _subcategory_taken_in_report(raw_category['id'], raw_sub['id'], report_snapshots)
+
+            if sub_completed and sub_status == StatusEnum.GREEN:
+                sub_row = result_map.get(raw_sub['id'])
+                checked_by = sub_row.checked_by_name_snapshot if sub_row else None
+                if not checked_by:
+                    item_rows = [result_map.get(item['id']) for item in raw_sub['items']]
+                    item_rows = [row for row in item_rows if row and row.checked_by_name_snapshot]
+                    if item_rows:
+                        owners = {row.checked_by_name_snapshot for row in item_rows if row.checked_by_name_snapshot}
+                        checked_by = _owner_label(owners)
+                completed_subcategories.append(CompletedSubcategoryInfo(
+                    name=raw_sub['name'],
+                    checked_by=checked_by,
+                    status=sub_status,
+                ))
+                continue
+
+            if not sub_taken_in_report:
+                continue
+
+            in_progress_subcategories.append(InProgressSubcategoryInfo(
                 name=raw_sub['name'],
-                checked_by=checked_by,
-                status=sub_status,
+                assigned_to=_subcategory_snapshot_assignment_label(raw_category['id'], raw_sub['id'], report_snapshots),
             ))
+
         completed_subcategories.sort(key=lambda item: item.name.lower())
-        completed_subcategory_names = {item.name for item in completed_subcategories}
-        remaining_subcategories = sorted(
-            [name for name in cycle_scope_subcategories if name not in completed_subcategory_names],
-            key=str.lower,
-        )
+        in_progress_subcategories.sort(key=lambda item: item.name.lower())
+        remaining_subcategories = [item.name for item in in_progress_subcategories]
 
         categories.append(CategoryResult(
             name=raw_category['name'],
@@ -3095,6 +3137,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
             selected_on_cycle=raw_category['id'] in selected_category_ids,
             selected_subcategories=selected_sub_names,
             remaining_subcategories=remaining_subcategories,
+            in_progress_subcategories=in_progress_subcategories,
             completed_subcategories=completed_subcategories,
             problem_items=grouped_problem_items.get(raw_category['name'], []),
         ))

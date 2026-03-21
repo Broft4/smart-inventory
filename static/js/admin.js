@@ -1810,6 +1810,7 @@ function renderCategories(report) {
         const isOpen = adminState.expandedCategories.has(key);
         const problemItems = cat.problem_items || [];
         const selectedSubcategories = Array.isArray(cat.selected_subcategories) ? cat.selected_subcategories : [];
+        const inProgressSubcategories = Array.isArray(cat.in_progress_subcategories) ? cat.in_progress_subcategories : [];
         const remainingSubcategories = Array.isArray(cat.remaining_subcategories) ? cat.remaining_subcategories : [];
         const completedSubcategories = Array.isArray(cat.completed_subcategories) ? cat.completed_subcategories : [];
         const selectionText = cat.selected_on_cycle
@@ -1841,15 +1842,12 @@ function renderCategories(report) {
                     </div>
                 </button>
                 <div class="admin-category-body ${isOpen ? '' : 'hidden'}">
-                    ${(!isDiagnostic && (cat.selected_on_cycle || selectedSubcategories.length)) ? `
+                    ${(!isDiagnostic && (cat.selected_on_cycle || selectedSubcategories.length || inProgressSubcategories.length || completedSubcategories.length || remainingSubcategories.length)) ? `
                         <div class="category-card" style="margin-bottom:12px;padding:14px 16px;box-shadow:none;border:1px solid rgba(148,163,184,.24);">
-                            <div class="muted-text" style="margin-bottom:8px;">Выбрано в текущем цикле</div>
-                            ${cat.selected_on_cycle
-                                ? '<div class="employee-category-chips" style="margin-bottom:8px;"><span class="category-chip">Выбрана вся категория</span></div>'
-                                : ''}
-                            ${remainingSubcategories.length
-                                ? `<div class="employee-category-chips">${remainingSubcategories.map(sub => `<span class="category-chip category-chip--warning">${highlightMatch(sub, adminState.searchQuery)}</span>`).join('')}</div>`
-                                : '<div class="muted-text">На сегодня по выбранным подкатегориям всё выполнено.</div>'}
+                            <div class="muted-text" style="margin-bottom:8px;">Взято сотрудниками в этой ревизии</div>
+                            ${inProgressSubcategories.length
+                                ? `<div class="employee-category-chips">${inProgressSubcategories.map(sub => `<span class="category-chip category-chip--warning">${highlightMatch(sub.name, adminState.searchQuery)}${sub.assigned_to ? ` · ${highlightMatch(sub.assigned_to, adminState.searchQuery)}` : ''}</span>`).join('')}</div>`
+                                : '<div class="muted-text">В этой ревизии по этой категории ещё нет незавершённых взятых подкатегорий.</div>'}
                         </div>
                     ` : ''}
                     ${completedSubcategories.length ? `
