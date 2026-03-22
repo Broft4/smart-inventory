@@ -1,0 +1,72 @@
+2026-03-22 15:46:19,783 INFO [app.moysklad] Inventory cache miss. Начинаем полную сборку. location=Дмитров ttl_seconds=60
+2026-03-22 15:46:20,131 INFO [app.main] [req:3d63710c7b] GET /api/report start user_id=8 location=Дмитров report_id=12
+2026-03-22 15:46:20,149 INFO [app.logic] Загрузка inventory началась. location=Дмитров source=moysklad
+2026-03-22 15:46:20,262 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/productfolder?limit=1000&offset=0 "HTTP/1.1 200 OK"
+2026-03-22 15:46:20,431 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/productfolder?limit=1000&offset=1000 "HTTP/1.1 200 OK"
+2026-03-22 15:46:20,433 INFO [app.moysklad] Получено 1206 записей из entity/productfolder
+2026-03-22 15:46:20,440 INFO [app.moysklad] Закешировано 1206 папок МоегоСклада
+2026-03-22 15:46:20,854 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=0 "HTTP/1.1 200 OK"
+2026-03-22 15:46:21,743 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=1000 "HTTP/1.1 200 OK"
+2026-03-22 15:46:22,708 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=2000 "HTTP/1.1 200 OK"
+2026-03-22 15:46:23,659 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=3000 "HTTP/1.1 200 OK"
+2026-03-22 15:46:24,623 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=4000 "HTTP/1.1 200 OK"
+2026-03-22 15:46:25,607 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=5000 "HTTP/1.1 200 OK"
+2026-03-22 15:46:26,598 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=6000 "HTTP/1.1 200 OK"
+2026-03-22 15:46:27,566 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=7000 "HTTP/1.1 200 OK"
+2026-03-22 15:46:28,698 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=8000 "HTTP/1.1 200 OK"
+2026-03-22 15:46:29,732 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=9000 "HTTP/1.1 200 OK"
+2026-03-22 15:46:30,823 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=10000 "HTTP/1.1 200 OK"
+2026-03-22 15:46:31,747 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/report/stock/all?filter=stockMode%3Dall%3BquantityMode%3Dall%3Bstore%3Dhttps%3A%2F%2Fapi.moysklad.ru%2Fapi%2Fremap%2F1.2%2Fentity%2Fstore%2F75cd61fe-dbcd-11ee-0a80-03d10019839a&limit=1000&offset=11000 "HTTP/1.1 200 OK"
+2026-03-22 15:46:31,806 INFO [app.moysklad] Получено 11680 записей из report/stock/all
+2026-03-22 15:46:32,339 INFO [app.moysklad] Для точки Дмитров собрано 18 категорий и 11680 товаров
+2026-03-22 15:46:32,355 INFO [app.moysklad] Inventory сохранён в кеш. location=Дмитров categories=18 duration_ms=12562.0 ttl_seconds=60
+2026-03-22 15:46:32,430 INFO [app.logic] Загрузка inventory завершена. location=Дмитров source=moysklad categories=16 duration_ms=12281.0
+2026-03-22 15:46:32,478 INFO [app.main] [req:3d63710c7b] GET /api/report ok user_id=8 location=Дмитров report_id=12 categories=4 employees=1 duration_ms=12343.0
+2026-03-22 15:46:53,794 INFO [app.main] [req:f5a4f5d657] GET /api/report start user_id=8 location=Дмитров report_id=10
+2026-03-22 15:46:53,809 INFO [app.logic] Загрузка inventory началась. location=Дмитров source=moysklad
+2026-03-22 15:46:53,809 INFO [app.logic] Загрузка inventory завершена. location=Дмитров source=moysklad categories=16 duration_ms=0.0
+2026-03-22 15:46:53,842 INFO [app.main] [req:f5a4f5d657] GET /api/report ok user_id=8 location=Дмитров report_id=10 categories=4 employees=0 duration_ms=62.0
+2026-03-22 15:47:03,340 INFO [app.main] [req:a2f40e517e] GET /api/report start user_id=8 location=Дмитров report_id=12
+2026-03-22 15:47:03,357 INFO [app.logic] Загрузка inventory началась. location=Дмитров source=moysklad
+2026-03-22 15:47:03,357 INFO [app.logic] Загрузка inventory завершена. location=Дмитров source=moysklad categories=16 duration_ms=0.0
+2026-03-22 15:47:03,394 INFO [app.main] [req:a2f40e517e] GET /api/report ok user_id=8 location=Дмитров report_id=12 categories=4 employees=1 duration_ms=62.0
+2026-03-22 15:47:10,793 INFO [app.main] [req:8b4eca5f67] GET /api/report start user_id=8 location=Дмитров report_id=7
+2026-03-22 15:47:10,809 INFO [app.logic] Загрузка inventory началась. location=Дмитров source=moysklad
+2026-03-22 15:47:10,809 INFO [app.logic] Загрузка inventory завершена. location=Дмитров source=moysklad categories=16 duration_ms=0.0
+2026-03-22 15:47:10,899 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/10383 "HTTP/1.1 404 Not Found"
+2026-03-22 15:47:10,901 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/10383 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/10383'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-22 15:47:10,901 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 10383
+2026-03-22 15:47:11,044 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D10383&limit=100 "HTTP/1.1 200 OK"
+2026-03-22 15:47:11,044 INFO [app.moysklad] Себестоимость для 10383 (Дмитров) получена через поиск по коду 10383
+2026-03-22 15:47:11,067 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/10418 "HTTP/1.1 404 Not Found"
+2026-03-22 15:47:11,068 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/10418 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/10418'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-22 15:47:11,068 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 10418
+2026-03-22 15:47:11,068 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment/10382 "HTTP/1.1 404 Not Found"
+2026-03-22 15:47:11,076 ERROR [app.moysklad] HTTP-ошибка МойСклад 404 для https://api.moysklad.ru/api/remap/1.2/entity/assortment/10382 на попытке 1/4.
+Traceback (most recent call last):
+  File "C:\универ\smart_inventory\app\moysklad.py", line 169, in _request_json
+    response.raise_for_status()
+  File "C:\универ\smart_inventory\.venv\lib\site-packages\httpx\_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.moysklad.ru/api/remap/1.2/entity/assortment/10382'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2026-03-22 15:47:11,076 WARNING [app.moysklad] Не удалось точечно получить карточку ассортимента для 10382
+2026-03-22 15:47:11,199 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D10418&limit=100 "HTTP/1.1 200 OK"
+2026-03-22 15:47:11,199 INFO [app.moysklad] Себестоимость для 10418 (Дмитров) получена через поиск по коду 10418
+2026-03-22 15:47:11,330 INFO [httpx] HTTP Request: GET https://api.moysklad.ru/api/remap/1.2/entity/assortment?filter=code%3D10382&limit=100 "HTTP/1.1 200 OK"
+2026-03-22 15:47:11,333 INFO [app.moysklad] Себестоимость для 10382 (Дмитров) получена через поиск по коду 10382
+2026-03-22 15:47:11,352 INFO [app.main] [req:8b4eca5f67] GET /api/report ok user_id=8 location=Дмитров report_id=7 categories=4 employees=1 duration_ms=562.0

@@ -2029,10 +2029,13 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
         subcategories: list[SubcategoryModel] = []
 
         selected_sub_ids = _subcategories_user_can_work(raw_category, category_assignment, sub_assignments, user.id)
+        first_incomplete_selected: str | None = None
         sub_states: dict[str, tuple[bool, StatusEnum]] = {}
         for raw_sub in raw_category['subcategories']:
             is_completed, status = _subcategory_is_complete(raw_sub, category_results)
             sub_states[raw_sub['id']] = (is_completed, status)
+            if raw_sub['id'] in selected_sub_ids and not is_completed and first_incomplete_selected is None:
+                first_incomplete_selected = raw_sub['id']
 
         for raw_sub in raw_category['subcategories']:
             diagnostic_sub = category_is_diagnostic or raw_sub['name'] == DEFAULT_SUBCATEGORY_NAME
@@ -2081,9 +2084,14 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
             is_locked = True
             is_expanded = False
             if raw_sub['id'] in selected_sub_ids:
-                is_locked = False
+                if first_incomplete_selected is None:
+                    is_locked = False
+                else:
+                    is_locked = raw_sub['id'] != first_incomplete_selected and not is_completed
+                    is_expanded = raw_sub['id'] == first_incomplete_selected and not is_completed
                 if status == StatusEnum.ORANGE:
                     is_expanded = True
+                    is_locked = False
 
             sub_owner_names = {a.user_full_name_snapshot for a in sub_item_assignments.values() if a.user_full_name_snapshot}
             sub_assigned_to = None
@@ -2947,12 +2955,24 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
             results_by_target_key[(row.target_type, row.target_id)] = row
         results = list(results_by_target_key.values())
     else:
-        assignments = await _load_assignments(report.location, report.cycle_version, db)
-        report_snapshots = await _bootstrap_report_target_snapshots(report, assignments, [], db)
+        latest_daily_report_id = await db.scalar(
+            select(Report.id)
+            .where(Report.location == normalized)
+            .where(Report.report_type == DAILY_REPORT_TYPE)
+            .order_by(Report.date_created.desc(), Report.id.desc())
+            .limit(1)
+        )
+        is_latest_daily_report = latest_daily_report_id == report.id
         results = [
             row for row in await _load_results(report.id, db)
             if row.category_name != DEFAULT_CATEGORY_NAME and (row.subcategory_name is None or row.subcategory_name != DEFAULT_SUBCATEGORY_NAME)
         ]
+        if is_latest_daily_report:
+            assignments = await _load_assignments(report.location, report.cycle_version, db)
+            report_snapshots = await _bootstrap_report_target_snapshots(report, assignments, results, db)
+        else:
+            assignments = []
+            report_snapshots = await _load_report_target_snapshots(report.id, db)
 
     discrepancy_financials = await _load_discrepancy_financials(normalized, results)
     completed_before_report: dict[str, set[str]] = {}
@@ -3116,37 +3136,29 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         in_progress_subcategories: list[InProgressSubcategoryInfo] = []
         source_category = full_inventory_by_category_id.get(raw_category['id'], raw_category)
         category_selected_on_cycle = raw_category['id'] in selected_category_ids
-        category_level_snapshot_owners = {
-            row.assigned_user_name_snapshot
-            for row in report_snapshots
-            if row.category_id == raw_category['id'] and row.target_type == 'category' and row.assigned_user_name_snapshot
-        }
-        partial_snapshot_owners = {
-            row.assigned_user_name_snapshot
-            for row in report_snapshots
-            if row.category_id == raw_category['id'] and row.target_type in {'subcategory', 'item'} and row.assigned_user_name_snapshot
-        }
-        partial_assignment_owners = {
-            assignment.user_full_name_snapshot
-            for assignment in sub_assignments.values()
-            if assignment.user_full_name_snapshot
-        }
-        partial_assignment_owners.update(
-            assignment.user_full_name_snapshot
-            for assignments_by_item in item_assignments_by_sub.values()
-            for assignment in assignments_by_item.values()
-            if assignment.user_full_name_snapshot
-        )
-        partial_owner_names = {name for name in (partial_assignment_owners | partial_snapshot_owners) if name}
-        category_taken_whole = bool(category_assignment) or bool(category_level_snapshot_owners)
+        category_taken_whole = bool(category_assignment) or _category_taken_in_report(raw_category['id'], report_snapshots)
         inferred_category_owner: str | None = None
 
-        has_explicit_partial_activity = bool(partial_owner_names)
-        if report_type == DAILY_REPORT_TYPE and category_selected_on_cycle and not category_taken_whole and not has_explicit_partial_activity:
+        if report_type == DAILY_REPORT_TYPE and category_selected_on_cycle and not category_taken_whole:
             category_owner_candidates: set[str] = set()
             if category_assignment and category_assignment.user_full_name_snapshot:
                 category_owner_candidates.add(category_assignment.user_full_name_snapshot)
-            category_owner_candidates.update(category_level_snapshot_owners)
+            category_owner_candidates.update(
+                assignment.user_full_name_snapshot
+                for assignment in sub_assignments.values()
+                if assignment.user_full_name_snapshot
+            )
+            category_owner_candidates.update(
+                assignment.user_full_name_snapshot
+                for assignments_by_item in item_assignments_by_sub.values()
+                for assignment in assignments_by_item.values()
+                if assignment.user_full_name_snapshot
+            )
+            category_owner_candidates.update(
+                row.assigned_user_name_snapshot
+                for row in report_snapshots
+                if row.category_id == raw_category['id'] and row.assigned_user_name_snapshot
+            )
             category_owner_candidates.update(
                 row.checked_by_name_snapshot
                 for row in result_map.values()
@@ -3170,9 +3182,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
                 )
             ]
 
-        category_snapshot_owner = _owner_label(category_level_snapshot_owners) if category_taken_whole else None
-        if not category_snapshot_owner and category_assignment and category_assignment.user_full_name_snapshot:
-            category_snapshot_owner = category_assignment.user_full_name_snapshot
+        category_snapshot_owner = _category_snapshot_assignment_label(raw_category['id'], report_snapshots) if category_taken_whole else None
         if not category_snapshot_owner and inferred_category_owner:
             category_snapshot_owner = inferred_category_owner
 
@@ -3233,27 +3243,14 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         in_progress_subcategories.sort(key=lambda item: item.name.lower())
         remaining_subcategories = [item.name for item in in_progress_subcategories]
 
-        category_level_owner = (
-            (category_assignment.user_full_name_snapshot if category_assignment and category_assignment.user_full_name_snapshot else None)
-            or _owner_label(category_level_snapshot_owners)
-            or inferred_category_owner
-        )
-        partial_owner_label = _owner_label(partial_owner_names)
-        if category_taken_whole:
-            assigned_to_label = category_level_owner or partial_owner_label
-            assignment_scope = 'category'
-        elif partial_owner_label:
-            assigned_to_label = partial_owner_label
-            assignment_scope = 'mixed' if partial_owner_label == 'Несколько сотрудников' else 'partial'
-        else:
-            assigned_to_label = None
-            assignment_scope = None
-
         categories.append(CategoryResult(
             name=raw_category['name'],
             status=status,
-            assigned_to=assigned_to_label,
-            assignment_scope=assignment_scope,
+            assigned_to=(
+                _category_assignment_label(raw_category['id'], assignments)
+                or _category_snapshot_assignment_label(raw_category['id'], report_snapshots)
+                or inferred_category_owner
+            ),
             selected_on_cycle=raw_category['id'] in selected_category_ids,
             selected_subcategories=selected_sub_names,
             remaining_subcategories=remaining_subcategories,
@@ -3272,11 +3269,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
 
     for summary in employee_bucket.values():
         summary.categories = sorted(summary.categories, key=str.lower)
-        summary.completed_categories = sum(
-            1
-            for category in categories
-            if category.assignment_scope == 'category' and category.assigned_to == summary.full_name and category.status in {StatusEnum.GREEN, StatusEnum.RED}
-        )
+        summary.completed_categories = sum(1 for category in categories if category.assigned_to == summary.full_name and category.status in {StatusEnum.GREEN, StatusEnum.RED})
         summary.total_cost = float(round(float(summary.total_cost or 0.0), 2))
         summary.total_retail = float(round(float(summary.total_retail or 0.0), 2))
         summary.total_lost_profit = float(round(float(summary.total_lost_profit or 0.0), 2))
