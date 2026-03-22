@@ -144,7 +144,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260321-unified-admin-discrepancy-edit'
+templates.env.globals['asset_version'] = '20260322-admin-detail-and-employee-fixes'
 
 
 @app.middleware('http')

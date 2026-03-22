@@ -1892,6 +1892,18 @@ function renderEmployees(report) {
     `;
 }
 
+
+function getCategoryAssignedBadge(cat) {
+    if (!cat?.assigned_to) return 'Категория пока не закреплена';
+    if (cat.assignment_scope === 'partial') {
+        return `Подкатегории закреплены за: ${highlightMatch(cat.assigned_to, adminState.searchQuery)}`;
+    }
+    if (cat.assignment_scope === 'mixed') {
+        return 'Подкатегории закреплены за несколькими сотрудниками';
+    }
+    return `Закреплена за: ${highlightMatch(cat.assigned_to, adminState.searchQuery)}`;
+}
+
 function renderCategories(report) {
     const categoriesContainer = document.getElementById('report-categories');
     let categories = getFilteredCategories(report);
@@ -1930,7 +1942,7 @@ function renderCategories(report) {
                     <div>
                         <h3>${highlightMatch(cat.name, adminState.searchQuery)}</h3>
                         <div class="admin-category-subline">
-                            <span class="assigned-badge">${cat.assigned_to ? `Закреплена за: ${highlightMatch(cat.assigned_to, adminState.searchQuery)}` : 'Категория пока не закреплена'}</span>
+                            <span class="assigned-badge">${getCategoryAssignedBadge(cat)}</span>
                             <span class="muted-text">${selectionText ? `${selectionText} · ${summaryText}` : summaryText}</span>
                         </div>
                     </div>

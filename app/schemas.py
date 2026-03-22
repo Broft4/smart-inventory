@@ -278,6 +278,7 @@ class CategoryResult(BaseModel):
     name: str
     status: StatusEnum
     assigned_to: Optional[str] = None
+    assignment_scope: Optional[str] = None
     selected_on_cycle: bool = False
     selected_subcategories: list[str] = Field(default_factory=list)
     remaining_subcategories: list[str] = Field(default_factory=list)

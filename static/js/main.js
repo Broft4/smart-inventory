@@ -275,30 +275,29 @@ function applyEmployeeUiState() {
     if (!inventoryState?.categories) return;
 
     for (const category of inventoryState.categories) {
-        if (employeeUiState.openCategories.has(category.id) || categoryHasPendingMineWork(category)) {
+        if (employeeUiState.openCategories.has(category.id)) {
             category.is_open = true;
         }
 
         for (const sub of category.subcategories || []) {
-            const diagnosticBucket = isDiagnosticSubcategory(category, sub) || sub.is_diagnostic;
-            const hasPendingMineItems = (sub.items || []).some(item => item.assigned_to_current_user && !item.is_final);
-            if (employeeUiState.openSubcategories.has(sub.id) || sub.status === 'orange' || (diagnosticBucket && hasPendingMineItems)) {
+            if (employeeUiState.openSubcategories.has(sub.id)) {
                 sub.is_expanded = true;
             }
         }
     }
 }
 
-function getVisibleSubcategories(category, query) {
+function getVisibleSubcategories(category, query, modeOverride = null) {
     const q = normalizeSearch(query);
     const allSubcategories = category.subcategories || [];
+    const mode = modeOverride || employeePageState.filter;
     let scopedSubcategories = allSubcategories;
 
-    if (employeePageState.filter === 'mine') {
+    if (mode === 'mine') {
         scopedSubcategories = allSubcategories.filter(subcategory => subcategoryHasPendingMineWork(category, subcategory));
-    } else if (employeePageState.filter === 'completed') {
+    } else if (mode === 'completed') {
         scopedSubcategories = allSubcategories.filter(subcategory => subcategoryHasCompletedMineWork(category, subcategory));
-    } else if (employeePageState.filter === 'free') {
+    } else if (mode === 'free') {
         if (category.can_take) {
             scopedSubcategories = allSubcategories;
         } else {
@@ -615,7 +614,7 @@ function renderSubcategoryCard(category, sub, query) {
 }
 
 
-function renderCategoryCard(category, query) {
+function renderCategoryCard(category, query, modeOverride = null) {
     const blockedClass = category.is_blocked_by_other && !category.has_my_subcategories && !category.has_my_items ? 'blocked-category' : '';
     const icon = category.is_diagnostic
         ? '🧭'
@@ -624,9 +623,9 @@ function renderCategoryCard(category, query) {
             : (category.assigned_to_current_user || category.has_my_subcategories || category.has_my_items ? '📂' : '📁'));
 
     const meta = categoryMetaText(category);
-    const visibleSubcategories = getVisibleSubcategories(category, query);
+    const visibleSubcategories = getVisibleSubcategories(category, query, modeOverride);
     const queryActive = Boolean(normalizeSearch(query));
-    const bodyVisible = queryActive ? true : (Boolean(category.is_open) || categoryHasPendingMineWork(category));
+    const bodyVisible = queryActive ? true : Boolean(category.is_open);
 
     let bodyHtml = '';
     if (!category.is_diagnostic && category.can_take) {
@@ -666,11 +665,11 @@ function renderCategoryCard(category, query) {
 }
 
 
-function renderCategorySection(title, description, categories, query) {
+function renderCategorySection(title, description, categories, query, modeOverride = null) {
     if (!categories.length) {
         return `${buildSectionHeader(title, description, 0)}<div class="employee-empty-state">В этом разделе ничего не найдено.</div>`;
     }
-    return `${buildSectionHeader(title, description, categories.length)}${categories.map(category => renderCategoryCard(category, query)).join('')}`;
+    return `${buildSectionHeader(title, description, categories.length)}${categories.map(category => renderCategoryCard(category, query, modeOverride)).join('')}`;
 }
 
 function updateFilterButtons() {
@@ -699,9 +698,9 @@ function renderCategories() {
         const completed = filtered.filter(categoryHasCompletedMineWork);
         const busy = filtered.filter(categoryHasBusyWork);
         container.innerHTML = [
-            renderCategorySection('Мои выборы', 'Категории, подкатегории или отдельные товары, закреплённые за вами.', mine, query),
-            renderCategorySection('Свободные категории и подкатегории', 'Их можно взять в работу. В служебных ветках выбираются отдельные товары.', free, query),
-            renderCategorySection('Завершённые подкатегории', 'То, что вы уже полностью завершили на текущий день или сохранилось в истории ревизии.', completed, query),
+            renderCategorySection('Мои выборы', 'Категории, подкатегории или отдельные товары, закреплённые за вами.', mine, query, 'mine'),
+            renderCategorySection('Свободные категории и подкатегории', 'Их можно взять в работу. В служебных ветках выбираются отдельные товары.', free, query, 'free'),
+            renderCategorySection('Завершённые подкатегории', 'То, что вы уже полностью завершили на текущий день или сохранилось в истории ревизии.', completed, query, 'completed'),
             renderCategorySection('Выборы других сотрудников', 'Эти категории, подкатегории или товары уже заняты.', busy, query),
         ].join('');
     } else {
