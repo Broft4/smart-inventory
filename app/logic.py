@@ -3139,7 +3139,12 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
             sub_completed, sub_status = _subcategory_is_complete(raw_sub, result_map)
             sub_assignment = sub_assignments.get(raw_sub['id'])
             item_assignments = item_assignments_by_sub.get(raw_sub['id'], {})
-            sub_taken_in_report = bool(category_assignment or sub_assignment or item_assignments) or _subcategory_taken_in_report(raw_category['id'], raw_sub['id'], report_snapshots)
+            category_snapshot_owner = _category_snapshot_assignment_label(raw_category['id'], report_snapshots) if category_taken_whole else None
+            sub_taken_in_report = (
+                category_taken_whole
+                or bool(category_assignment or sub_assignment or item_assignments)
+                or _subcategory_taken_in_report(raw_category['id'], raw_sub['id'], report_snapshots)
+            )
 
             if sub_completed:
                 if sub_status == StatusEnum.GREEN:
@@ -3164,7 +3169,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
             assigned_to_label = (
                 category_assignment.user_full_name_snapshot
                 if category_assignment and category_assignment.user_full_name_snapshot
-                else (sub_assignment.user_full_name_snapshot if sub_assignment and sub_assignment.user_full_name_snapshot else None)
+                else (category_snapshot_owner or (sub_assignment.user_full_name_snapshot if sub_assignment and sub_assignment.user_full_name_snapshot else None))
             )
             if not assigned_to_label and item_assignments:
                 assigned_to_label = _owner_label({
