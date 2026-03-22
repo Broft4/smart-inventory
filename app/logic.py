@@ -2926,6 +2926,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
     inventory = await _get_inventory_for(normalized)
 
     report_type = report.report_type or DAILY_REPORT_TYPE
+    assignments: list[CategoryAssignment] = []
     if report_type == FINAL_REPORT_TYPE:
         cycle_reports = (
             await db.scalars(
@@ -2978,6 +2979,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
     active_employee_by_name = {employee.full_name: employee for employee in active_employees}
     grouped_problem_items: dict[str, list[DiscrepancyItem]] = defaultdict(list)
     employee_bucket: dict[str, EmployeeReportSummary] = {}
+    assignment_category_map, assignment_subcategory_map, assignment_item_map = _category_assignments_map(assignments)
 
     def ensure_employee_bucket(full_name: str | None, user_id: int | None = None) -> EmployeeReportSummary | None:
         if not full_name:
@@ -3097,6 +3099,9 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
             for sub in raw_category['subcategories']
             if sub['id'] in selected_subcategory_ids.get(raw_category['id'], set())
         ])
+        category_assignment = assignment_category_map.get(raw_category['id'])
+        sub_assignments = assignment_subcategory_map.get(raw_category['id'], {})
+        item_assignments_by_sub = assignment_item_map.get(raw_category['id'], {})
         completed_subcategories: list[CompletedSubcategoryInfo] = []
         in_progress_subcategories: list[InProgressSubcategoryInfo] = []
         for raw_sub in raw_category['subcategories']:
@@ -3104,7 +3109,9 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
                 continue
 
             sub_completed, sub_status = _subcategory_is_complete(raw_sub, result_map)
-            sub_taken_in_report = _subcategory_taken_in_report(raw_category['id'], raw_sub['id'], report_snapshots)
+            sub_assignment = sub_assignments.get(raw_sub['id'])
+            item_assignments = item_assignments_by_sub.get(raw_sub['id'], {})
+            sub_taken_in_report = bool(category_assignment or sub_assignment or item_assignments) or _subcategory_taken_in_report(raw_category['id'], raw_sub['id'], report_snapshots)
 
             if sub_completed:
                 if sub_status == StatusEnum.GREEN:
@@ -3126,9 +3133,23 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
             if not sub_taken_in_report:
                 continue
 
+            assigned_to_label = (
+                category_assignment.user_full_name_snapshot
+                if category_assignment and category_assignment.user_full_name_snapshot
+                else (sub_assignment.user_full_name_snapshot if sub_assignment and sub_assignment.user_full_name_snapshot else None)
+            )
+            if not assigned_to_label and item_assignments:
+                assigned_to_label = _owner_label({
+                    assignment.user_full_name_snapshot
+                    for assignment in item_assignments.values()
+                    if assignment.user_full_name_snapshot
+                })
+            if not assigned_to_label:
+                assigned_to_label = _subcategory_snapshot_assignment_label(raw_category['id'], raw_sub['id'], report_snapshots)
+
             in_progress_subcategories.append(InProgressSubcategoryInfo(
                 name=raw_sub['name'],
-                assigned_to=_subcategory_snapshot_assignment_label(raw_category['id'], raw_sub['id'], report_snapshots),
+                assigned_to=assigned_to_label,
             ))
 
         completed_subcategories.sort(key=lambda item: item.name.lower())
@@ -3138,7 +3159,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         categories.append(CategoryResult(
             name=raw_category['name'],
             status=status,
-            assigned_to=_category_snapshot_assignment_label(raw_category['id'], report_snapshots),
+            assigned_to=_category_assignment_label(raw_category['id'], assignments) or _category_snapshot_assignment_label(raw_category['id'], report_snapshots),
             selected_on_cycle=raw_category['id'] in selected_category_ids,
             selected_subcategories=selected_sub_names,
             remaining_subcategories=remaining_subcategories,
