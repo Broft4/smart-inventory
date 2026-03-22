@@ -3111,10 +3111,11 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         elif grouped_problem_items.get(raw_category['name']):
             status = StatusEnum.RED
 
+        selected_sub_ids_for_category = selected_subcategory_ids.get(raw_category['id'], set())
         selected_sub_names = sorted([
             sub['name']
             for sub in raw_category['subcategories']
-            if sub['id'] in selected_subcategory_ids.get(raw_category['id'], set())
+            if sub['id'] in selected_sub_ids_for_category
         ])
         category_assignment = assignment_category_map.get(raw_category['id'])
         sub_assignments = assignment_subcategory_map.get(raw_category['id'], {})
@@ -3122,15 +3123,23 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         completed_subcategories: list[CompletedSubcategoryInfo] = []
         in_progress_subcategories: list[InProgressSubcategoryInfo] = []
         source_category = full_inventory_by_category_id.get(raw_category['id'], raw_category)
+        category_selected_on_cycle = raw_category['id'] in selected_category_ids
         category_taken_whole = bool(category_assignment) or _category_taken_in_report(raw_category['id'], report_snapshots)
+
         detail_subcategories = raw_category['subcategories']
         if report_type == DAILY_REPORT_TYPE and category_taken_whole:
             historical_completed_ids = completed_before_report.get(raw_category['id'], set())
             detail_subcategories = [
                 sub
                 for sub in source_category.get('subcategories', [])
-                if not _is_categoryless_subcategory(source_category, sub) and sub['id'] not in historical_completed_ids
+                if (
+                    not _is_categoryless_subcategory(source_category, sub)
+                    and sub['id'] not in historical_completed_ids
+                    and (category_selected_on_cycle or sub['id'] in selected_sub_ids_for_category)
+                )
             ]
+
+        category_snapshot_owner = _category_snapshot_assignment_label(raw_category['id'], report_snapshots) if category_taken_whole else None
 
         for raw_sub in detail_subcategories:
             if _is_categoryless_subcategory(source_category, raw_sub):
@@ -3139,7 +3148,6 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
             sub_completed, sub_status = _subcategory_is_complete(raw_sub, result_map)
             sub_assignment = sub_assignments.get(raw_sub['id'])
             item_assignments = item_assignments_by_sub.get(raw_sub['id'], {})
-            category_snapshot_owner = _category_snapshot_assignment_label(raw_category['id'], report_snapshots) if category_taken_whole else None
             sub_taken_in_report = (
                 category_taken_whole
                 or bool(category_assignment or sub_assignment or item_assignments)
@@ -3163,7 +3171,8 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
                     ))
                 continue
 
-            if not sub_taken_in_report:
+            show_as_taken_for_detail = category_taken_whole or sub_taken_in_report
+            if not show_as_taken_for_detail:
                 continue
 
             assigned_to_label = (
