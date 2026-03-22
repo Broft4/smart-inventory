@@ -11,6 +11,11 @@ from dataclasses import dataclass
 from time import monotonic
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
+from io import BytesIO
+
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 from fastapi import HTTPException
 from sqlalchemy import and_, delete, func, inspect, or_, select, text, update
@@ -3813,6 +3818,457 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         can_manage_employee_completion=can_manage_employee_completion,
         employees=sorted(employee_bucket.values(), key=lambda item: item.full_name.lower()),
     )
+
+def _excel_yes_no(value: bool) -> str:
+    return 'Да' if value else 'Нет'
+
+
+def _safe_excel_float(value: Any) -> float:
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if abs(number) < 1e-9:
+        return 0.0
+    return float(round(number, 2))
+
+
+def _safe_excel_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _safe_excel_text(value: Any, fallback: str = '—') -> str:
+    if value is None:
+        return fallback
+    if hasattr(value, 'value') and isinstance(getattr(value, 'value'), str):
+        value = getattr(value, 'value')
+    text = str(value).strip()
+    return text or fallback
+
+
+def _safe_filename_part(value: Any, fallback: str) -> str:
+    text = ' '.join(str(value or '').strip().split())
+    for bad in '\\/:*?"<>|':
+        text = text.replace(bad, '-')
+    text = text.strip(' .-_')
+    return text or fallback
+
+
+def _build_export_filename(report: AdminReport) -> str:
+    location_part = _safe_filename_part(report.location, 'Точка')
+    date_part = _safe_filename_part(report.date, 'Дата')
+    if report.report_type == PERIOD_REPORT_TYPE:
+        suffix = 'период'
+    elif report.report_type == FINAL_REPORT_TYPE:
+        suffix = 'итоговая'
+    else:
+        suffix = f"ревизия {report.report_number or report.report_id}"
+    return f"{location_part} {date_part} {suffix}.xlsx"
+
+
+def _init_export_sheet(ws, title: str, headers: list[str]) -> None:
+    ws.title = title
+    ws.sheet_view.showGridLines = True
+    ws.append(headers)
+
+    header_fill = PatternFill(fill_type='solid', fgColor='1F4E78')
+    header_font = Font(color='FFFFFF', bold=True)
+    header_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    border = Border(bottom=Side(style='thin', color='D0D7DE'))
+
+    for cell in ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = header_alignment
+        cell.border = border
+
+    ws.freeze_panes = 'A2'
+
+
+def _finalize_export_sheet(
+    ws,
+    currency_columns: set[int] | None = None,
+    quantity_columns: set[int] | None = None,
+    *,
+    left_align_columns: set[int] | None = None,
+    width_overrides: dict[str, float] | None = None,
+    max_width: int = 40,
+    default_horizontal: str = 'center',
+    default_vertical: str = 'center',
+) -> None:
+    currency_columns = currency_columns or set()
+    quantity_columns = quantity_columns or set()
+    left_align_columns = left_align_columns or set()
+    width_overrides = {str(key).upper(): value for key, value in (width_overrides or {}).items()}
+    clear_fill = PatternFill(fill_type=None)
+    wrap_alignment = Alignment(horizontal=default_horizontal, vertical=default_vertical, wrap_text=True)
+    wrap_alignment_left = Alignment(horizontal='left', vertical=default_vertical, wrap_text=True)
+
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            cell.fill = clear_fill
+            cell.alignment = wrap_alignment_left if cell.column in left_align_columns else wrap_alignment
+            if cell.column in currency_columns and isinstance(cell.value, (int, float)):
+                cell.number_format = '#,##0.00 "₽"'
+            elif cell.column in quantity_columns and isinstance(cell.value, (int, float)):
+                cell.number_format = '#,##0.###'
+
+    if ws.max_row >= 1 and ws.max_column >= 1:
+        ws.auto_filter.ref = ws.dimensions
+
+    for column_cells in ws.columns:
+        length = 0
+        column_letter = get_column_letter(column_cells[0].column)
+        for cell in column_cells:
+            value = '' if cell.value is None else str(cell.value)
+            if len(value) > length:
+                length = len(value)
+        auto_width = min(max(length + 2, 12), max_width)
+        ws.column_dimensions[column_letter].width = float(width_overrides.get(column_letter, auto_width))
+
+
+def _status_fill(value: Any) -> PatternFill | None:
+    normalized = _safe_excel_text(value, '').lower()
+    if normalized in {'green', 'успешно', 'завершена', 'завершен', 'completed'}:
+        return PatternFill(fill_type='solid', fgColor='EAF7EE')
+    if normalized in {'red', 'с расхождением', 'расхождения'}:
+        return PatternFill(fill_type='solid', fgColor='FCEBEC')
+    if normalized in {'orange', 'в работе', 'active', 'in_progress'}:
+        return PatternFill(fill_type='solid', fgColor='FFF4DB')
+    if normalized in {'gray', 'grey', 'не начата', 'not_started'}:
+        return PatternFill(fill_type='solid', fgColor='F3F4F6')
+    return None
+
+
+def _style_summary_sheet(ws) -> None:
+    label_fill = PatternFill(fill_type='solid', fgColor='F8FAFC')
+    emphasis_fills = {
+        'Излишки': PatternFill(fill_type='solid', fgColor='EAF7EE'),
+        'Недостача': PatternFill(fill_type='solid', fgColor='FCEBEC'),
+        'Себестоимость': PatternFill(fill_type='solid', fgColor='EEF4FB'),
+        'Розница': PatternFill(fill_type='solid', fgColor='F3EEFF'),
+        'Утерянная прибыль': PatternFill(fill_type='solid', fgColor='FFF4DB'),
+    }
+    info_rows = {'Точка', 'Дата отчёта', 'Тип ревизии', 'Номер ревизии', 'Статус'}
+    money_rows = set(emphasis_fills)
+
+    for row_index in range(2, ws.max_row + 1):
+        label_cell = ws.cell(row=row_index, column=1)
+        value_cell = ws.cell(row=row_index, column=2)
+        label = _safe_excel_text(label_cell.value, '')
+
+        label_cell.fill = label_fill
+        label_cell.font = Font(bold=True, color='243B53')
+        if label in info_rows:
+            value_cell.font = Font(bold=True, color='102A43')
+        if label in money_rows:
+            fill = emphasis_fills[label]
+            label_cell.fill = fill
+            value_cell.fill = fill
+            value_cell.font = Font(bold=True, color='102A43')
+
+
+def build_admin_report_excel(report: AdminReport) -> tuple[str, bytes]:
+    if report.report_type != PERIOD_REPORT_TYPE and not report.report_id:
+        raise HTTPException(status_code=404, detail='Ревизия для выгрузки не найдена.')
+
+    categories = [category for category in (report.categories or []) if category.name != DEFAULT_CATEGORY_NAME]
+    discrepancy_rows: list[list[Any]] = []
+    successful_rows: list[list[Any]] = []
+    category_rows: list[list[Any]] = []
+    subcategory_rows: list[list[Any]] = []
+    employee_extra: dict[str, dict[str, set[str]]] = defaultdict(lambda: {
+        'in_progress_subcategories': set(),
+        'completed_subcategories': set(),
+        'discrepancy_subcategories': set(),
+    })
+
+    for category in categories:
+        problem_items = list(category.problem_items or [])
+        completed_subcategories = list(category.completed_subcategories or [])
+        in_progress_subcategories = list(category.in_progress_subcategories or [])
+        selected_subcategories = list(category.selected_subcategories or [])
+        remaining_subcategories = list(category.remaining_subcategories or [])
+        discrepancy_subcategories = sorted({_safe_excel_text(item.subcategory_name, '—') for item in problem_items})
+
+        category_cost = sum(_safe_excel_float(item.cost_total) for item in problem_items)
+        category_retail = sum(_safe_excel_float(item.retail_total) for item in problem_items)
+        category_lost_profit = sum(_safe_excel_float(item.lost_profit) for item in problem_items)
+
+        category_rows.append([
+            _safe_excel_text(category.name),
+            _safe_excel_text(category.status),
+            _safe_excel_text(category.assigned_to),
+            'Категория целиком' if category.selected_on_cycle else 'Подкатегории',
+            _excel_yes_no(bool(category.selected_on_cycle)),
+            len(selected_subcategories),
+            ', '.join(selected_subcategories) if selected_subcategories else '—',
+            len(remaining_subcategories),
+            ', '.join(remaining_subcategories) if remaining_subcategories else '—',
+            len(completed_subcategories),
+            len(discrepancy_subcategories),
+            len(problem_items),
+            category_cost,
+            category_retail,
+            category_lost_profit,
+        ])
+
+        subcategory_tracker: dict[str, dict[str, Any]] = {}
+
+        def ensure_subcategory_row(subcategory_name: str) -> dict[str, Any]:
+            key = _safe_excel_text(subcategory_name, '—')
+            row = subcategory_tracker.get(key)
+            if row is None:
+                row = {
+                    'category_name': _safe_excel_text(category.name),
+                    'subcategory_name': key,
+                    'selected_on_cycle': bool(category.selected_on_cycle) or key in selected_subcategories,
+                    'assigned_to': set(),
+                    'status': 'Не начата',
+                    'completed_by': set(),
+                    'discrepancy_items': 0,
+                    'cost_total': 0.0,
+                    'retail_total': 0.0,
+                    'lost_profit': 0.0,
+                }
+                subcategory_tracker[key] = row
+            return row
+
+        for name in selected_subcategories:
+            ensure_subcategory_row(name)
+        for name in remaining_subcategories:
+            sub_row = ensure_subcategory_row(name)
+            sub_row['status'] = 'В работе'
+        for sub in in_progress_subcategories:
+            sub_row = ensure_subcategory_row(sub.name)
+            sub_row['status'] = 'В работе'
+            if sub.assigned_to:
+                sub_row['assigned_to'].add(sub.assigned_to)
+                employee_extra[sub.assigned_to]['in_progress_subcategories'].add(f"{category.name} → {sub.name}")
+        for sub in completed_subcategories:
+            sub_row = ensure_subcategory_row(sub.name)
+            if sub_row['status'] != 'С расхождением':
+                sub_row['status'] = 'Успешно'
+            if sub.checked_by:
+                sub_row['completed_by'].add(sub.checked_by)
+                employee_extra[sub.checked_by]['completed_subcategories'].add(f"{category.name} → {sub.name}")
+            successful_rows.append([
+                _safe_excel_text(category.name),
+                _safe_excel_text(sub.name),
+                _safe_excel_text(sub.checked_by),
+                _safe_excel_text(getattr(sub, 'status', 'green')),
+                _safe_excel_text(report.date),
+                _safe_excel_text(report.location),
+            ])
+
+        for item in problem_items:
+            subcategory_name = _safe_excel_text(item.subcategory_name, '—')
+            sub_row = ensure_subcategory_row(subcategory_name)
+            sub_row['status'] = 'С расхождением'
+            if item.checked_by:
+                sub_row['completed_by'].add(item.checked_by)
+                employee_extra[item.checked_by]['discrepancy_subcategories'].add(f"{category.name} → {subcategory_name}")
+            sub_row['discrepancy_items'] += 1
+            sub_row['cost_total'] += _safe_excel_float(item.cost_total)
+            sub_row['retail_total'] += _safe_excel_float(item.retail_total)
+            sub_row['lost_profit'] += _safe_excel_float(item.lost_profit)
+
+            discrepancy_rows.append([
+                _safe_excel_text(category.name),
+                subcategory_name,
+                _safe_excel_text(item.name),
+                _safe_excel_text(item.checked_by),
+                _safe_excel_text(report.date),
+                _safe_excel_float(item.expected),
+                _safe_excel_float(item.actual),
+                _safe_excel_float(item.diff),
+                _safe_excel_float(item.cost_total),
+                _safe_excel_float(item.lost_profit),
+                _safe_excel_float(item.retail_total),
+                _safe_excel_float(item.cost_price),
+                _safe_excel_float(item.retail_price),
+                _safe_excel_text(report.location),
+            ])
+
+        for sub_row in subcategory_tracker.values():
+            subcategory_rows.append([
+                sub_row['category_name'],
+                sub_row['subcategory_name'],
+                _excel_yes_no(bool(sub_row['selected_on_cycle'])),
+                ', '.join(sorted(sub_row['assigned_to'], key=str.lower)) if sub_row['assigned_to'] else '—',
+                sub_row['status'],
+                ', '.join(sorted(sub_row['completed_by'], key=str.lower)) if sub_row['completed_by'] else '—',
+                sub_row['discrepancy_items'],
+                round(float(sub_row['cost_total']), 2),
+                round(float(sub_row['retail_total']), 2),
+                round(float(sub_row['lost_profit']), 2),
+            ])
+
+    employees_sheet_rows: list[list[Any]] = []
+    for employee in report.employees or []:
+        extra = employee_extra.get(employee.full_name, {})
+        in_progress = sorted(extra.get('in_progress_subcategories', set()), key=str.lower)
+        completed = sorted(extra.get('completed_subcategories', set()), key=str.lower)
+        discrepancy = sorted(extra.get('discrepancy_subcategories', set()), key=str.lower)
+        employees_sheet_rows.append([
+            _safe_excel_text(employee.full_name),
+            _safe_excel_int(employee.user_id),
+            len(employee.categories or []),
+            ', '.join(employee.categories or []) if employee.categories else '—',
+            _safe_excel_int(employee.completed_categories),
+            len(completed),
+            ', '.join(completed) if completed else '—',
+            len(in_progress),
+            ', '.join(in_progress) if in_progress else '—',
+            len(discrepancy),
+            ', '.join(discrepancy) if discrepancy else '—',
+            _safe_excel_int(employee.discrepancy_items),
+            _safe_excel_float(employee.total_cost),
+            _safe_excel_float(employee.total_retail),
+            _safe_excel_float(employee.total_lost_profit),
+            _excel_yes_no(bool(employee.started_current_report)),
+            _safe_excel_text(employee.started_at),
+            _excel_yes_no(bool(employee.finished_current_report)),
+            _safe_excel_text(employee.finished_at),
+        ])
+
+    workbook = Workbook()
+    summary_ws = workbook.active
+    _init_export_sheet(summary_ws, 'Сводка', ['Показатель', 'Значение'])
+
+    counted_categories = categories
+    completed_categories_count = sum(1 for category in counted_categories if _safe_excel_text(category.status, '').lower() in {'green', 'red'})
+    discrepancy_categories_count = sum(1 for category in counted_categories if category.problem_items)
+    no_discrepancy_categories_count = sum(1 for category in counted_categories if _safe_excel_text(category.status, '').lower() == 'green')
+    discrepancy_items_count = sum(len(category.problem_items or []) for category in counted_categories)
+
+    summary_rows = [
+        ['Точка', _safe_excel_text(report.location)],
+        ['Дата отчёта', _safe_excel_text(report.date)],
+        ['Тип ревизии', 'Период' if report.report_type == PERIOD_REPORT_TYPE else ('Итоговая' if report.report_type == FINAL_REPORT_TYPE else 'Дневная')],
+        ['Номер ревизии', '—' if report.report_type == PERIOD_REPORT_TYPE else _safe_excel_text(report.report_number or report.report_id)],
+        ['Статус', _safe_excel_text(report.status)],
+        ['Сотрудников в ревизии', len(report.employees or [])],
+        ['Категорий всего', len(counted_categories)],
+        ['Категорий завершено', completed_categories_count],
+        ['Категорий с расхождениями', discrepancy_categories_count],
+        ['Категорий без расхождений', no_discrepancy_categories_count],
+        ['Проблемных товаров', discrepancy_items_count],
+        ['Излишки', _safe_excel_float(report.total_plus)],
+        ['Недостача', _safe_excel_float(report.total_minus)],
+        ['Себестоимость', _safe_excel_float(report.total_cost)],
+        ['Розница', _safe_excel_float(report.total_retail)],
+        ['Утерянная прибыль', _safe_excel_float(report.total_lost_profit)],
+        ['Сотрудники', ', '.join(employee.full_name for employee in (report.employees or [])) or '—'],
+        ['Категории цикла', ', '.join(report.selected_categories or []) if report.selected_categories else '—'],
+        ['Подкатегории цикла', ', '.join(report.selected_subcategories or []) if report.selected_subcategories else '—'],
+    ]
+    for row in summary_rows:
+        summary_ws.append(row)
+
+    summary_currency_labels = {'Излишки', 'Недостача', 'Себестоимость', 'Розница', 'Утерянная прибыль'}
+    summary_count_labels = {'Сотрудников в ревизии', 'Категорий всего', 'Категорий завершено', 'Категорий с расхождениями', 'Категорий без расхождений', 'Проблемных товаров'}
+    _finalize_export_sheet(
+        summary_ws,
+        left_align_columns={1, 2},
+        width_overrides={'A': 34, 'B': 62},
+        max_width=62,
+        default_horizontal='left',
+        default_vertical='top',
+    )
+    _style_summary_sheet(summary_ws)
+    for row_index in range(2, summary_ws.max_row + 1):
+        label = _safe_excel_text(summary_ws.cell(row=row_index, column=1).value, '')
+        value_cell = summary_ws.cell(row=row_index, column=2)
+        if not isinstance(value_cell.value, (int, float)):
+            continue
+        if label in summary_currency_labels:
+            value_cell.number_format = '#,##0.00 "₽"'
+        elif label in summary_count_labels:
+            value_cell.number_format = '#,##0'
+
+    discrepancies_ws = workbook.create_sheet()
+    _init_export_sheet(discrepancies_ws, 'Расхождения', ['Категория', 'Подкатегория', 'Товар', 'Сотрудник', 'Дата', 'Учётное кол-во', 'Фактическое кол-во', 'Разница', 'Себестоимость', 'Утерянная прибыль', 'Розница', 'Себестоимость за шт.', 'Розница за шт.', 'Точка'])
+    if discrepancy_rows:
+        for row in discrepancy_rows:
+            discrepancies_ws.append(row)
+    else:
+        discrepancies_ws.append(['Нет расхождений'])
+        discrepancies_ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=14)
+    _finalize_export_sheet(discrepancies_ws, currency_columns={9, 10, 11, 12, 13}, quantity_columns={6, 7, 8}, width_overrides={'A': 24, 'B': 28, 'C': 38, 'D': 24, 'E': 20, 'F': 16, 'G': 16, 'H': 14, 'I': 18, 'J': 18, 'K': 18, 'L': 20, 'M': 18, 'N': 18}, max_width=38)
+    discrepancy_negative_fill = PatternFill(fill_type='solid', fgColor='FCEBEC')
+    discrepancy_positive_fill = PatternFill(fill_type='solid', fgColor='EAF7EE')
+    for row_index in range(2, discrepancies_ws.max_row + 1):
+        diff_cell = discrepancies_ws.cell(row=row_index, column=8)
+        diff_value = diff_cell.value
+        if isinstance(diff_value, (int, float)):
+            if diff_value < 0:
+                diff_cell.fill = discrepancy_negative_fill
+            elif diff_value > 0:
+                diff_cell.fill = discrepancy_positive_fill
+
+    successful_ws = workbook.create_sheet()
+    _init_export_sheet(successful_ws, 'Успешно пройдены', ['Категория', 'Подкатегория', 'Сотрудник', 'Статус', 'Дата', 'Точка'])
+    if successful_rows:
+        for row in successful_rows:
+            successful_ws.append(row)
+    else:
+        successful_ws.append(['Нет успешно завершённых подкатегорий'])
+        successful_ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=6)
+    _finalize_export_sheet(successful_ws, width_overrides={'A': 24, 'B': 28, 'C': 24, 'D': 16, 'E': 20, 'F': 18}, max_width=32)
+    for row_index in range(2, successful_ws.max_row + 1):
+        status_cell = successful_ws.cell(row=row_index, column=4)
+        fill = _status_fill(status_cell.value)
+        if fill:
+            status_cell.fill = fill
+
+    employees_ws = workbook.create_sheet()
+    _init_export_sheet(employees_ws, 'Сотрудники', ['Сотрудник', 'ID', 'Категорий взял', 'Категории', 'Категорий завершил', 'Успешных подкатегорий', 'Какие успешные', 'Подкатегорий в работе', 'Какие в работе', 'Подкатегорий с расхождениями', 'Какие с расхождениями', 'Проблемных товаров', 'Себестоимость', 'Розница', 'Утерянная прибыль', 'Начинал ревизию', 'Время старта', 'Завершил ревизию', 'Время завершения'])
+    if employees_sheet_rows:
+        for row in employees_sheet_rows:
+            employees_ws.append(row)
+    else:
+        employees_ws.append(['В ревизии нет сотрудников'])
+        employees_ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=19)
+    _finalize_export_sheet(employees_ws, currency_columns={13, 14, 15}, quantity_columns={2, 3, 5, 6, 8, 10, 12}, width_overrides={'A': 14, 'B': 8, 'C': 14, 'D': 26, 'E': 16, 'F': 18, 'G': 42, 'H': 18, 'I': 42, 'J': 20, 'K': 42, 'L': 16, 'M': 18, 'N': 18, 'O': 18, 'P': 14, 'Q': 18, 'R': 16, 'S': 18}, max_width=42)
+
+    categories_ws = workbook.create_sheet()
+    _init_export_sheet(categories_ws, 'Категории', ['Категория', 'Статус', 'Сотрудник', 'Тип выбора', 'Взята целиком', 'Подкатегорий выбрано', 'Какие выбраны', 'Подкатегорий осталось', 'Какие остались', 'Подкатегорий завершено', 'Подкатегорий с расхождениями', 'Проблемных товаров', 'Себестоимость', 'Розница', 'Утерянная прибыль'])
+    if category_rows:
+        for row in category_rows:
+            categories_ws.append(row)
+    else:
+        categories_ws.append(['Нет категорий для отображения'])
+        categories_ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=15)
+    _finalize_export_sheet(categories_ws, currency_columns={13, 14, 15}, quantity_columns={6, 8, 10, 11, 12}, width_overrides={'A': 18, 'B': 12, 'C': 14, 'D': 16, 'E': 14, 'F': 18, 'G': 44, 'H': 18, 'I': 44, 'J': 18, 'K': 20, 'L': 18, 'M': 18, 'N': 18, 'O': 18}, max_width=44)
+    for row_index in range(2, categories_ws.max_row + 1):
+        status_cell = categories_ws.cell(row=row_index, column=2)
+        fill = _status_fill(status_cell.value)
+        if fill:
+            status_cell.fill = fill
+
+    subcategories_ws = workbook.create_sheet()
+    _init_export_sheet(subcategories_ws, 'Подкатегории', ['Категория', 'Подкатегория', 'Выбрана на цикл', 'Сотрудник', 'Статус', 'Проверил', 'Проблемных товаров', 'Себестоимость', 'Розница', 'Утерянная прибыль'])
+    if subcategory_rows:
+        for row in subcategory_rows:
+            subcategories_ws.append(row)
+    else:
+        subcategories_ws.append(['Нет подкатегорий для отображения'])
+        subcategories_ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=10)
+    _finalize_export_sheet(subcategories_ws, currency_columns={8, 9, 10}, quantity_columns={7}, width_overrides={'A': 24, 'B': 30, 'C': 18, 'D': 24, 'E': 18, 'F': 28, 'G': 18, 'H': 18, 'I': 18, 'J': 18}, max_width=32)
+    for row_index in range(2, subcategories_ws.max_row + 1):
+        status_cell = subcategories_ws.cell(row=row_index, column=5)
+        fill = _status_fill(status_cell.value)
+        if fill:
+            status_cell.fill = fill
+
+    output = BytesIO()
+    workbook.save(output)
+    filename = _build_export_filename(report)
+    return filename, output.getvalue()
 
 
 async def update_discrepancy_actual_qty(

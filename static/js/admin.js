@@ -433,6 +433,98 @@ function setAdminReportStatus(message = '', type = 'loading') {
     `;
 }
 
+function updateExportReportButton(report = adminState.report) {
+    const button = document.getElementById('export-report-xlsx-btn');
+    if (!button) return;
+
+    const hasExportableReport = Boolean(report && (report.report_type === 'period' || report.report_id));
+    button.disabled = !hasExportableReport;
+    if (!button.dataset.loading) {
+        button.textContent = 'Скачать Excel';
+    }
+}
+
+async function readErrorMessage(response, fallbackMessage = 'Произошла ошибка.') {
+    const contentType = response.headers.get('content-type') || '';
+
+    try {
+        if (contentType.includes('application/json')) {
+            const payload = await response.json();
+            return payload?.detail || payload?.message || fallbackMessage;
+        }
+
+        const text = await response.text();
+        return text || fallbackMessage;
+    } catch (error) {
+        console.error(error);
+        return fallbackMessage;
+    }
+}
+
+async function downloadCurrentReportExcel(triggerButton = null) {
+    const report = adminState.report;
+    if (!report || (!report.report_id && report.report_type !== 'period')) {
+        alert('Сначала загрузите ревизию или период.');
+        return;
+    }
+
+    const button = triggerButton || document.getElementById('export-report-xlsx-btn');
+    const originalText = button?.textContent || 'Скачать Excel';
+    if (button) {
+        button.disabled = true;
+        button.dataset.loading = '1';
+        button.textContent = 'Готовим Excel...';
+    }
+
+    try {
+        let url = '';
+        if (adminState.isPeriodMode || report.report_type === 'period') {
+            const location = getSelectedAdminLocation();
+            const dateFrom = adminState.periodDateFrom || document.getElementById('admin-period-date-from')?.value || '';
+            const dateTo = adminState.periodDateTo || document.getElementById('admin-period-date-to')?.value || '';
+            if (!location || !dateFrom || !dateTo) {
+                throw new Error('Для выгрузки периода выберите точку и обе даты.');
+            }
+            const params = new URLSearchParams({ location, date_from: dateFrom, date_to: dateTo });
+            url = `/api/report-period/export-xlsx?${params.toString()}`;
+        } else {
+            url = `/api/report/${report.report_id}/export-xlsx`;
+        }
+
+        const response = await fetch(url);
+        if (!response.ok) {
+            const text = await readErrorMessage(response, 'Не удалось выгрузить Excel.');
+            throw new Error(text || 'Не удалось выгрузить Excel.');
+        }
+
+        const blob = await response.blob();
+        const disposition = response.headers.get('Content-Disposition') || '';
+        const utfMatch = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+        const asciiMatch = disposition.match(/filename="?([^";]+)"?/i);
+        const filename = utfMatch
+            ? decodeURIComponent(utfMatch[1])
+            : (asciiMatch?.[1] || `report_${report.report_id || 'period'}.xlsx`);
+
+        const objectUrl = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(objectUrl);
+    } catch (error) {
+        console.error(error);
+        alert(error?.message || 'Не удалось скачать Excel.');
+    } finally {
+        if (button) {
+            delete button.dataset.loading;
+            button.textContent = originalText;
+        }
+        updateExportReportButton(adminState.report);
+    }
+}
+
 function resetSummary() {
     document.getElementById('report-location').textContent = '-';
     document.getElementById('report-date').textContent = '-';
@@ -451,6 +543,7 @@ function resetSummary() {
     document.getElementById('total-retail').textContent = '0 ₽';
     document.getElementById('total-lost-profit').textContent = '0 ₽';
     renderSelectedCycleScope({ selected_categories: [], selected_subcategories: [] });
+    updateExportReportButton(null);
 }
 
 function setAdminReportLoading(message = 'Загрузка данных ревизии...') {
@@ -1941,6 +2034,7 @@ function updateSummary(report) {
     updateSelectedScopeHeader(report);
     renderSelectedCycleScope(report);
     updateReportActionButtons(report);
+    updateExportReportButton(report);
 }
 
 function renderEmployees(report) {
@@ -2268,6 +2362,7 @@ async function loadAdminReport(location, reportId) {
         populateEmployeeFilter(report);
         renderAllReportViews(report);
         setAdminReportStatus('');
+        updateExportReportButton(report);
     } catch (error) {
         console.error(error);
         setAdminReportStatus(error?.message || 'Не удалось загрузить данные ревизии.', 'error');
@@ -2276,6 +2371,7 @@ async function loadAdminReport(location, reportId) {
             employeeDetailsContainer.innerHTML = '<div class="category-card"><p class="empty-text error-text">Ошибка загрузки детализации по сотрудникам.</p></div>';
         }
         categoriesContainer.innerHTML = '<div class="category-card"><p class="empty-text error-text">Ошибка загрузки данных ревизии.</p></div>';
+        updateExportReportButton(null);
     }
 }
 
@@ -2313,6 +2409,7 @@ async function loadAdminPeriodReport(location, dateFrom, dateTo) {
         populateEmployeeFilter(payload);
         renderAllReportViews(payload);
         setAdminReportStatus('');
+        updateExportReportButton(payload);
     } catch (error) {
         console.error(error);
         setAdminReportStatus(error?.message || 'Не удалось загрузить период.', 'error');
@@ -2321,14 +2418,38 @@ async function loadAdminPeriodReport(location, dateFrom, dateTo) {
             employeeDetailsContainer.innerHTML = '<div class="category-card"><p class="empty-text error-text">Ошибка загрузки детализации по сотрудникам.</p></div>';
         }
         categoriesContainer.innerHTML = '<div class="category-card"><p class="empty-text error-text">Ошибка загрузки периода.</p></div>';
+        updateExportReportButton(null);
     }
 }
 
 async function resetPeriodToSelectedReport() {
     const location = getSelectedAdminLocation();
-    const reportId = getCurrentAdminReportId();
-    if (!location) return;
-    await loadAdminReport(location, reportId);
+    const reportSelect = document.getElementById('admin-report-select');
+    if (!location || !reportSelect) return;
+
+    const latestReportId = await loadReportsList(location);
+    const normalizedLatestReportId = Number(reportSelect.options?.[0]?.value || latestReportId || 0) || null;
+
+    adminState.isPeriodMode = false;
+    adminState.expandedCategories.clear();
+    adminState.employeeFilter = '';
+
+    const employeeFilterSelect = document.getElementById('admin-employee-filter');
+    if (employeeFilterSelect) {
+        employeeFilterSelect.value = '';
+    }
+
+    if (normalizedLatestReportId) {
+        reportSelect.value = String(normalizedLatestReportId);
+        adminState.selectedReportId = normalizedLatestReportId;
+        adminState.selectedReportIdByLocation[location] = normalizedLatestReportId;
+    } else {
+        adminState.selectedReportId = null;
+        delete adminState.selectedReportIdByLocation[location];
+    }
+    persistAdminUiState();
+
+    await loadAdminReport(location, normalizedLatestReportId);
 }
 
 async function deleteSelectedReport() {
@@ -2570,6 +2691,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     userRoleSelect?.addEventListener('change', () => updateUserFormByRole());
     document.getElementById('user-form-reset').addEventListener('click', resetUserForm);
     document.getElementById('delete-report-btn').addEventListener('click', deleteSelectedReport);
+    document.getElementById('export-report-xlsx-btn')?.addEventListener('click', async () => {
+        await downloadCurrentReportExcel(document.getElementById('export-report-xlsx-btn'));
+    });
     document.getElementById('load-period-report-btn')?.addEventListener('click', async () => {
         const fromInput = document.getElementById('admin-period-date-from');
         const toInput = document.getElementById('admin-period-date-to');

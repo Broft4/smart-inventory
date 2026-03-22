@@ -7,6 +7,7 @@ import logging
 from datetime import date
 
 from contextlib import asynccontextmanager
+from urllib.parse import quote
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 from time import monotonic
@@ -33,6 +34,7 @@ from app.logic import (
     delete_report,
     delete_user,
     ensure_default_admin,
+    build_admin_report_excel,
     ensure_user_can_access_location,
     finish_report,
     get_admin_report,
@@ -56,7 +58,7 @@ from app.logic import (
     user_to_schema,
     verify_item_or_category,
 )
-from app.models import User
+from app.models import Report, User
 from app.moysklad import ms_client
 from app.schemas import (
     AdminCycleTargetsResponse,
@@ -146,7 +148,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260322-period-report'
+templates.env.globals['asset_version'] = '20260322-period-and-excel-export'
 
 
 @app.middleware('http')
@@ -564,6 +566,56 @@ async def api_get_report(request: Request, location: str | None = None, report_i
 @app.delete('/api/report/{report_id}', response_model=DeleteResponse)
 async def api_delete_report(report_id: int, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
     return await delete_report(report_id, db, current_user=admin)
+
+
+@app.get('/api/report/{report_id}/export-xlsx')
+async def api_export_report_xlsx(report_id: int, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    report_row = await db.get(Report, report_id)
+    if not report_row:
+        raise HTTPException(status_code=404, detail='Ревизия не найдена.')
+
+    await ensure_user_can_access_location(admin, report_row.location, db)
+
+    report = await get_admin_report(report_row.location, db, report_id=report_id)
+    filename, payload = build_admin_report_excel(report)
+
+    fallback_filename = f'report_{report_id}.xlsx'
+    quoted_filename = quote(filename)
+
+    return StreamingResponse(
+        iter([payload]),
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={
+            'Content-Disposition': f"attachment; filename=\"{fallback_filename}\"; filename*=UTF-8''{quoted_filename}",
+            'X-Export-Report-Id': str(report_id),
+        },
+    )
+
+
+@app.get('/api/report-period/export-xlsx')
+async def api_export_period_report_xlsx(location: str | None = None, date_from: date | None = None, date_to: date | None = None, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    if not location:
+        raise HTTPException(status_code=400, detail='Нужно указать точку.')
+    if date_from is None or date_to is None:
+        raise HTTPException(status_code=400, detail='Нужно указать даты периода.')
+
+    await ensure_user_can_access_location(admin, location, db)
+
+    report = await get_admin_period_report(location, date_from, date_to, db)
+    filename, payload = build_admin_report_excel(report)
+
+    fallback_filename = 'period_report.xlsx'
+    quoted_filename = quote(filename)
+
+    return StreamingResponse(
+        iter([payload]),
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={
+            'Content-Disposition': f"attachment; filename=\"{fallback_filename}\"; filename*=UTF-8''{quoted_filename}",
+            'X-Export-Period-From': date_from.isoformat(),
+            'X-Export-Period-To': date_to.isoformat(),
+        },
+    )
 
 
 @app.patch('/api/report/discrepancy/{check_result_id}', response_model=UpdateDiscrepancyResponse)
