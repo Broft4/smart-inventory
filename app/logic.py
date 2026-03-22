@@ -334,6 +334,54 @@ async def _ensure_default_location_points(db: AsyncSession) -> None:
     await db.commit()
 
 
+
+
+def _moscow_datetime(dt: datetime | None) -> datetime | None:
+    if not dt:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def _moscow_date_for_storage(dt: datetime | None) -> date | None:
+    value = _moscow_datetime(dt)
+    if not value:
+        return None
+    return value.astimezone(MSK_TZ).date()
+
+
+def _sanitize_historical_daily_report_snapshots(
+    report: Report,
+    report_snapshots: list[ReportTargetSnapshot],
+    results: list[CheckResult],
+) -> list[ReportTargetSnapshot]:
+    if not report_snapshots:
+        return report_snapshots
+
+    report_day = report.report_date
+    result_keys = {
+        (row.target_type, row.target_id, row.checked_by_user_id)
+        for row in results
+        if row.checked_by_user_id is not None
+    }
+    result_target_keys = {
+        (row.target_type, row.target_id)
+        for row in results
+    }
+
+    sanitized: list[ReportTargetSnapshot] = []
+    for row in report_snapshots:
+        created_on = _moscow_date_for_storage(row.created_at)
+        if created_on == report_day:
+            sanitized.append(row)
+            continue
+        if (row.target_type, row.target_id, row.assigned_user_id_snapshot) in result_keys:
+            sanitized.append(row)
+            continue
+        if (row.target_type, row.target_id) in result_target_keys:
+            sanitized.append(row)
+            continue
+    return sanitized
+
 def _format_moscow_datetime(dt: datetime | None) -> str:
     if not dt:
         return '-'
@@ -2972,7 +3020,11 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
             report_snapshots = await _bootstrap_report_target_snapshots(report, assignments, results, db)
         else:
             assignments = []
-            report_snapshots = await _load_report_target_snapshots(report.id, db)
+            report_snapshots = _sanitize_historical_daily_report_snapshots(
+                report,
+                await _load_report_target_snapshots(report.id, db),
+                results,
+            )
 
     discrepancy_financials = await _load_discrepancy_financials(normalized, results)
     completed_before_report: dict[str, set[str]] = {}
