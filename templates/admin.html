@@ -40,8 +40,21 @@
             <div class="admin-toolbar-actions">
                 <button id="delete-report-btn" type="button" class="btn danger btn-inline">Удалить ревизию</button>
             </div>
+        </div>
 
-
+        <div class="admin-period-toolbar">
+            <label>
+                Период с
+                <input type="date" id="admin-period-date-from">
+            </label>
+            <label>
+                по
+                <input type="date" id="admin-period-date-to">
+            </label>
+            <div class="admin-period-actions">
+                <button id="load-period-report-btn" type="button" class="btn secondary btn-inline">Показать период</button>
+                <button id="reset-period-report-btn" type="button" class="btn secondary btn-inline">Вернуться к ревизии</button>
+            </div>
         </div>
     </section>
 
@@ -123,8 +136,8 @@
         <details class="selected-cycle-details">
             <summary class="selected-cycle-summary">
                 <div>
-                    <h2 class="section-title selected-cycle-title">Выбрано на текущий цикл</h2>
-                    <p class="muted-text selected-cycle-subtitle">Быстрый список категорий и подкатегорий, которые сейчас включены в ревизию для выбранной точки.</p>
+                    <h2 id="selected-scope-title" class="section-title selected-cycle-title">Выбрано на текущий цикл</h2>
+                    <p id="selected-scope-subtitle" class="muted-text selected-cycle-subtitle">Быстрый список категорий и подкатегорий, которые сейчас включены в ревизию для выбранной точки.</p>
                 </div>
                 <span class="selected-cycle-toggle-text" aria-hidden="true"></span>
             </summary>

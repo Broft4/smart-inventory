@@ -340,6 +340,28 @@ body.modal-open {
     flex-direction: column;
     align-items: stretch;
 }
+.admin-period-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    align-items: end;
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid #e7edf4;
+}
+.admin-period-toolbar label {
+    min-width: 180px;
+}
+.admin-period-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.admin-period-actions .btn[disabled],
+.admin-toolbar-actions .btn[disabled] {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
 .admin-filter-checkbox {
     background: #f3f6fb;
     padding: 11px 12px;
@@ -551,6 +573,8 @@ body.modal-open {
     .summary-kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .summary-topline { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .admin-toolbar-grid { grid-template-columns: 1fr 1fr; }
+    .admin-period-toolbar { flex-direction: column; align-items: stretch; }
+    .admin-period-actions { width: 100%; }
 }
 
 @media (max-width: 800px) {

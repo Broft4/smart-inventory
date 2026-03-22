@@ -85,6 +85,7 @@ _target_lookup_cache: dict[str, RuntimeCacheEntry] = {}
 
 DAILY_REPORT_TYPE = 'daily'
 FINAL_REPORT_TYPE = 'final'
+PERIOD_REPORT_TYPE = 'period'
 
 
 def _get_cached_stripped_inventory(location: str, raw_inventory: dict[str, Any]) -> dict[str, Any]:
@@ -1915,6 +1916,68 @@ async def _load_report_employee_starts(report_id: int, db: AsyncSession) -> list
     ).all()
 
 
+async def _load_report_employee_completions_for_report_ids(report_ids: list[int], db: AsyncSession) -> list[ReportEmployeeCompletion]:
+    if not report_ids:
+        return []
+    return (
+        await db.scalars(
+            select(ReportEmployeeCompletion)
+            .where(ReportEmployeeCompletion.report_id.in_(report_ids))
+            .order_by(ReportEmployeeCompletion.finished_at.asc(), ReportEmployeeCompletion.id.asc())
+        )
+    ).all()
+
+
+async def _load_report_employee_starts_for_report_ids(report_ids: list[int], db: AsyncSession) -> list[ReportEmployeeStart]:
+    if not report_ids:
+        return []
+    return (
+        await db.scalars(
+            select(ReportEmployeeStart)
+            .where(ReportEmployeeStart.report_id.in_(report_ids))
+            .order_by(ReportEmployeeStart.started_at.asc(), ReportEmployeeStart.id.asc())
+        )
+    ).all()
+
+
+def _aggregate_employee_activity(
+    starts: list[ReportEmployeeStart],
+    completions: list[ReportEmployeeCompletion],
+    results: list[CheckResult],
+) -> tuple[dict[int, datetime], dict[int, datetime], dict[str, datetime], dict[str, datetime]]:
+    first_by_user_id: dict[int, datetime] = {}
+    last_by_user_id: dict[int, datetime] = {}
+    first_by_name: dict[str, datetime] = {}
+    last_by_name: dict[str, datetime] = {}
+
+    def absorb(user_id: int | None, full_name: str | None, value: datetime | None) -> None:
+        if value is None:
+            return
+        if user_id is not None:
+            current_first = first_by_user_id.get(int(user_id))
+            current_last = last_by_user_id.get(int(user_id))
+            if current_first is None or value < current_first:
+                first_by_user_id[int(user_id)] = value
+            if current_last is None or value > current_last:
+                last_by_user_id[int(user_id)] = value
+        if full_name:
+            current_first_name = first_by_name.get(full_name)
+            current_last_name = last_by_name.get(full_name)
+            if current_first_name is None or value < current_first_name:
+                first_by_name[full_name] = value
+            if current_last_name is None or value > current_last_name:
+                last_by_name[full_name] = value
+
+    for row in starts:
+        absorb(row.user_id, row.user_full_name_snapshot, row.started_at)
+    for row in completions:
+        absorb(row.user_id, row.user_full_name_snapshot, row.finished_at)
+    for row in results:
+        absorb(row.checked_by_user_id, row.checked_by_name_snapshot, row.created_at)
+
+    return first_by_user_id, last_by_user_id, first_by_name, last_by_name
+
+
 async def _is_employee_started_report(report_id: int, user_id: int, db: AsyncSession) -> bool:
     started = await db.scalar(
         select(ReportEmployeeStart)
@@ -2990,6 +3053,356 @@ async def _load_discrepancy_financials(location: str, results: list[CheckResult]
 
     loaded = await asyncio.gather(*(fetch(item_id) for item_id in unique_item_ids))
     return {item_id: values for item_id, values in loaded}
+
+
+async def get_admin_period_report(location: str, date_from: date, date_to: date, db: AsyncSession) -> AdminReport:
+    normalized = _normalize_location(location)
+    if date_from > date_to:
+        raise HTTPException(status_code=400, detail='Дата начала периода не может быть позже даты окончания.')
+
+    reports = (
+        await db.scalars(
+            select(Report)
+            .where(Report.location == normalized)
+            .where(Report.report_type == DAILY_REPORT_TYPE)
+            .where(Report.report_date >= date_from)
+            .where(Report.report_date <= date_to)
+            .order_by(Report.report_date.asc(), Report.id.asc())
+        )
+    ).all()
+
+    for row in reports:
+        await _sync_report_status(row, db)
+    await db.commit()
+
+    period_label = f"{date_from.strftime('%d.%m.%Y')} — {date_to.strftime('%d.%m.%Y')}"
+    if not reports:
+        return AdminReport(
+            report_id=None,
+            report_number=None,
+            report_type=PERIOD_REPORT_TYPE,
+            date=f'{period_label} · ревизий: 0',
+            location=normalized,
+            status='Нет данных за период',
+            categories=[],
+            selected_categories=[],
+            selected_subcategories=[],
+            total_plus=0.0,
+            total_minus=0.0,
+            total_cost=0.0,
+            total_retail=0.0,
+            total_lost_profit=0.0,
+            can_manage_employee_completion=False,
+            employees=[],
+        )
+
+    inventory = await _get_inventory_for(normalized)
+    report_ids = [row.id for row in reports]
+    report_snapshots = await _load_report_target_snapshots_for_report_ids(report_ids, db)
+    raw_results = [
+        row for row in await _load_results_for_report_ids(report_ids, db)
+        if row.category_name != DEFAULT_CATEGORY_NAME and (row.subcategory_name is None or row.subcategory_name != DEFAULT_SUBCATEGORY_NAME)
+    ]
+    results_by_target_key: dict[tuple[str, str], CheckResult] = {}
+    for row in raw_results:
+        results_by_target_key[(row.target_type, row.target_id)] = row
+    results = list(results_by_target_key.values())
+
+    starts = await _load_report_employee_starts_for_report_ids(report_ids, db)
+    completions = await _load_report_employee_completions_for_report_ids(report_ids, db)
+    participant_user_ids = {
+        int(row.user_id)
+        for row in starts + completions
+        if row.user_id is not None
+    }
+    participant_user_ids.update(
+        int(row.checked_by_user_id)
+        for row in results
+        if row.checked_by_user_id is not None
+    )
+
+    discrepancy_financials = await _load_discrepancy_financials(normalized, results)
+    historical_category_ids, historical_subcategory_ids, historical_item_ids = _report_history_target_maps(report_snapshots, results)
+    report_scope_category_ids, report_scope_subcategory_ids, report_scope_category_names, report_scope_subcategory_labels = _report_selection_scope(
+        report_snapshots,
+        results,
+    )
+    selected_category_ids = report_scope_category_ids
+    selected_subcategory_ids = report_scope_subcategory_ids
+    target_category_names = report_scope_category_names
+    target_subcategory_labels = report_scope_subcategory_labels
+
+    active_employees = await _active_employee_users_for_location(normalized, db)
+    active_employee_by_id = {employee.id: employee for employee in active_employees}
+    active_employee_by_name = {employee.full_name: employee for employee in active_employees}
+    report_employees = [active_employee_by_id[user_id] for user_id in sorted(participant_user_ids) if user_id in active_employee_by_id]
+    can_manage_employee_completion = False
+    first_activity_by_user_id, last_activity_by_user_id, first_activity_by_name, last_activity_by_name = _aggregate_employee_activity(
+        starts,
+        completions,
+        results,
+    )
+
+    rows_by_category_target: dict[str, dict[str, CheckResult]] = defaultdict(dict)
+    for row in results:
+        rows_by_category_target[row.category_id][row.target_id] = row
+
+    grouped_problem_items: dict[str, list[DiscrepancyItem]] = defaultdict(list)
+    employee_bucket: dict[str, EmployeeReportSummary] = {}
+    assignment_category_map, assignment_subcategory_map, assignment_item_map = _category_assignments_map([])
+
+    def ensure_employee_bucket(full_name: str | None, user_id: int | None = None) -> EmployeeReportSummary | None:
+        if not full_name:
+            return None
+        summary = employee_bucket.get(full_name)
+        active_employee = active_employee_by_name.get(full_name)
+        resolved_user_id = user_id or (active_employee.id if active_employee else None)
+        first_activity = None
+        last_activity = None
+        if resolved_user_id is not None:
+            first_activity = first_activity_by_user_id.get(resolved_user_id)
+            last_activity = last_activity_by_user_id.get(resolved_user_id)
+        if first_activity is None:
+            first_activity = first_activity_by_name.get(full_name)
+        if last_activity is None:
+            last_activity = last_activity_by_name.get(full_name)
+
+        if summary is None:
+            summary = EmployeeReportSummary(
+                user_id=resolved_user_id,
+                full_name=full_name,
+                categories=[],
+                completed_categories=0,
+                discrepancy_items=0,
+                started_current_report=first_activity is not None,
+                started_at=_format_completion_datetime(first_activity) if first_activity else None,
+                finished_current_report=last_activity is not None,
+                finished_at=_format_completion_datetime(last_activity) if last_activity else None,
+                can_reopen_access=False,
+            )
+            employee_bucket[full_name] = summary
+            return summary
+
+        if summary.user_id is None and resolved_user_id is not None:
+            summary.user_id = resolved_user_id
+        if first_activity is not None:
+            summary.started_current_report = True
+            summary.started_at = _format_completion_datetime(first_activity)
+        if last_activity is not None:
+            summary.finished_current_report = True
+            summary.finished_at = _format_completion_datetime(last_activity)
+        summary.can_reopen_access = False
+        return summary
+
+    for employee in report_employees:
+        ensure_employee_bucket(employee.full_name, employee.id)
+
+    for row in starts:
+        ensure_employee_bucket(row.user_full_name_snapshot, row.user_id)
+    for row in completions:
+        ensure_employee_bucket(row.user_full_name_snapshot, row.user_id)
+
+    for row in results:
+        if row.checked_by_name_snapshot:
+            bucket = ensure_employee_bucket(row.checked_by_name_snapshot, row.checked_by_user_id)
+            if bucket and row.category_name not in bucket.categories:
+                bucket.categories.append(row.category_name)
+
+        if row.target_type == 'item' and row.status == 'red':
+            financials = discrepancy_financials.get(row.target_id, {})
+            diff_qty = abs(float(row.diff or 0))
+            cost_price = financials.get('cost_price')
+            retail_price = financials.get('retail_price')
+            cost_total = round(diff_qty * cost_price, 2) if cost_price is not None else None
+            retail_total = round(diff_qty * retail_price, 2) if retail_price is not None else None
+            lost_profit = None
+            if cost_total is not None and retail_total is not None:
+                lost_profit = round(retail_total - cost_total, 2)
+
+            if row.checked_by_name_snapshot:
+                bucket = ensure_employee_bucket(row.checked_by_name_snapshot, row.checked_by_user_id)
+                if bucket:
+                    bucket.discrepancy_items += 1
+                    bucket.total_cost = float(round(float(bucket.total_cost or 0.0) + float(cost_total or 0.0), 2))
+                    bucket.total_retail = float(round(float(bucket.total_retail or 0.0) + float(retail_total or 0.0), 2))
+                    bucket.total_lost_profit = float(round(float(bucket.total_lost_profit or 0.0) + float(lost_profit or 0.0), 2))
+
+            grouped_problem_items[row.category_name].append(
+                DiscrepancyItem(
+                    check_result_id=row.id,
+                    category_name=row.category_name,
+                    name=row.target_name,
+                    expected=float(row.expected_qty),
+                    actual=float(row.actual_qty or 0),
+                    diff=float(row.diff or 0),
+                    checked_by=row.checked_by_name_snapshot,
+                    subcategory_name=row.subcategory_name,
+                    cost_price=cost_price,
+                    retail_price=retail_price,
+                    cost_total=cost_total,
+                    retail_total=retail_total,
+                    lost_profit=lost_profit,
+                )
+            )
+
+    categories: list[CategoryResult] = []
+    full_inventory_by_category_id = {category['id']: category for category in inventory['categories']}
+    inventory = _filter_inventory_by_targets(
+        inventory,
+        selected_category_ids,
+        selected_subcategory_ids,
+        retained_category_ids=historical_category_ids,
+        retained_subcategory_ids=historical_subcategory_ids,
+        retained_item_ids=historical_item_ids,
+    )
+    for raw_category in inventory['categories']:
+        result_map = rows_by_category_target.get(raw_category['id'], {})
+        is_completed, status = (True, StatusEnum.GREEN) if _category_is_complete(raw_category, result_map) else (False, StatusEnum.GREY)
+        if not is_completed:
+            statuses = [_subcategory_is_complete(sub, result_map)[1] for sub in raw_category['subcategories']]
+            if any(s == StatusEnum.RED for s in statuses):
+                status = StatusEnum.RED
+            elif any(s == StatusEnum.ORANGE for s in statuses):
+                status = StatusEnum.ORANGE
+            elif any(s == StatusEnum.GREEN for s in statuses):
+                status = StatusEnum.ORANGE
+            else:
+                status = StatusEnum.GREY
+        elif grouped_problem_items.get(raw_category['name']):
+            status = StatusEnum.RED
+
+        selected_sub_ids_for_category = selected_subcategory_ids.get(raw_category['id'], set())
+        selected_sub_names = sorted([
+            sub['name']
+            for sub in raw_category['subcategories']
+            if sub['id'] in selected_sub_ids_for_category
+        ])
+        category_assignment = assignment_category_map.get(raw_category['id'])
+        sub_assignments = assignment_subcategory_map.get(raw_category['id'], {})
+        item_assignments_by_sub = assignment_item_map.get(raw_category['id'], {})
+        completed_subcategories: list[CompletedSubcategoryInfo] = []
+        in_progress_subcategories: list[InProgressSubcategoryInfo] = []
+        source_category = full_inventory_by_category_id.get(raw_category['id'], raw_category)
+        category_taken_whole = bool(category_assignment) or _category_taken_in_report(raw_category['id'], report_snapshots)
+        inferred_category_owner: str | None = None
+
+        detail_subcategories = raw_category['subcategories']
+        category_snapshot_owner = _category_snapshot_assignment_label(raw_category['id'], report_snapshots) if category_taken_whole else None
+        if not category_snapshot_owner and inferred_category_owner:
+            category_snapshot_owner = inferred_category_owner
+
+        for raw_sub in detail_subcategories:
+            if _is_categoryless_subcategory(source_category, raw_sub):
+                continue
+
+            sub_completed, sub_status = _subcategory_is_complete(raw_sub, result_map)
+            sub_assignment = sub_assignments.get(raw_sub['id'])
+            item_assignments = item_assignments_by_sub.get(raw_sub['id'], {})
+            sub_taken_in_report = (
+                category_taken_whole
+                or bool(category_assignment or sub_assignment or item_assignments)
+                or _subcategory_taken_in_report(raw_category['id'], raw_sub['id'], report_snapshots)
+            )
+
+            if sub_completed:
+                if sub_status == StatusEnum.GREEN:
+                    sub_row = result_map.get(raw_sub['id'])
+                    checked_by = sub_row.checked_by_name_snapshot if sub_row else None
+                    if not checked_by:
+                        item_rows = [result_map.get(item['id']) for item in raw_sub['items']]
+                        item_rows = [row for row in item_rows if row and row.checked_by_name_snapshot]
+                        if item_rows:
+                            owners = {row.checked_by_name_snapshot for row in item_rows if row.checked_by_name_snapshot}
+                            checked_by = _owner_label(owners)
+                    completed_subcategories.append(CompletedSubcategoryInfo(
+                        name=raw_sub['name'],
+                        checked_by=checked_by,
+                        status=sub_status,
+                    ))
+                continue
+
+            show_as_taken_for_detail = category_taken_whole or sub_taken_in_report
+            if not show_as_taken_for_detail:
+                continue
+
+            assigned_to_label = (
+                category_assignment.user_full_name_snapshot
+                if category_assignment and category_assignment.user_full_name_snapshot
+                else (category_snapshot_owner or (sub_assignment.user_full_name_snapshot if sub_assignment and sub_assignment.user_full_name_snapshot else None))
+            )
+            if not assigned_to_label and item_assignments:
+                assigned_to_label = _owner_label({
+                    assignment.user_full_name_snapshot
+                    for assignment in item_assignments.values()
+                    if assignment.user_full_name_snapshot
+                })
+            if not assigned_to_label:
+                assigned_to_label = _subcategory_snapshot_assignment_label(raw_category['id'], raw_sub['id'], report_snapshots)
+
+            in_progress_subcategories.append(InProgressSubcategoryInfo(
+                name=raw_sub['name'],
+                assigned_to=assigned_to_label,
+            ))
+
+        completed_subcategories.sort(key=lambda item: item.name.lower())
+        in_progress_subcategories.sort(key=lambda item: item.name.lower())
+        remaining_subcategories = [item.name for item in in_progress_subcategories]
+
+        categories.append(CategoryResult(
+            name=raw_category['name'],
+            status=status,
+            assigned_to=(
+                _category_assignment_label(raw_category['id'], [])
+                or _category_snapshot_assignment_label(raw_category['id'], report_snapshots)
+                or inferred_category_owner
+            ),
+            selected_on_cycle=raw_category['id'] in selected_category_ids,
+            selected_subcategories=selected_sub_names,
+            remaining_subcategories=remaining_subcategories,
+            in_progress_subcategories=in_progress_subcategories,
+            completed_subcategories=completed_subcategories,
+            problem_items=grouped_problem_items.get(raw_category['name'], []),
+        ))
+
+    for category in categories:
+        owners = {item.checked_by for item in category.problem_items if item.checked_by}
+        if len(owners) == 1:
+            owner = next(iter(owners))
+            owner_bucket = ensure_employee_bucket(owner)
+            if owner_bucket and category.name not in owner_bucket.categories:
+                owner_bucket.categories.append(category.name)
+
+    for summary in employee_bucket.values():
+        summary.categories = sorted(summary.categories, key=str.lower)
+        summary.completed_categories = sum(1 for category in categories if category.assigned_to == summary.full_name and category.status in {StatusEnum.GREEN, StatusEnum.RED})
+        summary.total_cost = float(round(float(summary.total_cost or 0.0), 2))
+        summary.total_retail = float(round(float(summary.total_retail or 0.0), 2))
+        summary.total_lost_profit = float(round(float(summary.total_lost_profit or 0.0), 2))
+
+    total_plus = sum(max(float(item.diff), 0.0) for items in grouped_problem_items.values() for item in items)
+    total_minus = abs(sum(min(float(item.diff), 0.0) for items in grouped_problem_items.values() for item in items))
+    total_cost = sum(float(item.cost_total or 0.0) for items in grouped_problem_items.values() for item in items)
+    total_retail = sum(float(item.retail_total or 0.0) for items in grouped_problem_items.values() for item in items)
+    total_lost_profit = sum(float(item.lost_profit or 0.0) for items in grouped_problem_items.values() for item in items)
+
+    return AdminReport(
+        report_id=None,
+        report_number=None,
+        report_type=PERIOD_REPORT_TYPE,
+        date=f'{period_label} · ревизий: {len(reports)}',
+        location=normalized,
+        status='Период',
+        categories=categories,
+        selected_categories=target_category_names,
+        selected_subcategories=target_subcategory_labels,
+        total_plus=float(total_plus),
+        total_minus=float(total_minus),
+        total_cost=float(round(total_cost, 2)),
+        total_retail=float(round(total_retail, 2)),
+        total_lost_profit=float(round(total_lost_profit, 2)),
+        can_manage_employee_completion=can_manage_employee_completion,
+        employees=sorted(employee_bucket.values(), key=lambda item: item.full_name.lower()),
+    )
 
 
 async def get_admin_report(location: str, db: AsyncSession, report_id: int | None = None) -> AdminReport:

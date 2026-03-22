@@ -36,6 +36,9 @@ const adminState = {
     selectedLocation: persistedAdminUiState.selectedLocation || '',
     selectedReportId: persistedAdminUiState.selectedReportId ?? null,
     selectedReportIdByLocation: persistedAdminUiState.selectedReportIdByLocation || {},
+    isPeriodMode: false,
+    periodDateFrom: '',
+    periodDateTo: '',
     employeeFilter: '',
     discrepancyOnly: false,
     completedOnly: false,
@@ -54,6 +57,24 @@ const adminState = {
 
 function formatDateTime(value) {
     return value || '-';
+}
+
+function getTodayIsoDate() {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+function applyDefaultPeriodInputs() {
+    const fromInput = document.getElementById('admin-period-date-from');
+    const toInput = document.getElementById('admin-period-date-to');
+    const today = getTodayIsoDate();
+    if (fromInput && !fromInput.value) fromInput.value = today;
+    if (toInput && !toInput.value) toInput.value = today;
+    adminState.periodDateFrom = fromInput?.value || '';
+    adminState.periodDateTo = toInput?.value || '';
 }
 
 function safeText(value) {
@@ -88,7 +109,15 @@ function formatFinishedAt(value) {
 }
 
 function buildEmployeeRevisionStatus(employee, report) {
-    const canManage = Boolean(report?.can_manage_employee_completion && report?.report_type !== 'final');
+    if (report?.report_type === 'period') {
+        return {
+            label: 'Участвовал в выбранном периоде',
+            className: 'orange',
+            actionHtml: '',
+        };
+    }
+
+    const canManage = Boolean(report?.can_manage_employee_completion && report?.report_type === 'daily');
     if (employee?.finished_current_report) {
         return {
             label: employee.finished_at ? `Завершил: ${formatFinishedAt(employee.finished_at)}` : 'Завершил ревизию',
@@ -1099,6 +1128,38 @@ function applyPreviousCycleTargetsSelection() {
     );
 }
 
+function updateSelectedScopeHeader(report) {
+    const title = document.getElementById('selected-scope-title');
+    const subtitle = document.getElementById('selected-scope-subtitle');
+    if (!title || !subtitle) return;
+
+    if (report?.report_type === 'period') {
+        title.textContent = 'Что было в выбранном периоде';
+        subtitle.textContent = 'Категории и подкатегории, которые попадали в ревизии выбранного периода.';
+        return;
+    }
+
+    if (report?.report_type === 'final') {
+        title.textContent = 'Что было в этом цикле';
+        subtitle.textContent = 'Сводный список категорий и подкатегорий, которые попадали в ревизии выбранного цикла.';
+        return;
+    }
+
+    title.textContent = 'Выбрано на текущий цикл';
+    subtitle.textContent = 'Быстрый список категорий и подкатегорий, которые сейчас включены в ревизию для выбранной точки.';
+}
+
+function updateReportActionButtons(report) {
+    const deleteButton = document.getElementById('delete-report-btn');
+    const resetPeriodButton = document.getElementById('reset-period-report-btn');
+    if (deleteButton) {
+        deleteButton.disabled = Boolean(adminState.isPeriodMode || !adminState.selectedReportId);
+    }
+    if (resetPeriodButton) {
+        resetPeriodButton.disabled = !adminState.isPeriodMode;
+    }
+}
+
 function renderSelectedCycleScope(report) {
     const categoriesContainer = document.getElementById('selected-cycle-categories-list');
     const subcategoriesContainer = document.getElementById('selected-cycle-subcategories-list');
@@ -1142,9 +1203,12 @@ function renderSelectedCycleScope(report) {
     const selectedSubcategoriesHtml = selectedSubcategories.length
         ? selectedSubcategories.map(name => `<span class="category-chip">${highlightMatch(name, adminState.searchQuery)}</span>`).join('')
         : '';
+    const remainingTakenCaption = report?.report_type === 'period'
+        ? 'Оставались незавершёнными в выбранном периоде'
+        : 'Осталось выполнить в этой ревизии';
     const remainingTakenHtml = remainingTakenSubcategories.length
         ? `
-            <div class="muted-text" style="flex-basis:100%;margin:${selectedSubcategories.length ? '10px' : '0'} 0 6px;">Осталось выполнить в этой ревизии</div>
+            <div class="muted-text" style="flex-basis:100%;margin:${selectedSubcategories.length ? '10px' : '0'} 0 6px;">${remainingTakenCaption}</div>
             ${remainingTakenSubcategories.map(sub => `
                 <span class="category-chip category-chip--warning">
                     ${highlightMatch(sub.label, adminState.searchQuery)}${sub.assigned_to ? ` · ${highlightMatch(sub.assigned_to, adminState.searchQuery)}` : ''}
@@ -1746,7 +1810,7 @@ function renderEmployeeDetails(report) {
                             ${employee.discrepancyItems.map(item => {
                                 const diffSign = item.diff > 0 ? '+' : '';
                                 const diffClass = item.diff > 0 ? 'diff-plus' : 'diff-minus';
-                                const canEditDiscrepancy = item.check_result_id && report?.report_type !== 'final';
+                                const canEditDiscrepancy = item.check_result_id && report?.report_type === 'daily';
                                 return `
                                     <tr>
                                         <td>${highlightMatch(item.category_name, adminState.searchQuery)}</td>
@@ -1847,8 +1911,13 @@ function populateEmployeeFilter(report) {
 function updateSummary(report) {
     document.getElementById('report-location').textContent = report.location;
     document.getElementById('report-date').textContent = formatDateTime(report.date);
-    document.getElementById('report-status').textContent = `${report.status || '-'}${report.report_type === 'final' ? ' · итоговая' : ''}`;
-    document.getElementById('report-id').textContent = report.report_type === 'final' ? 'Итоговая' : (report.report_number ?? report.report_id ?? '-');
+    const typeSuffix = report.report_type === 'final'
+        ? ' · итоговая'
+        : (report.report_type === 'period' ? ' · период' : '');
+    document.getElementById('report-status').textContent = `${report.status || '-'}${typeSuffix}`;
+    document.getElementById('report-id').textContent = report.report_type === 'final'
+        ? 'Итоговая'
+        : (report.report_type === 'period' ? 'Период' : (report.report_number ?? report.report_id ?? '-'));
     document.getElementById('total-plus').textContent = `+${report.total_plus}`;
     document.getElementById('total-minus').textContent = report.total_minus;
     document.getElementById('report-status-chip').textContent = report.status || '-';
@@ -1869,7 +1938,9 @@ function updateSummary(report) {
     document.getElementById('total-cost').textContent = formatMoney(report.total_cost);
     document.getElementById('total-retail').textContent = formatMoney(report.total_retail);
     document.getElementById('total-lost-profit').textContent = formatMoney(report.total_lost_profit);
+    updateSelectedScopeHeader(report);
     renderSelectedCycleScope(report);
+    updateReportActionButtons(report);
 }
 
 function renderEmployees(report) {
@@ -1965,9 +2036,13 @@ function renderCategories(report) {
         const inProgressSubcategories = Array.isArray(cat.in_progress_subcategories) ? cat.in_progress_subcategories : [];
         const remainingSubcategories = Array.isArray(cat.remaining_subcategories) ? cat.remaining_subcategories : [];
         const completedSubcategories = Array.isArray(cat.completed_subcategories) ? cat.completed_subcategories : [];
-        const selectionText = cat.selected_on_cycle
-            ? 'На цикл выбрана вся категория'
-            : (selectedSubcategories.length ? `На цикл выбрано подкатегорий: ${selectedSubcategories.length}` : '');
+        const selectionText = report?.report_type === 'period'
+            ? (cat.selected_on_cycle
+                ? 'В периоде брали всю категорию'
+                : (selectedSubcategories.length ? `В периоде затрагивалось подкатегорий: ${selectedSubcategories.length}` : ''))
+            : (cat.selected_on_cycle
+                ? 'На цикл выбрана вся категория'
+                : (selectedSubcategories.length ? `На цикл выбрано подкатегорий: ${selectedSubcategories.length}` : ''));
         const summaryText = isDiagnostic
             ? 'Служебная ветка. Не входит в общую ревизию.'
             : (problemItems.length
@@ -2044,7 +2119,7 @@ function renderCategories(report) {
                                     ${problemItems.map(item => {
                                         const diffSign = item.diff > 0 ? '+' : '';
                                         const diffClass = item.diff > 0 ? 'diff-plus' : 'diff-minus';
-                                        const canEditDiscrepancy = item.check_result_id && report?.report_type !== 'final';
+                                        const canEditDiscrepancy = item.check_result_id && report?.report_type === 'daily';
                                         return `
                                             <tr>
                                                 <td>${highlightMatch(item.subcategory_name || '-', adminState.searchQuery)}</td>
@@ -2182,6 +2257,7 @@ async function loadAdminReport(location, reportId) {
         }
         const report = payload;
         adminState.report = report;
+        adminState.isPeriodMode = false;
         adminState.selectedReportId = report.report_id || null;
         if (adminState.selectedLocation) {
             adminState.selectedReportIdByLocation[adminState.selectedLocation] = adminState.selectedReportId;
@@ -2201,6 +2277,58 @@ async function loadAdminReport(location, reportId) {
         }
         categoriesContainer.innerHTML = '<div class="category-card"><p class="empty-text error-text">Ошибка загрузки данных ревизии.</p></div>';
     }
+}
+
+async function loadAdminPeriodReport(location, dateFrom, dateTo) {
+    const categoriesContainer = document.getElementById('report-categories');
+    const employeesContainer = document.getElementById('report-employees');
+    const employeeDetailsContainer = document.getElementById('report-employee-details');
+
+    setAdminReportLoading(`Загружаем период ${dateFrom} — ${dateTo} для точки «${location}»...`);
+
+    try {
+        const params = new URLSearchParams({
+            location,
+            date_from: dateFrom,
+            date_to: dateTo,
+        });
+
+        const response = await fetch(`/api/report-period?${params.toString()}`);
+        let payload = null;
+        try {
+            payload = await response.json();
+        } catch {
+            payload = null;
+        }
+        if (!response.ok) {
+            throw new Error(payload?.detail || payload?.message || 'Ошибка загрузки периода');
+        }
+
+        adminState.report = payload;
+        adminState.isPeriodMode = true;
+        adminState.periodDateFrom = dateFrom;
+        adminState.periodDateTo = dateTo;
+
+        updateSummary(payload);
+        populateEmployeeFilter(payload);
+        renderAllReportViews(payload);
+        setAdminReportStatus('');
+    } catch (error) {
+        console.error(error);
+        setAdminReportStatus(error?.message || 'Не удалось загрузить период.', 'error');
+        employeesContainer.innerHTML = '<p class="empty-text error-text">Ошибка загрузки данных о сотрудниках.</p>';
+        if (employeeDetailsContainer) {
+            employeeDetailsContainer.innerHTML = '<div class="category-card"><p class="empty-text error-text">Ошибка загрузки детализации по сотрудникам.</p></div>';
+        }
+        categoriesContainer.innerHTML = '<div class="category-card"><p class="empty-text error-text">Ошибка загрузки периода.</p></div>';
+    }
+}
+
+async function resetPeriodToSelectedReport() {
+    const location = getSelectedAdminLocation();
+    const reportId = getCurrentAdminReportId();
+    if (!location) return;
+    await loadAdminReport(location, reportId);
 }
 
 async function deleteSelectedReport() {
@@ -2442,6 +2570,26 @@ document.addEventListener('DOMContentLoaded', async () => {
     userRoleSelect?.addEventListener('change', () => updateUserFormByRole());
     document.getElementById('user-form-reset').addEventListener('click', resetUserForm);
     document.getElementById('delete-report-btn').addEventListener('click', deleteSelectedReport);
+    document.getElementById('load-period-report-btn')?.addEventListener('click', async () => {
+        const fromInput = document.getElementById('admin-period-date-from');
+        const toInput = document.getElementById('admin-period-date-to');
+        const dateFrom = fromInput?.value || '';
+        const dateTo = toInput?.value || '';
+        if (!dateFrom || !dateTo) {
+            alert('Выберите обе даты периода.');
+            return;
+        }
+        if (dateFrom > dateTo) {
+            alert('Дата начала периода не может быть позже даты окончания.');
+            return;
+        }
+        const location = locationSelect.value;
+        if (!location) return;
+        adminState.employeeFilter = '';
+        adminState.expandedCategories.clear();
+        await loadAdminPeriodReport(location, dateFrom, dateTo);
+    });
+    document.getElementById('reset-period-report-btn')?.addEventListener('click', resetPeriodToSelectedReport);
     document.getElementById('download-diagnostics-btn')?.addEventListener('click', async () => {
         const location = locationSelect.value;
         if (!location) return;
@@ -2532,6 +2680,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     initModalCloseBehavior();
     setViewMode('categories');
     updateUserFormByRole();
+    applyDefaultPeriodInputs();
     await loadLocations();
     await reloadReportsSection(adminState.selectedLocation || document.getElementById('admin-location-select').value);
 });

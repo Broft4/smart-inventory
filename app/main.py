@@ -4,6 +4,7 @@ import asyncio
 import csv
 import io
 import logging
+from datetime import date
 
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -35,6 +36,7 @@ from app.logic import (
     ensure_user_can_access_location,
     finish_report,
     get_admin_report,
+    get_admin_period_report,
     reopen_employee_report_access,
     get_cycle_targets,
     get_inventory_data,
@@ -144,7 +146,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260322-admin-detail-and-employee-fixes'
+templates.env.globals['asset_version'] = '20260322-period-report'
 
 
 @app.middleware('http')
@@ -460,6 +462,57 @@ async def api_get_reports(location: str | None = None, user: User = Depends(requ
         await ensure_user_can_access_location(user, target_location, db)
 
     return await get_reports_history(target_location, db)
+
+
+@app.get('/api/report-period', response_model=AdminReport)
+async def api_get_period_report(request: Request, location: str | None = None, date_from: date | None = None, date_to: date | None = None, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    if not location:
+        raise HTTPException(status_code=400, detail='Нужно указать точку.')
+    if date_from is None or date_to is None:
+        raise HTTPException(status_code=400, detail='Нужно указать даты периода.')
+    await ensure_user_can_access_location(admin, location, db)
+
+    request_id = _request_id(request)
+    started = monotonic()
+    logger.info('[req:%s] GET /api/report-period start user_id=%s location=%s date_from=%s date_to=%s', request_id, admin.id, location, date_from, date_to)
+    try:
+        response = await get_admin_period_report(location, date_from, date_to, db)
+        logger.info(
+            '[req:%s] GET /api/report-period ok user_id=%s location=%s date_from=%s date_to=%s categories=%s employees=%s duration_ms=%s',
+            request_id,
+            admin.id,
+            location,
+            date_from,
+            date_to,
+            len(response.categories),
+            len(response.employees),
+            _duration_ms(started),
+        )
+        return response
+    except HTTPException as exc:
+        logger.warning(
+            '[req:%s] GET /api/report-period http_error user_id=%s location=%s date_from=%s date_to=%s status=%s detail=%s duration_ms=%s',
+            request_id,
+            admin.id,
+            location,
+            date_from,
+            date_to,
+            exc.status_code,
+            exc.detail,
+            _duration_ms(started),
+        )
+        raise
+    except Exception:
+        logger.exception(
+            '[req:%s] GET /api/report-period crash user_id=%s location=%s date_from=%s date_to=%s duration_ms=%s',
+            request_id,
+            admin.id,
+            location,
+            date_from,
+            date_to,
+            _duration_ms(started),
+        )
+        raise
 
 
 @app.get('/api/report', response_model=AdminReport)
