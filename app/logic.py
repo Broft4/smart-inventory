@@ -3125,6 +3125,37 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         source_category = full_inventory_by_category_id.get(raw_category['id'], raw_category)
         category_selected_on_cycle = raw_category['id'] in selected_category_ids
         category_taken_whole = bool(category_assignment) or _category_taken_in_report(raw_category['id'], report_snapshots)
+        inferred_category_owner: str | None = None
+
+        if report_type == DAILY_REPORT_TYPE and category_selected_on_cycle and not category_taken_whole:
+            category_owner_candidates: set[str] = set()
+            if category_assignment and category_assignment.user_full_name_snapshot:
+                category_owner_candidates.add(category_assignment.user_full_name_snapshot)
+            category_owner_candidates.update(
+                assignment.user_full_name_snapshot
+                for assignment in sub_assignments.values()
+                if assignment.user_full_name_snapshot
+            )
+            category_owner_candidates.update(
+                assignment.user_full_name_snapshot
+                for assignments_by_item in item_assignments_by_sub.values()
+                for assignment in assignments_by_item.values()
+                if assignment.user_full_name_snapshot
+            )
+            category_owner_candidates.update(
+                row.assigned_user_name_snapshot
+                for row in report_snapshots
+                if row.category_id == raw_category['id'] and row.assigned_user_name_snapshot
+            )
+            category_owner_candidates.update(
+                row.checked_by_name_snapshot
+                for row in result_map.values()
+                if row and row.checked_by_name_snapshot
+            )
+            category_owner_candidates = {name for name in category_owner_candidates if name}
+            if len(category_owner_candidates) == 1:
+                inferred_category_owner = next(iter(category_owner_candidates))
+                category_taken_whole = True
 
         detail_subcategories = raw_category['subcategories']
         if report_type == DAILY_REPORT_TYPE and category_taken_whole:
@@ -3140,6 +3171,8 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
             ]
 
         category_snapshot_owner = _category_snapshot_assignment_label(raw_category['id'], report_snapshots) if category_taken_whole else None
+        if not category_snapshot_owner and inferred_category_owner:
+            category_snapshot_owner = inferred_category_owner
 
         for raw_sub in detail_subcategories:
             if _is_categoryless_subcategory(source_category, raw_sub):
@@ -3201,7 +3234,11 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         categories.append(CategoryResult(
             name=raw_category['name'],
             status=status,
-            assigned_to=_category_assignment_label(raw_category['id'], assignments) or _category_snapshot_assignment_label(raw_category['id'], report_snapshots),
+            assigned_to=(
+                _category_assignment_label(raw_category['id'], assignments)
+                or _category_snapshot_assignment_label(raw_category['id'], report_snapshots)
+                or inferred_category_owner
+            ),
             selected_on_cycle=raw_category['id'] in selected_category_ids,
             selected_subcategories=selected_sub_names,
             remaining_subcategories=remaining_subcategories,
