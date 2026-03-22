@@ -1106,13 +1106,55 @@ function renderSelectedCycleScope(report) {
 
     const selectedCategories = Array.isArray(report?.selected_categories) ? report.selected_categories : [];
     const selectedSubcategories = Array.isArray(report?.selected_subcategories) ? report.selected_subcategories : [];
+    const remainingTakenSubcategories = [];
+    const remainingTakenSeen = new Set();
+
+    (Array.isArray(report?.categories) ? report.categories : []).forEach(category => {
+        const categoryName = category?.name || '';
+        const completedNames = new Set((Array.isArray(category?.completed_subcategories) ? category.completed_subcategories : [])
+            .map(sub => normalizeSearch(sub?.name || ''))
+            .filter(Boolean));
+        const problemNames = new Set((Array.isArray(category?.problem_items) ? category.problem_items : [])
+            .map(item => normalizeSearch(item?.subcategory_name || ''))
+            .filter(Boolean));
+
+        (Array.isArray(category?.in_progress_subcategories) ? category.in_progress_subcategories : []).forEach(sub => {
+            const subName = sub?.name || '';
+            const normalizedSubName = normalizeSearch(subName);
+            if (!normalizedSubName) return;
+            if (completedNames.has(normalizedSubName) || problemNames.has(normalizedSubName)) return;
+
+            const label = categoryName ? `${categoryName} → ${subName}` : subName;
+            const dedupeKey = normalizeSearch(`${label}::${sub?.assigned_to || ''}`);
+            if (remainingTakenSeen.has(dedupeKey)) return;
+            remainingTakenSeen.add(dedupeKey);
+            remainingTakenSubcategories.push({
+                label,
+                assigned_to: sub?.assigned_to || '',
+            });
+        });
+    });
 
     categoriesContainer.innerHTML = selectedCategories.length
         ? selectedCategories.map(name => `<span class="category-chip">${highlightMatch(name, adminState.searchQuery)}</span>`).join('')
         : '<span class="muted-text">Нет выбранных категорий</span>';
 
-    subcategoriesContainer.innerHTML = selectedSubcategories.length
+    const selectedSubcategoriesHtml = selectedSubcategories.length
         ? selectedSubcategories.map(name => `<span class="category-chip">${highlightMatch(name, adminState.searchQuery)}</span>`).join('')
+        : '';
+    const remainingTakenHtml = remainingTakenSubcategories.length
+        ? `
+            <div class="muted-text" style="flex-basis:100%;margin:${selectedSubcategories.length ? '10px' : '0'} 0 6px;">Осталось выполнить в этой ревизии</div>
+            ${remainingTakenSubcategories.map(sub => `
+                <span class="category-chip category-chip--warning">
+                    ${highlightMatch(sub.label, adminState.searchQuery)}${sub.assigned_to ? ` · ${highlightMatch(sub.assigned_to, adminState.searchQuery)}` : ''}
+                </span>
+            `).join('')}
+        `
+        : '';
+
+    subcategoriesContainer.innerHTML = (selectedSubcategoriesHtml || remainingTakenHtml)
+        ? `${selectedSubcategoriesHtml}${remainingTakenHtml}`
         : '<span class="muted-text">Нет выбранных подкатегорий</span>';
 }
 

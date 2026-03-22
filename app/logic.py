@@ -363,10 +363,6 @@ def _sanitize_historical_daily_report_snapshots(
         for row in results
         if row.checked_by_user_id is not None
     }
-    result_target_keys = {
-        (row.target_type, row.target_id)
-        for row in results
-    }
 
     sanitized: list[ReportTargetSnapshot] = []
     for row in report_snapshots:
@@ -375,9 +371,6 @@ def _sanitize_historical_daily_report_snapshots(
             sanitized.append(row)
             continue
         if (row.target_type, row.target_id, row.assigned_user_id_snapshot) in result_keys:
-            sanitized.append(row)
-            continue
-        if (row.target_type, row.target_id) in result_target_keys:
             sanitized.append(row)
             continue
     return sanitized
@@ -1475,6 +1468,44 @@ def _selection_target_maps(targets: list[SelectionTarget]) -> tuple[set[str], di
         elif row.target_type == 'subcategory' and row.subcategory_id:
             subcategory_ids[row.category_id].add(row.subcategory_id)
     return category_ids, subcategory_ids
+
+
+def _report_selection_scope(
+    report_snapshots: list[ReportTargetSnapshot],
+    results: list[CheckResult],
+) -> tuple[set[str], dict[str, set[str]], list[str], list[str]]:
+    category_ids: set[str] = set()
+    subcategory_ids: dict[str, set[str]] = defaultdict(set)
+    category_names: set[str] = set()
+    subcategory_labels: set[str] = set()
+
+    def absorb(
+        target_type: str,
+        category_id: str,
+        category_name: str | None,
+        subcategory_id: str | None,
+        subcategory_name: str | None,
+    ) -> None:
+        if category_name == DEFAULT_CATEGORY_NAME:
+            return
+        if target_type == 'category':
+            category_ids.add(category_id)
+            if category_name:
+                category_names.add(category_name)
+            return
+        if not subcategory_id or not subcategory_name or subcategory_name == DEFAULT_SUBCATEGORY_NAME:
+            return
+        subcategory_ids[category_id].add(subcategory_id)
+        if category_name:
+            subcategory_labels.add(f"{category_name} → {subcategory_name}")
+
+    for row in report_snapshots:
+        absorb(row.target_type, row.category_id, row.category_name, row.subcategory_id, row.subcategory_name)
+
+    for row in results:
+        absorb(row.target_type, row.category_id, row.category_name, row.subcategory_id, row.subcategory_name)
+
+    return category_ids, {category_id: set(sub_ids) for category_id, sub_ids in subcategory_ids.items()}, sorted(category_names), sorted(subcategory_labels)
 
 
 def _report_history_target_maps(
@@ -2982,6 +3013,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
 
     report_type = report.report_type or DAILY_REPORT_TYPE
     assignments: list[CategoryAssignment] = []
+    is_latest_daily_report = False
     if report_type == FINAL_REPORT_TYPE:
         cycle_reports = (
             await db.scalars(
@@ -3043,6 +3075,22 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
             if row.assigned_user_id_snapshot is None or row.assigned_user_id_snapshot in participant_user_ids
         ]
     historical_category_ids, historical_subcategory_ids, historical_item_ids = _report_history_target_maps(report_snapshots, results)
+    current_selected_category_ids, current_selected_subcategory_ids = _selection_target_maps(targets)
+    current_target_category_names = sorted({target.category_name for target in targets if target.target_type == 'category'})
+    current_target_subcategory_labels = sorted({
+        f"{target.category_name} → {target.subcategory_name}"
+        for target in targets
+        if target.target_type == 'subcategory' and target.subcategory_name
+    })
+    report_scope_category_ids, report_scope_subcategory_ids, report_scope_category_names, report_scope_subcategory_labels = _report_selection_scope(
+        report_snapshots,
+        results,
+    )
+    use_report_scope_for_selection = report_type == DAILY_REPORT_TYPE and not is_latest_daily_report
+    selected_category_ids = report_scope_category_ids if use_report_scope_for_selection else current_selected_category_ids
+    selected_subcategory_ids = report_scope_subcategory_ids if use_report_scope_for_selection else current_selected_subcategory_ids
+    target_category_names = report_scope_category_names if use_report_scope_for_selection else current_target_category_names
+    target_subcategory_labels = report_scope_subcategory_labels if use_report_scope_for_selection else current_target_subcategory_labels
     active_employees = await _active_employee_users_for_location(report.location, db)
     active_employee_by_id = {employee.id: employee for employee in active_employees}
     report_employees = [active_employee_by_id[user_id] for user_id in sorted(participant_user_ids) if user_id in active_employee_by_id]
@@ -3143,13 +3191,6 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
             )
 
     categories: list[CategoryResult] = []
-    selected_category_ids, selected_subcategory_ids = _selection_target_maps(targets)
-    target_category_names = sorted({target.category_name for target in targets if target.target_type == 'category'})
-    target_subcategory_labels = sorted({
-        f"{target.category_name} → {target.subcategory_name}"
-        for target in targets
-        if target.target_type == 'subcategory' and target.subcategory_name
-    })
     full_inventory_by_category_id = {category['id']: category for category in inventory['categories']}
     inventory = _filter_inventory_by_targets(
         inventory,
@@ -3176,6 +3217,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
             status = StatusEnum.RED
 
         selected_sub_ids_for_category = selected_subcategory_ids.get(raw_category['id'], set())
+        report_scope_sub_ids_for_category = report_scope_subcategory_ids.get(raw_category['id'], set())
         selected_sub_names = sorted([
             sub['name']
             for sub in raw_category['subcategories']
@@ -3188,6 +3230,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         in_progress_subcategories: list[InProgressSubcategoryInfo] = []
         source_category = full_inventory_by_category_id.get(raw_category['id'], raw_category)
         category_selected_on_cycle = raw_category['id'] in selected_category_ids
+        category_selected_in_report_scope = raw_category['id'] in report_scope_category_ids
         category_taken_whole = bool(category_assignment) or _category_taken_in_report(raw_category['id'], report_snapshots)
         inferred_category_owner: str | None = None
 
@@ -3230,7 +3273,12 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
                 if (
                     not _is_categoryless_subcategory(source_category, sub)
                     and sub['id'] not in historical_completed_ids
-                    and (category_selected_on_cycle or sub['id'] in selected_sub_ids_for_category)
+                    and (
+                        category_selected_on_cycle
+                        or category_selected_in_report_scope
+                        or sub['id'] in selected_sub_ids_for_category
+                        or sub['id'] in report_scope_sub_ids_for_category
+                    )
                 )
             ]
 
