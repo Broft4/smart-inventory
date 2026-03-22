@@ -2847,6 +2847,13 @@ def _subcategory_taken_in_report(category_id: str, subcategory_id: str, report_s
     )
 
 
+def _category_taken_in_report(category_id: str, report_snapshots: list[ReportTargetSnapshot]) -> bool:
+    return any(
+        row.category_id == category_id and row.target_type == 'category'
+        for row in report_snapshots
+    )
+
+
 def _build_report_numbers(reports: list[Report]) -> dict[int, int]:
     ordered = sorted((item for item in reports if (item.report_type or DAILY_REPORT_TYPE) != FINAL_REPORT_TYPE), key=lambda item: (item.cycle_version, item.date_created, item.id))
     counters: dict[int, int] = defaultdict(int)
@@ -2956,6 +2963,15 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         ]
 
     discrepancy_financials = await _load_discrepancy_financials(normalized, results)
+    completed_before_report: dict[str, set[str]] = {}
+    if report_type == DAILY_REPORT_TYPE:
+        completed_before_report = await _load_completed_subcategory_ids_for_cycle(
+            normalized,
+            report.cycle_version,
+            inventory,
+            db,
+            before_report_date=report.report_date,
+        )
     participant_user_ids = await _get_report_participant_user_ids(report.id, db) if report_type == DAILY_REPORT_TYPE else set()
     if participant_user_ids and report_type == DAILY_REPORT_TYPE:
         report_snapshots = [
@@ -3070,6 +3086,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         for target in targets
         if target.target_type == 'subcategory' and target.subcategory_name
     })
+    full_inventory_by_category_id = {category['id']: category for category in inventory['categories']}
     inventory = _filter_inventory_by_targets(
         inventory,
         selected_category_ids,
@@ -3104,8 +3121,19 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         item_assignments_by_sub = assignment_item_map.get(raw_category['id'], {})
         completed_subcategories: list[CompletedSubcategoryInfo] = []
         in_progress_subcategories: list[InProgressSubcategoryInfo] = []
-        for raw_sub in raw_category['subcategories']:
-            if _is_categoryless_subcategory(raw_category, raw_sub):
+        source_category = full_inventory_by_category_id.get(raw_category['id'], raw_category)
+        category_taken_whole = bool(category_assignment) or _category_taken_in_report(raw_category['id'], report_snapshots)
+        detail_subcategories = raw_category['subcategories']
+        if report_type == DAILY_REPORT_TYPE and category_taken_whole:
+            historical_completed_ids = completed_before_report.get(raw_category['id'], set())
+            detail_subcategories = [
+                sub
+                for sub in source_category.get('subcategories', [])
+                if not _is_categoryless_subcategory(source_category, sub) and sub['id'] not in historical_completed_ids
+            ]
+
+        for raw_sub in detail_subcategories:
+            if _is_categoryless_subcategory(source_category, raw_sub):
                 continue
 
             sub_completed, sub_status = _subcategory_is_complete(raw_sub, result_map)
