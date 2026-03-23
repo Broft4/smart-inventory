@@ -220,7 +220,7 @@ async def require_superadmin(user: User = Depends(require_user)) -> User:
 async def login_page(request: Request, user: User | None = Depends(get_current_user)):
     if user:
         return RedirectResponse(url='/admin' if user.role in {'admin', 'superadmin'} else '/', status_code=302)
-    return templates.TemplateResponse('login.html', {'request': request})
+    return templates.TemplateResponse(request=request, name='login.html', context={'request': request})
 
 
 @app.get('/')
@@ -231,8 +231,9 @@ async def inventory_page(request: Request, user: User | None = Depends(get_curre
         return RedirectResponse(url='/admin', status_code=302)
     _spawn_prewarm(user.location)
     return templates.TemplateResponse(
-        'index.html',
-        {'request': request, 'user': user, 'no_location_assigned': not bool(user.location)},
+        request=request,
+        name='index.html',
+        context={'request': request, 'user': user, 'no_location_assigned': not bool(user.location)},
     )
 
 
@@ -245,7 +246,7 @@ async def admin_page(request: Request, user: User | None = Depends(get_current_u
     accessible_locations = await get_user_accessible_locations(user, db)
     if accessible_locations:
         _spawn_prewarm(accessible_locations[0])
-    return templates.TemplateResponse('admin.html', {'request': request, 'user': user})
+    return templates.TemplateResponse(request=request, name='admin.html', context={'request': request, 'user': user})
 
 
 @app.post('/api/login', response_model=LoginResponse)
