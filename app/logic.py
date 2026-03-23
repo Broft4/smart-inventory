@@ -3704,6 +3704,31 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         if not category_snapshot_owner and inferred_category_owner:
             category_snapshot_owner = inferred_category_owner
 
+        problem_subcategory_ids = {
+            row.subcategory_id
+            for row in results
+            if row.category_id == raw_category['id'] and row.subcategory_id and row.status in {'red', 'orange'}
+        }
+        completed_green_subcategory_ids: set[str] = set()
+        taken_owner_by_subcategory_id: dict[str, str | None] = {}
+
+        def remember_taken_subcategory(sub_id: str, owner_label: str | None) -> None:
+            existing_owner = taken_owner_by_subcategory_id.get(sub_id)
+            if existing_owner:
+                return
+            taken_owner_by_subcategory_id[sub_id] = owner_label
+
+        if category_taken_whole:
+            category_level_owner = (
+                category_assignment.user_full_name_snapshot
+                if category_assignment and category_assignment.user_full_name_snapshot
+                else category_snapshot_owner
+            )
+            for raw_sub in detail_subcategories:
+                if _is_categoryless_subcategory(source_category, raw_sub):
+                    continue
+                remember_taken_subcategory(raw_sub['id'], category_level_owner)
+
         for raw_sub in detail_subcategories:
             if _is_categoryless_subcategory(source_category, raw_sub):
                 continue
@@ -3711,50 +3736,55 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
             sub_completed, sub_status = _subcategory_is_complete(raw_sub, result_map)
             sub_assignment = sub_assignments.get(raw_sub['id'])
             item_assignments = item_assignments_by_sub.get(raw_sub['id'], {})
+            sub_snapshot_owner = _subcategory_snapshot_assignment_label(raw_category['id'], raw_sub['id'], report_snapshots)
             sub_taken_in_report = (
                 category_taken_whole
                 or bool(category_assignment or sub_assignment or item_assignments)
                 or _subcategory_taken_in_report(raw_category['id'], raw_sub['id'], report_snapshots)
             )
 
-            if sub_completed:
-                if sub_status == StatusEnum.GREEN:
-                    sub_row = result_map.get(raw_sub['id'])
-                    checked_by = sub_row.checked_by_name_snapshot if sub_row else None
-                    if not checked_by:
-                        item_rows = [result_map.get(item['id']) for item in raw_sub['items']]
-                        item_rows = [row for row in item_rows if row and row.checked_by_name_snapshot]
-                        if item_rows:
-                            owners = {row.checked_by_name_snapshot for row in item_rows if row.checked_by_name_snapshot}
-                            checked_by = _owner_label(owners)
-                    completed_subcategories.append(CompletedSubcategoryInfo(
-                        name=raw_sub['name'],
-                        checked_by=checked_by,
-                        status=sub_status,
-                    ))
+            if sub_taken_in_report:
+                assigned_to_label = (
+                    category_assignment.user_full_name_snapshot
+                    if category_assignment and category_assignment.user_full_name_snapshot
+                    else (category_snapshot_owner or (sub_assignment.user_full_name_snapshot if sub_assignment and sub_assignment.user_full_name_snapshot else None))
+                )
+                if not assigned_to_label and item_assignments:
+                    assigned_to_label = _owner_label({
+                        assignment.user_full_name_snapshot
+                        for assignment in item_assignments.values()
+                        if assignment.user_full_name_snapshot
+                    })
+                if not assigned_to_label:
+                    assigned_to_label = sub_snapshot_owner
+                remember_taken_subcategory(raw_sub['id'], assigned_to_label)
+
+            if sub_completed and sub_status == StatusEnum.GREEN:
+                sub_row = result_map.get(raw_sub['id'])
+                checked_by = sub_row.checked_by_name_snapshot if sub_row else None
+                if not checked_by:
+                    item_rows = [result_map.get(item['id']) for item in raw_sub['items']]
+                    item_rows = [row for row in item_rows if row and row.checked_by_name_snapshot]
+                    if item_rows:
+                        owners = {row.checked_by_name_snapshot for row in item_rows if row.checked_by_name_snapshot}
+                        checked_by = _owner_label(owners)
+                completed_green_subcategory_ids.add(raw_sub['id'])
+                completed_subcategories.append(CompletedSubcategoryInfo(
+                    name=raw_sub['name'],
+                    checked_by=checked_by,
+                    status=sub_status,
+                ))
+
+        for raw_sub in detail_subcategories:
+            if _is_categoryless_subcategory(source_category, raw_sub):
                 continue
-
-            show_as_taken_for_detail = category_taken_whole or sub_taken_in_report
-            if not show_as_taken_for_detail:
+            if raw_sub['id'] not in taken_owner_by_subcategory_id:
                 continue
-
-            assigned_to_label = (
-                category_assignment.user_full_name_snapshot
-                if category_assignment and category_assignment.user_full_name_snapshot
-                else (category_snapshot_owner or (sub_assignment.user_full_name_snapshot if sub_assignment and sub_assignment.user_full_name_snapshot else None))
-            )
-            if not assigned_to_label and item_assignments:
-                assigned_to_label = _owner_label({
-                    assignment.user_full_name_snapshot
-                    for assignment in item_assignments.values()
-                    if assignment.user_full_name_snapshot
-                })
-            if not assigned_to_label:
-                assigned_to_label = _subcategory_snapshot_assignment_label(raw_category['id'], raw_sub['id'], report_snapshots)
-
+            if raw_sub['id'] in completed_green_subcategory_ids or raw_sub['id'] in problem_subcategory_ids:
+                continue
             in_progress_subcategories.append(InProgressSubcategoryInfo(
                 name=raw_sub['name'],
-                assigned_to=assigned_to_label,
+                assigned_to=taken_owner_by_subcategory_id.get(raw_sub['id']),
             ))
 
         completed_subcategories.sort(key=lambda item: item.name.lower())

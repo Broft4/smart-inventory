@@ -1296,18 +1296,12 @@ function renderSelectedCycleScope(report) {
     const selectedSubcategoriesHtml = selectedSubcategories.length
         ? selectedSubcategories.map(name => `<span class="category-chip">${highlightMatch(name, adminState.searchQuery)}</span>`).join('')
         : '';
-    const remainingTakenCaption = report?.report_type === 'period'
-        ? 'Оставались незавершёнными в выбранном периоде'
-        : 'Осталось выполнить в этой ревизии';
     const remainingTakenHtml = remainingTakenSubcategories.length
-        ? `
-            <div class="muted-text" style="flex-basis:100%;margin:${selectedSubcategories.length ? '10px' : '0'} 0 6px;">${remainingTakenCaption}</div>
-            ${remainingTakenSubcategories.map(sub => `
+        ? `${remainingTakenSubcategories.map(sub => `
                 <span class="category-chip category-chip--warning">
                     ${highlightMatch(sub.label, adminState.searchQuery)}${sub.assigned_to ? ` · ${highlightMatch(sub.assigned_to, adminState.searchQuery)}` : ''}
                 </span>
-            `).join('')}
-        `
+            `).join('')}`
         : '';
 
     subcategoriesContainer.innerHTML = (selectedSubcategoriesHtml || remainingTakenHtml)
