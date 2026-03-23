@@ -501,10 +501,12 @@ function renderDirectItemsBlock(category, sub, query) {
     `;
 }
 
-function renderSubcategoryCard(category, sub, query) {
+function renderSubcategoryCard(category, sub, query, modeOverride = null) {
     if (sub.flatten_mode === 'category_direct') {
         return renderDirectItemsBlock(category, sub, query);
     }
+    const effectiveMode = modeOverride || employeePageState.filter;
+    const completedReadonly = effectiveMode === 'completed';
     const locked = sub.is_locked;
     const diagnosticBucket = isDiagnosticSubcategory(category, sub) || sub.is_diagnostic;
     let icon = diagnosticBucket ? '🧭' : '📂';
@@ -522,7 +524,7 @@ function renderSubcategoryCard(category, sub, query) {
     })();
 
     let selectionHtml = '';
-    const quickActionHtml = (!diagnosticBucket && sub.can_take)
+    const quickActionHtml = (!completedReadonly && !diagnosticBucket && sub.can_take)
         ? `<div class="subcategory-action-row" style="margin:8px 0 6px;"><button class="btn secondary btn-inline" onclick="takeSubcategory('${category.id}', '${sub.id}')">Взять подкатегорию</button></div>`
         : '';
     if (diagnosticBucket) {
@@ -582,17 +584,17 @@ function renderSubcategoryCard(category, sub, query) {
         `;
     }).join('');
 
-    const canCountThisSub = !diagnosticBucket && (sub.assigned_to_current_user || sub.taken_as_part_of_category);
-    const showItemsBlock = diagnosticBucket || sub.status === 'orange';
+    const canCountThisSub = !completedReadonly && !diagnosticBucket && (sub.assigned_to_current_user || sub.taken_as_part_of_category);
+    const showItemsBlock = !completedReadonly && (diagnosticBucket || sub.status === 'orange');
     const itemsTitle = diagnosticBucket
         ? '<p class="items-warning diagnostic-warning">⚠️ Служебная ветка. Общий ввод отключён: выбирайте и проверяйте только отдельные товары.</p>'
         : '<p class="items-warning">⚠️ Не сошлось. Считаем поштучно:</p>';
 
     return `
         <div class="category-card subcategory-card status-${sub.status}" id="card-${sub.id}">
-            <h3 id="title-${sub.id}" onclick="toggleSubcategory('${sub.id}')">${icon} ${highlightMatch(sub.name, query)}</h3>
+            <h3 id="title-${sub.id}" ${completedReadonly ? '' : `onclick="toggleSubcategory('${sub.id}')"`}>${icon} ${highlightMatch(sub.name, query)}</h3>
             ${quickActionHtml}
-            <div id="body-${sub.id}" style="display:${subExpanded ? 'block' : 'none'}; ${locked && !canCountThisSub && !diagnosticBucket ? 'opacity:.65;' : ''}">
+            <div id="body-${sub.id}" style="display:${completedReadonly ? 'none' : (subExpanded ? 'block' : 'none')}; ${locked && !canCountThisSub && !diagnosticBucket ? 'opacity:.65;' : ''}">
                 ${selectionHtml}
                 ${canCountThisSub ? `
                     <p class="muted-text">Посчитайте всё вместе.</p>
@@ -648,7 +650,7 @@ function renderCategoryCard(category, query, modeOverride = null) {
     if (!visibleSubcategories.length) {
         bodyHtml += '<div class="employee-empty-state">По этому запросу в категории ничего не найдено.</div>';
     } else {
-        bodyHtml += visibleSubcategories.map(sub => renderSubcategoryCard(category, sub, query)).join('');
+        bodyHtml += visibleSubcategories.map(sub => renderSubcategoryCard(category, sub, query, modeOverride)).join('');
     }
 
     return `
