@@ -3001,6 +3001,70 @@ def _category_taken_in_report(category_id: str, report_snapshots: list[ReportTar
     )
 
 
+def _subcategory_name_lookup(
+    category_id: str,
+    source_category: dict[str, Any] | None,
+    targets: list[SelectionTarget],
+    sub_assignments: dict[str, CategoryAssignment],
+    item_assignments_by_sub: dict[str, dict[str, CategoryAssignment]],
+    report_snapshots: list[ReportTargetSnapshot],
+    results: list[CheckResult],
+) -> dict[str, str]:
+    names: dict[str, str] = {}
+
+    if source_category:
+        for raw_sub in source_category.get('subcategories', []):
+            if _is_categoryless_subcategory(source_category, raw_sub):
+                continue
+            names.setdefault(raw_sub['id'], raw_sub['name'])
+
+    for row in targets:
+        if row.category_id == category_id and row.subcategory_id and row.subcategory_name:
+            names.setdefault(row.subcategory_id, row.subcategory_name)
+
+    for assignment in sub_assignments.values():
+        if assignment.subcategory_id and assignment.subcategory_name:
+            names.setdefault(assignment.subcategory_id, assignment.subcategory_name)
+
+    for sub_id, item_assignments in item_assignments_by_sub.items():
+        for assignment in item_assignments.values():
+            if assignment.subcategory_id and assignment.subcategory_name:
+                names.setdefault(assignment.subcategory_id, assignment.subcategory_name)
+                break
+        else:
+            if sub_id:
+                names.setdefault(sub_id, sub_id)
+
+    for row in report_snapshots:
+        if row.category_id == category_id and row.subcategory_id and row.subcategory_name:
+            names.setdefault(row.subcategory_id, row.subcategory_name)
+
+    for row in results:
+        if row.category_id == category_id and row.subcategory_id and row.subcategory_name:
+            names.setdefault(row.subcategory_id, row.subcategory_name)
+
+    return names
+
+
+def _subcategory_completion_status_for_admin(
+    raw_subcategory: dict[str, Any] | None,
+    subcategory_id: str,
+    subcategory_name: str,
+    result_map: dict[str, CheckResult],
+) -> tuple[bool, StatusEnum]:
+    if raw_subcategory is not None:
+        return _subcategory_is_complete(raw_subcategory, result_map)
+
+    sub_row = result_map.get(subcategory_id)
+    if sub_row and sub_row.status == 'green':
+        return True, StatusEnum.GREEN
+    if sub_row and sub_row.status == 'orange':
+        return False, StatusEnum.ORANGE
+    if sub_row and sub_row.status == 'red':
+        return True, StatusEnum.RED
+    return False, StatusEnum.GREY
+
+
 def _build_report_numbers(reports: list[Report]) -> dict[int, int]:
     ordered = sorted((item for item in reports if (item.report_type or DAILY_REPORT_TYPE) != FINAL_REPORT_TYPE), key=lambda item: (item.cycle_version, item.date_created, item.id))
     counters: dict[int, int] = defaultdict(int)
@@ -3711,10 +3775,52 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         }
         completed_green_subcategory_ids: set[str] = set()
         taken_owner_by_subcategory_id: dict[str, str | None] = {}
+        source_sub_by_id = {
+            sub['id']: sub
+            for sub in source_category.get('subcategories', [])
+            if not _is_categoryless_subcategory(source_category, sub)
+        }
+        subcategory_name_by_id = _subcategory_name_lookup(
+            raw_category['id'],
+            source_category,
+            targets,
+            sub_assignments,
+            item_assignments_by_sub,
+            report_snapshots,
+            results,
+        )
+        detail_subcategory_ids = {
+            sub['id']
+            for sub in detail_subcategories
+            if not _is_categoryless_subcategory(source_category, sub)
+        }
+        relevant_subcategory_ids = set(detail_subcategory_ids)
+        relevant_subcategory_ids.update(selected_sub_ids_for_category)
+        relevant_subcategory_ids.update(report_scope_sub_ids_for_category)
+        relevant_subcategory_ids.update(sub_assignments.keys())
+        relevant_subcategory_ids.update(item_assignments_by_sub.keys())
+        relevant_subcategory_ids.update(
+            row.subcategory_id
+            for row in report_snapshots
+            if row.category_id == raw_category['id'] and row.subcategory_id
+        )
+        relevant_subcategory_ids.update(
+            row.subcategory_id
+            for row in results
+            if row.category_id == raw_category['id'] and row.subcategory_id
+        )
+        relevant_subcategory_ids = {
+            sub_id
+            for sub_id in relevant_subcategory_ids
+            if sub_id and (sub_id in subcategory_name_by_id or sub_id in source_sub_by_id)
+        }
+
+        if report_type == DAILY_REPORT_TYPE and category_taken_whole:
+            historical_completed_ids = completed_before_report.get(raw_category['id'], set())
+            relevant_subcategory_ids.difference_update(historical_completed_ids)
 
         def remember_taken_subcategory(sub_id: str, owner_label: str | None) -> None:
-            existing_owner = taken_owner_by_subcategory_id.get(sub_id)
-            if existing_owner:
+            if sub_id in taken_owner_by_subcategory_id:
                 return
             taken_owner_by_subcategory_id[sub_id] = owner_label
 
@@ -3724,23 +3830,23 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
                 if category_assignment and category_assignment.user_full_name_snapshot
                 else category_snapshot_owner
             )
-            for raw_sub in detail_subcategories:
-                if _is_categoryless_subcategory(source_category, raw_sub):
-                    continue
-                remember_taken_subcategory(raw_sub['id'], category_level_owner)
+            for sub_id in sorted(detail_subcategory_ids, key=lambda value: (subcategory_name_by_id.get(value) or value).lower()):
+                remember_taken_subcategory(sub_id, category_level_owner)
 
-        for raw_sub in detail_subcategories:
-            if _is_categoryless_subcategory(source_category, raw_sub):
+        for sub_id in sorted(relevant_subcategory_ids, key=lambda value: (subcategory_name_by_id.get(value) or value).lower()):
+            raw_sub = source_sub_by_id.get(sub_id)
+            sub_name = subcategory_name_by_id.get(sub_id) or (raw_sub['name'] if raw_sub else None)
+            if not sub_name:
                 continue
 
-            sub_completed, sub_status = _subcategory_is_complete(raw_sub, result_map)
-            sub_assignment = sub_assignments.get(raw_sub['id'])
-            item_assignments = item_assignments_by_sub.get(raw_sub['id'], {})
-            sub_snapshot_owner = _subcategory_snapshot_assignment_label(raw_category['id'], raw_sub['id'], report_snapshots)
+            sub_completed, sub_status = _subcategory_completion_status_for_admin(raw_sub, sub_id, sub_name, result_map)
+            sub_assignment = sub_assignments.get(sub_id)
+            item_assignments = item_assignments_by_sub.get(sub_id, {})
+            sub_snapshot_owner = _subcategory_snapshot_assignment_label(raw_category['id'], sub_id, report_snapshots)
             sub_taken_in_report = (
                 category_taken_whole
                 or bool(category_assignment or sub_assignment or item_assignments)
-                or _subcategory_taken_in_report(raw_category['id'], raw_sub['id'], report_snapshots)
+                or _subcategory_taken_in_report(raw_category['id'], sub_id, report_snapshots)
             )
 
             if sub_taken_in_report:
@@ -3757,34 +3863,35 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
                     })
                 if not assigned_to_label:
                     assigned_to_label = sub_snapshot_owner
-                remember_taken_subcategory(raw_sub['id'], assigned_to_label)
+                remember_taken_subcategory(sub_id, assigned_to_label)
 
             if sub_completed and sub_status == StatusEnum.GREEN:
-                sub_row = result_map.get(raw_sub['id'])
+                sub_row = result_map.get(sub_id)
                 checked_by = sub_row.checked_by_name_snapshot if sub_row else None
-                if not checked_by:
+                if not checked_by and raw_sub is not None:
                     item_rows = [result_map.get(item['id']) for item in raw_sub['items']]
                     item_rows = [row for row in item_rows if row and row.checked_by_name_snapshot]
                     if item_rows:
                         owners = {row.checked_by_name_snapshot for row in item_rows if row.checked_by_name_snapshot}
                         checked_by = _owner_label(owners)
-                completed_green_subcategory_ids.add(raw_sub['id'])
+                completed_green_subcategory_ids.add(sub_id)
                 completed_subcategories.append(CompletedSubcategoryInfo(
-                    name=raw_sub['name'],
+                    name=sub_name,
                     checked_by=checked_by,
                     status=sub_status,
                 ))
 
-        for raw_sub in detail_subcategories:
-            if _is_categoryless_subcategory(source_category, raw_sub):
+        for sub_id in sorted(relevant_subcategory_ids, key=lambda value: (subcategory_name_by_id.get(value) or value).lower()):
+            if sub_id not in taken_owner_by_subcategory_id:
                 continue
-            if raw_sub['id'] not in taken_owner_by_subcategory_id:
+            if sub_id in completed_green_subcategory_ids or sub_id in problem_subcategory_ids:
                 continue
-            if raw_sub['id'] in completed_green_subcategory_ids or raw_sub['id'] in problem_subcategory_ids:
+            sub_name = subcategory_name_by_id.get(sub_id) or (source_sub_by_id.get(sub_id) or {}).get('name')
+            if not sub_name:
                 continue
             in_progress_subcategories.append(InProgressSubcategoryInfo(
-                name=raw_sub['name'],
-                assigned_to=taken_owner_by_subcategory_id.get(raw_sub['id']),
+                name=sub_name,
+                assigned_to=taken_owner_by_subcategory_id.get(sub_id),
             ))
 
         completed_subcategories.sort(key=lambda item: item.name.lower())
