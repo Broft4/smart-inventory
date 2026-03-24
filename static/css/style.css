@@ -2038,6 +2038,10 @@ body.modal-open {
     margin-top: 14px;
 }
 
+.shift-calendar-scroller {
+    width: 100%;
+}
+
 .employee-shift-calendar-grid .shift-calendar-cell {
     min-height: 180px;
 }
@@ -2116,5 +2120,57 @@ body.modal-open {
 
     .employee-shift-line {
         font-size: 12px;
+    }
+}
+
+
+@media (max-width: 640px) {
+    .shift-calendar-scroller {
+        overflow-x: auto;
+        overflow-y: hidden;
+        -webkit-overflow-scrolling: touch;
+        padding-bottom: 4px;
+    }
+
+    .shift-calendar-scroller .shift-calendar-weekdays,
+    .shift-calendar-scroller .shift-calendar-grid {
+        grid-template-columns: repeat(7, minmax(92px, 1fr));
+        min-width: 720px;
+    }
+
+    .shift-calendar-scroller .shift-calendar-cell {
+        min-height: 132px;
+        padding: 8px;
+        gap: 8px;
+    }
+
+    .shift-calendar-scroller .shift-calendar-cell-head strong {
+        font-size: 18px;
+    }
+
+    .shift-calendar-scroller .shift-calendar-entry-head {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .shift-calendar-scroller .shift-calendar-entry-actions .btn {
+        font-size: 12px;
+        padding: 7px 8px;
+    }
+
+    .shift-calendar-scroller .shift-calendar-count,
+    .shift-calendar-scroller .shift-calendar-add-btn {
+        width: 24px;
+        height: 24px;
+        min-width: 24px;
+        font-size: 16px;
+    }
+
+    .shift-calendar-scroller .shift-calendar-cell-head span,
+    .shift-calendar-scroller .shift-calendar-entry-meta,
+    .shift-calendar-scroller .shift-calendar-empty-day,
+    .shift-calendar-scroller .shift-calendar-empty,
+    .shift-calendar-scroller .employee-shift-line {
+        font-size: 11px;
     }
 }

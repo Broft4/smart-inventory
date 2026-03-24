@@ -46,20 +46,25 @@
     </section>
 
     <section class="category-card payroll-summary-card">
-        <div class="report-summary-header">
-            <div>
-                <h2>Итог</h2>
-                <p class="muted-text">Начисления по сменам, категориям и итог к выплате.</p>
+        <details class="payroll-collapse" open>
+            <summary class="report-summary-header payroll-collapse-summary">
+                <div>
+                    <h2>Итог</h2>
+                    <p class="muted-text">Начисления по сменам, категориям и итог к выплате.</p>
+                </div>
+                <span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span>
+            </summary>
+            <div class="payroll-collapse-body">
+                <div class="summary-kpi-grid payroll-kpi-grid">
+                    <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Смен</span><strong id="kpi-shifts">0</strong></div>
+                    <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Выход</span><strong id="kpi-exit">0 ₽</strong></div>
+                    <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Бонус</span><strong id="kpi-bonus">0 ₽</strong></div>
+                    <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Категории</span><strong id="kpi-category">0 ₽</strong></div>
+                    <div class="summary-kpi-card warning"><span class="summary-kpi-label">Расходы на сотрудника</span><strong id="kpi-employee-expenses">0 ₽</strong></div>
+                    <div class="summary-kpi-card plus"><span class="summary-kpi-label">К выплате</span><strong id="kpi-payout">0 ₽</strong></div>
+                </div>
             </div>
-        </div>
-        <div class="summary-kpi-grid payroll-kpi-grid">
-            <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Смен</span><strong id="kpi-shifts">0</strong></div>
-            <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Выход</span><strong id="kpi-exit">0 ₽</strong></div>
-            <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Бонус</span><strong id="kpi-bonus">0 ₽</strong></div>
-            <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Категории</span><strong id="kpi-category">0 ₽</strong></div>
-            <div class="summary-kpi-card warning"><span class="summary-kpi-label">Расходы на сотрудника</span><strong id="kpi-employee-expenses">0 ₽</strong></div>
-            <div class="summary-kpi-card plus"><span class="summary-kpi-label">К выплате</span><strong id="kpi-payout">0 ₽</strong></div>
-        </div>
+        </details>
     </section>
 
     <section class="category-card hidden" id="employee-calendar-card">
@@ -69,41 +74,45 @@
                     <h2>Календарь смен</h2>
                     <p class="muted-text">Ваши смены в календарном виде за выбранный период.</p>
                 </div>
-                <span class="btn secondary btn-inline payroll-collapse-btn" id="employee-calendar-toggle-text" data-collapse-toggle-for="employee-calendar-details">Развернуть</span>
+                <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
             </summary>
             <div class="payroll-collapse-body">
-                <div class="shift-calendar-weekdays" aria-hidden="true">
-                    <span>Пн</span><span>Вт</span><span>Ср</span><span>Чт</span><span>Пт</span><span>Сб</span><span>Вс</span>
+                <div class="shift-calendar-scroller">
+                    <div class="shift-calendar-weekdays" aria-hidden="true">
+                        <span>Пн</span><span>Вт</span><span>Ср</span><span>Чт</span><span>Пт</span><span>Сб</span><span>Вс</span>
+                    </div>
+                    <div id="employee-shift-calendar-grid" class="shift-calendar-grid employee-shift-calendar-grid"></div>
                 </div>
-                <div id="employee-shift-calendar-grid" class="shift-calendar-grid employee-shift-calendar-grid"></div>
             </div>
         </details>
     </section>
 
     <section class="category-card hidden" id="manager-summary-card">
-        <div class="report-summary-header">
-            <div>
-                <h2>Зарплата администратора и прибыль точки</h2>
-                <p class="muted-text">Расчёт по точке за выбранный период.</p>
+        <details class="payroll-collapse" open>
+            <summary class="report-summary-header payroll-collapse-summary">
+                <div>
+                    <h2>Зарплата администратора и прибыль точки</h2>
+                    <p class="muted-text">Расчёт по точке за выбранный период.</p>
+                </div>
+                <span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span>
+            </summary>
+            <div class="payroll-collapse-body">
+                <div class="summary-kpi-grid payroll-kpi-grid">
+                    <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Чистая выручка</span><strong id="manager-net-sales">0 ₽</strong></div>
+                    <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Себестоимость</span><strong id="manager-cost">0 ₽</strong></div>
+                    <div class="summary-kpi-card warning"><span class="summary-kpi-label">Зарплаты сотрудников</span><strong id="manager-employee-salary">0 ₽</strong></div>
+                    <div class="summary-kpi-card warning"><span class="summary-kpi-label">Расходы точки</span><strong id="manager-expenses">0 ₽</strong></div>
+                    <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Прибыль до зарплаты админа</span><strong id="manager-profit">0 ₽</strong></div>
+                    <div class="summary-kpi-card plus"><span class="summary-kpi-label">Зарплата админа</span><strong id="manager-salary">0 ₽</strong></div>
+                </div>
+                <div class="muted-text" id="manager-responsible-line"></div>
             </div>
-        </div>
-        <div class="summary-kpi-grid payroll-kpi-grid">
-            <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Чистая выручка</span><strong id="manager-net-sales">0 ₽</strong></div>
-            <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Себестоимость</span><strong id="manager-cost">0 ₽</strong></div>
-            <div class="summary-kpi-card warning"><span class="summary-kpi-label">Зарплаты сотрудников</span><strong id="manager-employee-salary">0 ₽</strong></div>
-            <div class="summary-kpi-card warning"><span class="summary-kpi-label">Расходы точки</span><strong id="manager-expenses">0 ₽</strong></div>
-            <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Прибыль до зарплаты админа</span><strong id="manager-profit">0 ₽</strong></div>
-            <div class="summary-kpi-card plus"><span class="summary-kpi-label">Зарплата админа</span><strong id="manager-salary">0 ₽</strong></div>
-        </div>
-        <div class="muted-text" id="manager-responsible-line"></div>
+        </details>
     </section>
 
     <section class="category-card">
-        <details id="payroll-shifts-details" class="payroll-collapse">
-            <summary class="report-summary-header payroll-collapse-summary">
-                <div><h2>Смены</h2><p class="muted-text">По каждой смене — выручка, бонус и итог.</p></div>
-                <span class="btn secondary btn-inline payroll-collapse-btn" id="payroll-shifts-toggle-text" data-collapse-toggle-for="payroll-shifts-details">Развернуть</span>
-            </summary>
+        <details class="payroll-collapse" open>
+            <summary class="report-summary-header payroll-collapse-summary"><div><h2>Смены</h2><p class="muted-text">По каждой смене — выручка, бонус и итог.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span></summary>
             <div class="payroll-collapse-body">
                 <div id="payroll-days-container" class="payroll-days-container"></div>
             </div>
@@ -111,11 +120,8 @@
     </section>
 
     <section class="category-card">
-        <details id="payroll-categories-details" class="payroll-collapse">
-            <summary class="report-summary-header payroll-collapse-summary">
-                <div><h2>Категории</h2><p class="muted-text">Сколько начислено по каждой категории за выбранный период.</p></div>
-                <span class="btn secondary btn-inline payroll-collapse-btn" id="payroll-categories-toggle-text" data-collapse-toggle-for="payroll-categories-details">Развернуть</span>
-            </summary>
+        <details class="payroll-collapse" open>
+            <summary class="report-summary-header payroll-collapse-summary"><div><h2>Категории</h2><p class="muted-text">Сколько начислено по каждой категории за выбранный период.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span></summary>
             <div class="payroll-collapse-body">
                 <div class="table-wrap">
                     <table class="table payroll-table">
@@ -137,38 +143,34 @@
     </section>
 
     <section class="category-card hidden" id="admin-settings-card">
-        <div class="report-summary-header"><div><h2>Настройки зарплаты точки</h2><p class="muted-text">Версионные правила: новые изменения не переписывают прошлые закрытые смены.</p></div></div>
-        <div class="payroll-settings-grid">
-            <label>Дата вступления<input type="date" id="settings-effective-from"></label>
-            <label>Выход<input type="number" id="settings-exit" min="0" step="0.01"></label>
-            <label>Порог бонуса<input type="number" id="settings-threshold" min="0" step="0.01"></label>
-            <label>Сумма бонуса<input type="number" id="settings-bonus" min="0" step="0.01"></label>
-            <label>Процент «Все остальное»<input type="number" id="settings-other-rate" min="0" step="0.01"></label>
-            <label>Ответственный админ<select id="settings-admin-select"></select></label>
-        </div>
-        <div class="payroll-settings-rates-card">
-            <details id="settings-category-rates-details" class="payroll-collapse">
-                <summary class="payroll-settings-rates-head payroll-collapse-summary">
-                    <div>
-                        <h3>Проценты по категориям</h3>
-                        <p class="muted-text">Настройка процентов по верхним категориям из МойСклад. Блок «Все остальное» задается отдельно выше.</p>
+        <details class="payroll-collapse" open>
+            <summary class="report-summary-header payroll-collapse-summary"><div><h2>Настройки зарплаты точки</h2><p class="muted-text">Версионные правила: новые изменения не переписывают прошлые закрытые смены.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span></summary>
+            <div class="payroll-collapse-body">
+                <div class="payroll-settings-grid">
+                    <label>Дата вступления<input type="date" id="settings-effective-from"></label>
+                    <label>Выход<input type="number" id="settings-exit" min="0" step="0.01"></label>
+                    <label>Порог бонуса<input type="number" id="settings-threshold" min="0" step="0.01"></label>
+                    <label>Сумма бонуса<input type="number" id="settings-bonus" min="0" step="0.01"></label>
+                    <label>Процент «Все остальное»<input type="number" id="settings-other-rate" min="0" step="0.01"></label>
+                    <label>Ответственный админ<select id="settings-admin-select"></select></label>
+                </div>
+                <div class="payroll-settings-rates-card">
+                    <div class="payroll-settings-rates-head">
+                        <div>
+                            <h3>Проценты по категориям</h3>
+                            <p class="muted-text">Настройка процентов по верхним категориям из МойСклад. Блок «Все остальное» задается отдельно выше.</p>
+                        </div>
                     </div>
-                    <span class="btn secondary btn-inline payroll-collapse-btn" id="settings-category-rates-toggle-text" data-collapse-toggle-for="settings-category-rates-details">Развернуть</span>
-                </summary>
-                <div class="payroll-collapse-body">
                     <div id="settings-category-rates" class="settings-category-grid"></div>
                 </div>
-            </details>
-        </div>
-        <div class="admin-toolbar-actions"><button id="save-settings-btn" type="button" class="btn primary btn-inline">Сохранить версию правил</button></div>
+                <div class="admin-toolbar-actions"><button id="save-settings-btn" type="button" class="btn primary btn-inline">Сохранить версию правил</button></div>
+            </div>
+        </details>
     </section>
 
     <section class="category-card hidden" id="admin-shifts-card">
-        <details id="admin-shifts-details" class="payroll-collapse">
-            <summary class="report-summary-header payroll-collapse-summary">
-                <div><h2>Календарь смен</h2><p class="muted-text">Админ и главный админ могут назначать смены по точке и дате.</p></div>
-                <span class="btn secondary btn-inline payroll-collapse-btn" id="admin-shifts-toggle-text" data-collapse-toggle-for="admin-shifts-details">Развернуть</span>
-            </summary>
+        <details class="payroll-collapse" open>
+            <summary class="report-summary-header payroll-collapse-summary"><div><h2>Календарь смен</h2><p class="muted-text">Админ и главный админ могут назначать смены по точке и дате.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span></summary>
             <div class="payroll-collapse-body">
                 <div class="payroll-filter-grid shift-toolbar-grid">
                     <label>Месяц<input type="month" id="shift-month-input"></label>
@@ -182,10 +184,12 @@
                         <p class="muted-text">Во время сохранения кнопка блокируется, чтобы не создать дубликат смены.</p>
                     </div>
                 </div>
-                <div class="shift-calendar-weekdays" aria-hidden="true">
-                    <span>Пн</span><span>Вт</span><span>Ср</span><span>Чт</span><span>Пт</span><span>Сб</span><span>Вс</span>
+                <div class="shift-calendar-scroller">
+                    <div class="shift-calendar-weekdays" aria-hidden="true">
+                        <span>Пн</span><span>Вт</span><span>Ср</span><span>Чт</span><span>Пт</span><span>Сб</span><span>Вс</span>
+                    </div>
+                    <div id="shift-calendar-grid" class="shift-calendar-grid"></div>
                 </div>
-                <div id="shift-calendar-grid" class="shift-calendar-grid"></div>
             </div>
         </details>
         <div id="shift-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="shift-modal-title">
@@ -213,8 +217,10 @@
     </section>
 
     <section class="category-card hidden" id="expenses-card">
-        <div class="report-summary-header"><div><h2>Расходы</h2><p class="muted-text">Шаблоны расходов на месяц и фактические суммы по точке.</p></div></div>
-        <div class="expense-layout">
+        <details class="payroll-collapse" open>
+            <summary class="report-summary-header payroll-collapse-summary"><div><h2>Расходы</h2><p class="muted-text">Шаблоны расходов на месяц и фактические суммы по точке.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span></summary>
+            <div class="payroll-collapse-body">
+                <div class="expense-layout">
             <div class="expense-create-card">
                 <div class="payroll-filter-grid expense-create-grid">
                     <label>Месяц<input type="month" id="expenses-month-input"></label>
@@ -242,7 +248,9 @@
                 </div>
                 <div id="expense-entry-tbody" class="expense-entry-grid"></div>
             </div>
-        </div>
+                </div>
+            </div>
+        </details>
     </section>
 
     <section class="category-card hidden" id="audit-card">

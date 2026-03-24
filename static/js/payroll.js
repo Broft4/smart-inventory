@@ -220,11 +220,16 @@ function renderSummary(summary) {
 }
 
 
-function syncPayrollCollapseToggleTexts() {
-    document.querySelectorAll('[data-collapse-toggle-for]').forEach(toggle => {
-        const details = document.getElementById(toggle.dataset.collapseToggleFor || '');
-        if (!details) return;
-        toggle.textContent = details.open ? 'Свернуть' : 'Развернуть';
+function syncCollapseToggleText(details) {
+    if (!details) return;
+    const text = details.querySelector('.payroll-collapse-btn');
+    if (!text) return;
+    text.textContent = details.open ? 'Свернуть' : 'Развернуть';
+}
+
+function initializeCollapseSections() {
+    document.querySelectorAll('.payroll-collapse').forEach((details) => {
+        syncCollapseToggleText(details);
     });
 }
 
@@ -241,7 +246,7 @@ function renderEmployeeShiftCalendar(summary) {
     }
 
     card.classList.remove('hidden');
-    syncPayrollCollapseToggleTexts();
+    syncCollapseToggleText(details);
 
     const days = Array.isArray(summary?.days) ? summary.days : [];
     const month = qs('payroll-date-from')?.value?.slice(0, 7) || monthIso();
@@ -519,9 +524,6 @@ function describeAuditLog(log) {
         }
         if (log.action_type === 'deactivate') {
             return `${when} · ${actor} отключил шаблон расхода «${details.name || 'Без названия'}».`;
-        }
-        if (log.action_type === 'delete') {
-            return `${when} · ${actor} удалил шаблон расхода «${details.name || 'Без названия'}».`;
         }
     }
 
@@ -872,6 +874,7 @@ async function logout() {
 
 async function bootstrap() {
     setDefaultDates();
+    initializeCollapseSections();
     try {
         const access = await api('/api/payroll/access');
         payrollState.locations = access.locations || [];
@@ -913,8 +916,9 @@ qs('audit-toggle-btn')?.addEventListener('click', () => {
 qs('audit-date-filter')?.addEventListener('change', renderAudit);
 qs('audit-employee-filter')?.addEventListener('change', renderAudit);
 qs('audit-clear-filters-btn')?.addEventListener('click', clearAuditFilters);
-document.querySelectorAll('.payroll-collapse').forEach(details => details.addEventListener('toggle', syncPayrollCollapseToggleTexts));
-syncPayrollCollapseToggleTexts();
+document.querySelectorAll('.payroll-collapse').forEach((details) => {
+    details.addEventListener('toggle', () => syncCollapseToggleText(details));
+});
 
 document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && !qs('shift-modal')?.classList.contains('hidden')) {
