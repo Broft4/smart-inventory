@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -220,3 +220,151 @@ class CheckResult(Base):
 
     report: Mapped['Report'] = relationship(back_populates='results')
     checked_by_user: Mapped[User | None] = relationship(back_populates='check_results')
+
+
+class PayrollSettingsVersion(Base):
+    __tablename__ = 'payroll_settings_versions'
+    __table_args__ = (
+        UniqueConstraint('location_point_id', 'effective_from', name='uq_payroll_settings_location_effective_from'),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    location_point_id: Mapped[int] = mapped_column(ForeignKey('location_points.id', ondelete='CASCADE'), nullable=False, index=True)
+    effective_from: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    exit_amount: Mapped[float] = mapped_column(Float, default=2000.0, nullable=False)
+    bonus_threshold: Mapped[float] = mapped_column(Float, default=40000.0, nullable=False)
+    bonus_amount: Mapped[float] = mapped_column(Float, default=500.0, nullable=False)
+    other_rate_percent: Mapped[float] = mapped_column(Float, default=3.0, nullable=False)
+    responsible_admin_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class PayrollCategoryRateVersion(Base):
+    __tablename__ = 'payroll_category_rate_versions'
+    __table_args__ = (
+        UniqueConstraint('settings_version_id', 'category_id', name='uq_payroll_category_rate_per_version'),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    settings_version_id: Mapped[int] = mapped_column(ForeignKey('payroll_settings_versions.id', ondelete='CASCADE'), nullable=False, index=True)
+    category_id: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    category_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    rate_percent: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+
+
+class WorkShift(Base):
+    __tablename__ = 'work_shifts'
+    __table_args__ = (
+        UniqueConstraint('location_point_id', 'shift_date', 'employee_user_id', name='uq_work_shift_location_date_employee'),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    location_point_id: Mapped[int] = mapped_column(ForeignKey('location_points.id', ondelete='CASCADE'), nullable=False, index=True)
+    shift_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    employee_user_id: Mapped[int] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), default='planned', nullable=False)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    closed_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class ShiftPayrollSnapshot(Base):
+    __tablename__ = 'shift_payroll_snapshots'
+    __table_args__ = (
+        UniqueConstraint('shift_id', name='uq_shift_payroll_snapshot_shift'),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    shift_id: Mapped[int] = mapped_column(ForeignKey('work_shifts.id', ondelete='CASCADE'), nullable=False, index=True)
+    location_point_id: Mapped[int] = mapped_column(ForeignKey('location_points.id', ondelete='CASCADE'), nullable=False, index=True)
+    employee_user_id: Mapped[int] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    shift_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    settings_version_id: Mapped[int | None] = mapped_column(ForeignKey('payroll_settings_versions.id', ondelete='SET NULL'), nullable=True, index=True)
+    split_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    share_ratio: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+    exit_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    bonus_threshold: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    bonus_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    other_rate_percent: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    non_tobacco_net_sales_for_bonus: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    gross_sales_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    return_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    net_sales_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    cost_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    gross_profit_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    category_earnings_total: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    employee_expense_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    gross_salary_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    net_salary_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    is_auto_closed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    closed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class ShiftPayrollCategorySnapshot(Base):
+    __tablename__ = 'shift_payroll_category_snapshots'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    snapshot_id: Mapped[int] = mapped_column(ForeignKey('shift_payroll_snapshots.id', ondelete='CASCADE'), nullable=False, index=True)
+    category_id: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    category_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    rate_percent: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    sales_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    return_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    net_sales_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    earning_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    is_other_category: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
+class ExpenseTemplate(Base):
+    __tablename__ = 'expense_templates'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    location_point_id: Mapped[int] = mapped_column(ForeignKey('location_points.id', ondelete='CASCADE'), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    amount_type: Mapped[str] = mapped_column(String(20), default='dynamic', nullable=False)
+    default_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    assign_to_employee_by_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class MonthlyExpenseEntry(Base):
+    __tablename__ = 'monthly_expense_entries'
+    __table_args__ = (
+        UniqueConstraint('template_id', 'month_start', name='uq_monthly_expense_template_month'),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    template_id: Mapped[int | None] = mapped_column(ForeignKey('expense_templates.id', ondelete='CASCADE'), nullable=True, index=True)
+    location_point_id: Mapped[int] = mapped_column(ForeignKey('location_points.id', ondelete='CASCADE'), nullable=False, index=True)
+    month_start: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    custom_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    is_paid: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    assigned_employee_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    apply_to_employee_salary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    updated_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class PayrollAuditLog(Base):
+    __tablename__ = 'payroll_audit_logs'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    actor_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    location_point_id: Mapped[int | None] = mapped_column(ForeignKey('location_points.id', ondelete='SET NULL'), nullable=True, index=True)
+    entity_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    entity_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    action_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    details_json: Mapped[str] = mapped_column(Text, nullable=False, default='{}')
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)

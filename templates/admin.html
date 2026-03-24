@@ -18,6 +18,7 @@
             {% if user.role == 'superadmin' %}
             <button id="open-create-location-btn" class="btn secondary btn-inline" type="button" data-open-modal-action="location">Точки</button>
             {% endif %}
+            <a href="/payroll" class="btn secondary btn-inline">Зарплата</a>
             <button id="open-users-btn" class="btn secondary btn-inline" type="button">Сотрудники</button>
             <button id="logout-btn" class="btn secondary btn-inline" type="button">Выйти</button>
         </div>
@@ -453,12 +454,12 @@
 </div>
 
 <script>
-    window.currentAdmin = {{ {
-        'id': user.id,
-        'role': user.role,
-        'full_name': user.full_name,
-        'is_superadmin': user.role == 'superadmin'
-    } | tojson }};
+    window.currentAdmin = {
+        id: {{ user.id | tojson }},
+        role: {{ user.role | tojson }},
+        full_name: {{ user.full_name | tojson }},
+        is_superadmin: {{ (user.role == 'superadmin') | tojson }}
+    };
 </script>
 <script src="/static/js/admin.js?v={{ asset_version }}"></script>
 

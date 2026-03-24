@@ -470,11 +470,20 @@ def bootstrap_schema_and_admin(sync_conn) -> None:
         if not required.issubset(cols):
             sync_conn.execute(text('DROP TABLE IF EXISTS report_employee_completions'))
 
-    if 'report_employee_starts' in tables:
-        cols = {c['name'] for c in inspector.get_columns('report_employee_starts')}
-        required = {'id', 'report_id', 'user_id', 'user_full_name_snapshot', 'started_at'}
-        if not required.issubset(cols):
-            sync_conn.execute(text('DROP TABLE IF EXISTS report_employee_starts'))
+
+    if 'expense_templates' in tables:
+        cols = {c['name'] for c in inspector.get_columns('expense_templates')}
+        if 'created_by_user_id' not in cols:
+            sync_conn.execute(text('ALTER TABLE expense_templates ADD COLUMN created_by_user_id INTEGER'))
+
+    if 'monthly_expense_entries' in tables:
+        cols = {c['name'] for c in inspector.get_columns('monthly_expense_entries')}
+        if 'custom_name' not in cols:
+            sync_conn.execute(text('ALTER TABLE monthly_expense_entries ADD COLUMN custom_name VARCHAR(255)'))
+        if 'comment' not in cols:
+            sync_conn.execute(text('ALTER TABLE monthly_expense_entries ADD COLUMN comment TEXT'))
+        if 'created_by_user_id' not in cols:
+            sync_conn.execute(text('ALTER TABLE monthly_expense_entries ADD COLUMN created_by_user_id INTEGER'))
 
     if reset_reports:
         sync_conn.execute(text('DROP TABLE IF EXISTS check_results'))

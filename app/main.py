@@ -60,6 +60,34 @@ from app.logic import (
 )
 from app.models import Report, User
 from app.moysklad import ms_client
+from app.payroll import (
+    ExpenseTemplateCreateRequest,
+    ExpenseTemplateUpdateRequest,
+    ManualMonthlyExpenseCreateRequest,
+    MonthlyExpenseEntryUpdateRequest,
+    PayrollSettingsUpdateRequest,
+    WorkShiftUpsertRequest,
+    close_shift,
+    create_expense_template,
+    create_manual_monthly_expense,
+    deactivate_expense_template,
+    delete_expense_template,
+    delete_work_shift,
+    export_employee_payroll_xlsx,
+    get_employee_payroll_summary,
+    get_location_payroll_setup,
+    get_manager_payroll_summary,
+    get_payroll_category_catalog,
+    get_user_accessible_locations as get_payroll_accessible_locations,
+    list_expense_templates,
+    list_monthly_expenses,
+    list_payroll_audit_logs,
+    list_work_shifts,
+    update_expense_template,
+    update_location_payroll_settings,
+    update_monthly_expense_entry,
+    upsert_work_shift,
+)
 from app.schemas import (
     AdminCycleTargetsResponse,
     AdminReport,
@@ -148,7 +176,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260322-period-and-excel-export'
+templates.env.globals['asset_version'] = '20260324-payroll-v2'
 
 
 @app.middleware('http')
@@ -220,7 +248,7 @@ async def require_superadmin(user: User = Depends(require_user)) -> User:
 async def login_page(request: Request, user: User | None = Depends(get_current_user)):
     if user:
         return RedirectResponse(url='/admin' if user.role in {'admin', 'superadmin'} else '/', status_code=302)
-    return templates.TemplateResponse(request=request, name='login.html', context={'request': request})
+    return templates.TemplateResponse(request, 'login.html', {})
 
 
 @app.get('/')
@@ -231,9 +259,9 @@ async def inventory_page(request: Request, user: User | None = Depends(get_curre
         return RedirectResponse(url='/admin', status_code=302)
     _spawn_prewarm(user.location)
     return templates.TemplateResponse(
-        request=request,
-        name='index.html',
-        context={'request': request, 'user': user, 'no_location_assigned': not bool(user.location)},
+        request,
+        'index.html',
+        {'user': user, 'no_location_assigned': not bool(user.location)},
     )
 
 
@@ -246,7 +274,19 @@ async def admin_page(request: Request, user: User | None = Depends(get_current_u
     accessible_locations = await get_user_accessible_locations(user, db)
     if accessible_locations:
         _spawn_prewarm(accessible_locations[0])
-    return templates.TemplateResponse(request=request, name='admin.html', context={'request': request, 'user': user})
+    return templates.TemplateResponse(
+        request,
+        'admin.html',
+        {'user': user},
+    )
+
+@app.get('/payroll')
+async def payroll_page(request: Request, user: User | None = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    if not user:
+        return RedirectResponse(url='/login', status_code=302)
+    accessible_locations = await get_payroll_accessible_locations(user, db)
+    location = accessible_locations[0] if accessible_locations else (user.location if user.location else None)
+    return templates.TemplateResponse(request, 'payroll.html', {'user': user, 'default_location': location})
 
 
 @app.post('/api/login', response_model=LoginResponse)
@@ -632,6 +672,116 @@ async def api_update_discrepancy(
 @app.post('/api/report/{report_id}/reopen-employee-access', response_model=ReopenEmployeeAccessResponse)
 async def api_reopen_employee_access(report_id: int, payload: ReopenEmployeeAccessRequest, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
     return await reopen_employee_report_access(report_id, payload.employee_user_id, db, admin)
+
+
+
+@app.get('/api/payroll/access')
+async def api_payroll_access(user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
+    return {'locations': await get_payroll_accessible_locations(user, db)}
+
+
+@app.get('/api/payroll/categories')
+async def api_payroll_categories(location: str, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
+    return await get_payroll_category_catalog(location, db, user)
+
+
+@app.get('/api/payroll/settings')
+async def api_payroll_settings(location: str, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
+    return await get_location_payroll_setup(location, db, user)
+
+
+@app.put('/api/payroll/settings')
+async def api_payroll_settings_update(payload: PayrollSettingsUpdateRequest, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await update_location_payroll_settings(payload, db, user)
+
+
+@app.get('/api/payroll/shifts')
+async def api_payroll_shifts(location: str, date_from: date, date_to: date, employee_user_id: int | None = None, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
+    return await list_work_shifts(location, date_from, date_to, db, user, employee_user_id=employee_user_id)
+
+
+@app.post('/api/payroll/shifts')
+async def api_payroll_shifts_upsert(payload: WorkShiftUpsertRequest, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await upsert_work_shift(payload, db, user)
+
+
+@app.delete('/api/payroll/shifts/{shift_id}')
+async def api_payroll_shift_delete(shift_id: int, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await delete_work_shift(shift_id, db, user)
+
+
+@app.post('/api/payroll/shifts/{shift_id}/close')
+async def api_payroll_shift_close(shift_id: int, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
+    return await close_shift(shift_id, db, actor_user=user, auto=False)
+
+
+@app.get('/api/payroll/employee-summary')
+async def api_payroll_employee_summary(location: str, date_from: date, date_to: date, employee_user_id: int | None = None, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
+    return await get_employee_payroll_summary(location, date_from, date_to, db, user, employee_user_id=employee_user_id)
+
+
+@app.get('/api/payroll/manager-summary')
+async def api_payroll_manager_summary(location: str, date_from: date, date_to: date, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await get_manager_payroll_summary(location, date_from, date_to, db, user)
+
+
+@app.get('/api/payroll/expense-templates')
+async def api_payroll_expense_templates(location: str, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
+    return await list_expense_templates(location, db, user)
+
+
+@app.post('/api/payroll/expense-templates')
+async def api_payroll_expense_template_create(payload: ExpenseTemplateCreateRequest, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await create_expense_template(payload, db, user)
+
+
+@app.put('/api/payroll/expense-templates/{template_id}')
+async def api_payroll_expense_template_update(template_id: int, payload: ExpenseTemplateUpdateRequest, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await update_expense_template(template_id, payload, db, user)
+
+
+@app.post('/api/payroll/expense-templates/{template_id}/toggle-active')
+async def api_payroll_expense_template_toggle_active(template_id: int, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await deactivate_expense_template(template_id, db, user)
+
+
+@app.delete('/api/payroll/expense-templates/{template_id}')
+async def api_payroll_expense_template_delete(template_id: int, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await delete_expense_template(template_id, db, user)
+
+
+@app.get('/api/payroll/expenses')
+async def api_payroll_expenses(location: str, month: date, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
+    return await list_monthly_expenses(location, month, db, user)
+
+
+@app.put('/api/payroll/expenses/{entry_id}')
+async def api_payroll_expense_update(entry_id: int, payload: MonthlyExpenseEntryUpdateRequest, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await update_monthly_expense_entry(entry_id, payload, db, user)
+
+
+@app.post('/api/payroll/expenses/manual')
+async def api_payroll_manual_expense_create(payload: ManualMonthlyExpenseCreateRequest, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await create_manual_monthly_expense(payload, db, user)
+
+
+@app.get('/api/payroll/audit')
+async def api_payroll_audit(location: str | None = None, limit: int = 200, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await list_payroll_audit_logs(location, db, user, limit=limit)
+
+
+@app.get('/api/payroll/export-xlsx')
+async def api_payroll_export_xlsx(location: str, date_from: date, date_to: date, employee_user_id: int | None = None, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
+    filename, payload = await export_employee_payroll_xlsx(location, date_from, date_to, db, user, employee_user_id=employee_user_id)
+    quoted = quote(filename)
+    return StreamingResponse(
+        io.BytesIO(payload),
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={
+            'Content-Disposition': f"attachment; filename*=UTF-8''{quoted}",
+            'X-Export-Filename': filename,
+        },
+    )
 
 
 @app.get('/api/inventory-diagnostics')

@@ -17,7 +17,10 @@
                 <p id="employee-info" class="muted-text">{{ user.full_name }} · точка {{ user.location }}</p>
             {% endif %}
         </div>
-        <button id="logout-btn" class="btn secondary btn-inline" type="button">Выйти</button>
+        <div class="header-actions">
+            {% if not no_location_assigned %}<a href="/payroll" class="btn secondary btn-inline">Зарплата</a>{% endif %}
+            <button id="logout-btn" class="btn secondary btn-inline" type="button">Выйти</button>
+        </div>
     </header>
 
     {% if no_location_assigned %}

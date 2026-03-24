@@ -7,10 +7,8 @@ function loadPersistedAdminUiState() {
         const parsed = JSON.parse(raw);
         return {
             selectedLocation: typeof parsed?.selectedLocation === 'string' ? parsed.selectedLocation : '',
-            selectedReportId: Number.isFinite(Number(parsed?.selectedReportId)) ? Number(parsed.selectedReportId) : null,
-            selectedReportIdByLocation: parsed?.selectedReportIdByLocation && typeof parsed.selectedReportIdByLocation === 'object'
-                ? parsed.selectedReportIdByLocation
-                : {},
+            selectedReportId: null,
+            selectedReportIdByLocation: {},
         };
     } catch {
         return { selectedLocation: '', selectedReportId: null, selectedReportIdByLocation: {} };
@@ -21,8 +19,8 @@ function persistAdminUiState() {
     try {
         localStorage.setItem(ADMIN_UI_STATE_STORAGE_KEY, JSON.stringify({
             selectedLocation: adminState.selectedLocation || '',
-            selectedReportId: adminState.selectedReportId ?? null,
-            selectedReportIdByLocation: adminState.selectedReportIdByLocation || {},
+            selectedReportId: null,
+            selectedReportIdByLocation: {},
         }));
     } catch {
         // ignore storage errors
@@ -34,9 +32,13 @@ const persistedAdminUiState = loadPersistedAdminUiState();
 const adminState = {
     report: null,
     selectedLocation: persistedAdminUiState.selectedLocation || '',
-    selectedReportId: persistedAdminUiState.selectedReportId ?? null,
-    selectedReportIdByLocation: persistedAdminUiState.selectedReportIdByLocation || {},
+    selectedReportId: null,
+    selectedReportIdByLocation: {},
     isPeriodMode: false,
+    isReportViewLoading: false,
+    reportViewRequestSeq: 0,
+    reportsSectionRequestSeq: 0,
+    reportViewAbortController: null,
     periodDateFrom: '',
     periodDateTo: '',
     employeeFilter: '',
@@ -560,6 +562,42 @@ function setAdminReportLoading(message = 'Загрузка данных реви
     if (employeeDetailsContainer) employeeDetailsContainer.innerHTML = loadingCardHtml;
 }
 
+function updateAdminReportSelectAvailability() {
+    const reportSelect = document.getElementById('admin-report-select');
+    if (!reportSelect) return;
+
+    const hasOptions = Array.from(reportSelect.options || []).some(option => option.value);
+    reportSelect.disabled = adminState.isReportViewLoading || !hasOptions;
+}
+
+function beginAdminReportViewLoad() {
+    if (adminState.reportViewAbortController) {
+        adminState.reportViewAbortController.abort();
+    }
+
+    adminState.reportViewAbortController = new AbortController();
+    adminState.reportViewRequestSeq += 1;
+    adminState.isReportViewLoading = true;
+    updateAdminReportSelectAvailability();
+
+    return {
+        requestSeq: adminState.reportViewRequestSeq,
+        signal: adminState.reportViewAbortController.signal,
+    };
+}
+
+function finishAdminReportViewLoad(requestSeq) {
+    if (requestSeq !== adminState.reportViewRequestSeq) return;
+
+    adminState.isReportViewLoading = false;
+    adminState.reportViewAbortController = null;
+    updateAdminReportSelectAvailability();
+}
+
+function isAbortError(error) {
+    return error?.name === 'AbortError';
+}
+
 function renderDiagnostics(rows, location) {
     const summary = document.getElementById('diagnostics-summary');
     const container = document.getElementById('diagnostics-content');
@@ -699,13 +737,11 @@ function renderLocationOptions(locations) {
 
     if (adminState.selectedLocation && !adminState.locations.some(location => location.name === adminState.selectedLocation)) {
         adminState.selectedLocation = adminState.locations[0]?.name || '';
-        adminState.selectedReportId = adminState.selectedLocation
-            ? Number(adminState.selectedReportIdByLocation?.[adminState.selectedLocation] || null)
-            : null;
+        adminState.selectedReportId = null;
     }
     if (!adminState.selectedLocation && adminState.locations.length) {
         adminState.selectedLocation = adminState.locations[0].name;
-        adminState.selectedReportId = Number(adminState.selectedReportIdByLocation?.[adminState.selectedLocation] || null) || null;
+        adminState.selectedReportId = null;
     }
     persistAdminUiState();
 
@@ -2280,7 +2316,7 @@ window.filterByEmployee = function (fullName) {
     setViewMode('employees');
 };
 
-async function loadReportsList(location) {
+async function loadReportsList(location, sectionRequestSeq = adminState.reportsSectionRequestSeq) {
     const select = document.getElementById('admin-report-select');
     select.disabled = true;
     select.innerHTML = '<option>Загрузка...</option>';
@@ -2290,14 +2326,15 @@ async function loadReportsList(location) {
     if (!response.ok) throw new Error('Ошибка загрузки списка ревизий');
     const data = await response.json();
 
+    if (sectionRequestSeq !== adminState.reportsSectionRequestSeq) {
+        return null;
+    }
+
     if (!data.reports.length) {
         select.innerHTML = '<option value="">Нет сохранённых ревизий</option>';
-        select.disabled = true;
         adminState.selectedReportId = null;
-        if (location) {
-            delete adminState.selectedReportIdByLocation[location];
-        }
         persistAdminUiState();
+        updateAdminReportSelectAvailability();
         return null;
     }
 
@@ -2305,19 +2342,21 @@ async function loadReportsList(location) {
         <option value="${report.report_id}" data-report-number="${report.report_number ?? ''}">${escapeHtml(report.label)}</option>
     `).join('');
 
-    const persistedReportId = Number(adminState.selectedReportIdByLocation?.[location] || adminState.selectedReportId || null);
-    if (persistedReportId && data.reports.some(report => Number(report.report_id) === persistedReportId)) {
-        select.value = String(persistedReportId);
+    const latestReportId = Number(data.reports[0]?.report_id || 0) || null;
+    if (latestReportId) {
+        select.value = String(latestReportId);
     }
-
-    select.disabled = false;
-    return Number(select.value);
+    adminState.selectedReportId = latestReportId;
+    persistAdminUiState();
+    updateAdminReportSelectAvailability();
+    return latestReportId;
 }
 
 async function loadAdminReport(location, reportId) {
     const categoriesContainer = document.getElementById('report-categories');
     const employeesContainer = document.getElementById('report-employees');
     const employeeDetailsContainer = document.getElementById('report-employee-details');
+    const { requestSeq, signal } = beginAdminReportViewLoad();
 
     const reportSelect = document.getElementById('admin-report-select');
     const selectedOption = reportSelect?.selectedOptions?.[0] || null;
@@ -2333,7 +2372,7 @@ async function loadAdminReport(location, reportId) {
         const params = new URLSearchParams({ location });
         if (reportId) params.set('report_id', String(reportId));
 
-        const response = await fetch(`/api/report?${params.toString()}`);
+        const response = await fetch(`/api/report?${params.toString()}`, { signal });
         let payload = null;
         try {
             payload = await response.json();
@@ -2343,14 +2382,19 @@ async function loadAdminReport(location, reportId) {
         if (!response.ok) {
             throw new Error(payload?.detail || payload?.message || 'Ошибка загрузки отчёта');
         }
+        if (requestSeq !== adminState.reportViewRequestSeq) {
+            return;
+        }
+
         const report = payload;
         adminState.report = report;
         adminState.isPeriodMode = false;
         adminState.selectedReportId = report.report_id || null;
-        if (adminState.selectedLocation) {
-            adminState.selectedReportIdByLocation[adminState.selectedLocation] = adminState.selectedReportId;
-        }
         persistAdminUiState();
+
+        if (reportSelect && report.report_id && Array.from(reportSelect.options || []).some(option => Number(option.value) === Number(report.report_id))) {
+            reportSelect.value = String(report.report_id);
+        }
 
         updateSummary(report);
         populateEmployeeFilter(report);
@@ -2358,6 +2402,10 @@ async function loadAdminReport(location, reportId) {
         setAdminReportStatus('');
         updateExportReportButton(report);
     } catch (error) {
+        if (isAbortError(error)) {
+            return;
+        }
+
         console.error(error);
         setAdminReportStatus(error?.message || 'Не удалось загрузить данные ревизии.', 'error');
         employeesContainer.innerHTML = '<p class="empty-text error-text">Ошибка загрузки данных о сотрудниках.</p>';
@@ -2366,6 +2414,8 @@ async function loadAdminReport(location, reportId) {
         }
         categoriesContainer.innerHTML = '<div class="category-card"><p class="empty-text error-text">Ошибка загрузки данных ревизии.</p></div>';
         updateExportReportButton(null);
+    } finally {
+        finishAdminReportViewLoad(requestSeq);
     }
 }
 
@@ -2373,6 +2423,7 @@ async function loadAdminPeriodReport(location, dateFrom, dateTo) {
     const categoriesContainer = document.getElementById('report-categories');
     const employeesContainer = document.getElementById('report-employees');
     const employeeDetailsContainer = document.getElementById('report-employee-details');
+    const { requestSeq, signal } = beginAdminReportViewLoad();
 
     setAdminReportLoading(`Загружаем период ${dateFrom} — ${dateTo} для точки «${location}»...`);
 
@@ -2383,7 +2434,7 @@ async function loadAdminPeriodReport(location, dateFrom, dateTo) {
             date_to: dateTo,
         });
 
-        const response = await fetch(`/api/report-period?${params.toString()}`);
+        const response = await fetch(`/api/report-period?${params.toString()}`, { signal });
         let payload = null;
         try {
             payload = await response.json();
@@ -2392,6 +2443,9 @@ async function loadAdminPeriodReport(location, dateFrom, dateTo) {
         }
         if (!response.ok) {
             throw new Error(payload?.detail || payload?.message || 'Ошибка загрузки периода');
+        }
+        if (requestSeq !== adminState.reportViewRequestSeq) {
+            return;
         }
 
         adminState.report = payload;
@@ -2405,6 +2459,10 @@ async function loadAdminPeriodReport(location, dateFrom, dateTo) {
         setAdminReportStatus('');
         updateExportReportButton(payload);
     } catch (error) {
+        if (isAbortError(error)) {
+            return;
+        }
+
         console.error(error);
         setAdminReportStatus(error?.message || 'Не удалось загрузить период.', 'error');
         employeesContainer.innerHTML = '<p class="empty-text error-text">Ошибка загрузки данных о сотрудниках.</p>';
@@ -2413,16 +2471,14 @@ async function loadAdminPeriodReport(location, dateFrom, dateTo) {
         }
         categoriesContainer.innerHTML = '<div class="category-card"><p class="empty-text error-text">Ошибка загрузки периода.</p></div>';
         updateExportReportButton(null);
+    } finally {
+        finishAdminReportViewLoad(requestSeq);
     }
 }
 
 async function resetPeriodToSelectedReport() {
     const location = getSelectedAdminLocation();
-    const reportSelect = document.getElementById('admin-report-select');
-    if (!location || !reportSelect) return;
-
-    const latestReportId = await loadReportsList(location);
-    const normalizedLatestReportId = Number(reportSelect.options?.[0]?.value || latestReportId || 0) || null;
+    if (!location) return;
 
     adminState.isPeriodMode = false;
     adminState.expandedCategories.clear();
@@ -2433,17 +2489,7 @@ async function resetPeriodToSelectedReport() {
         employeeFilterSelect.value = '';
     }
 
-    if (normalizedLatestReportId) {
-        reportSelect.value = String(normalizedLatestReportId);
-        adminState.selectedReportId = normalizedLatestReportId;
-        adminState.selectedReportIdByLocation[location] = normalizedLatestReportId;
-    } else {
-        adminState.selectedReportId = null;
-        delete adminState.selectedReportIdByLocation[location];
-    }
-    persistAdminUiState();
-
-    await loadAdminReport(location, normalizedLatestReportId);
+    await reloadReportsSection(location);
 }
 
 async function deleteSelectedReport() {
@@ -2463,8 +2509,13 @@ async function deleteSelectedReport() {
 }
 
 async function reloadReportsSection(location) {
+    const sectionRequestSeq = ++adminState.reportsSectionRequestSeq;
+    if (adminState.reportViewAbortController) {
+        adminState.reportViewAbortController.abort();
+    }
+
     adminState.selectedLocation = location;
-    adminState.selectedReportId = Number(adminState.selectedReportIdByLocation?.[location] || adminState.selectedReportId || null) || null;
+    adminState.selectedReportId = null;
     persistAdminUiState();
     adminState.employeeFilter = '';
     adminState.expandedCategories.clear();
@@ -2484,22 +2535,35 @@ async function reloadReportsSection(location) {
         return;
     }
 
-    const reportId = await loadReportsList(location);
+    if (reportSelect) {
+        reportSelect.onchange = null;
+    }
+
+    const reportId = await loadReportsList(location, sectionRequestSeq);
+    if (sectionRequestSeq !== adminState.reportsSectionRequestSeq) {
+        return;
+    }
+    if (!reportId) {
+        setAdminReportStatus('Для этой точки пока нет сохранённых ревизий.', 'error');
+        return;
+    }
+
     await loadAdminReport(location, reportId);
+    if (sectionRequestSeq !== adminState.reportsSectionRequestSeq || !reportSelect) {
+        return;
+    }
 
     reportSelect.onchange = async () => {
+        if (adminState.isReportViewLoading) {
+            return;
+        }
+
+        const currentLocation = getSelectedAdminLocation();
         const selected = reportSelect.value ? Number(reportSelect.value) : null;
         adminState.selectedReportId = selected;
-        if (location) {
-            if (selected) {
-                adminState.selectedReportIdByLocation[location] = selected;
-            } else {
-                delete adminState.selectedReportIdByLocation[location];
-            }
-        }
         persistAdminUiState();
         adminState.expandedCategories.clear();
-        await loadAdminReport(location, selected);
+        await loadAdminReport(currentLocation, selected);
     };
 }
 
@@ -2762,7 +2826,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     locationSelect.addEventListener('change', async () => {
         const nextLocation = locationSelect.value;
         adminState.selectedLocation = nextLocation;
-        adminState.selectedReportId = Number(adminState.selectedReportIdByLocation?.[nextLocation] || null) || null;
+        adminState.selectedReportId = null;
         persistAdminUiState();
         await reloadReportsSection(nextLocation);
     });
