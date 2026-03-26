@@ -347,9 +347,9 @@ async def api_delete_location(location_id: int, admin: User = Depends(require_su
 
 
 @app.get('/api/cycle-targets', response_model=AdminCycleTargetsResponse)
-async def api_get_cycle_targets(location: str, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+async def api_get_cycle_targets(location: str, target_date: date | None = None, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
     await ensure_user_can_access_location(admin, location, db)
-    return await get_cycle_targets(location, db)
+    return await get_cycle_targets(location, db, target_date=target_date)
 
 
 @app.post('/api/cycle-targets', response_model=SaveCycleTargetsResponse)

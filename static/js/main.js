@@ -97,11 +97,15 @@ function renderEmployeeRevisionControls() {
     const finished = Boolean(inventoryState?.employee_finished || inventoryState?.report_completed);
     const state = finished ? 'finished' : getEmployeeRevisionState();
     const active = !finished && state === 'started';
+    const startBlockedMessage = inventoryState?.start_block_message || '';
+    const canFinishReport = Boolean(inventoryState?.can_finish_report);
 
     startBtn.classList.toggle('hidden', active || finished);
     startBtn.textContent = 'Начать ревизию';
+    startBtn.disabled = Boolean(!active && !finished && startBlockedMessage);
     refreshBtn.classList.toggle('hidden', !active);
     finishBtn.classList.toggle('hidden', !active);
+    finishBtn.disabled = active && !canFinishReport;
 
     tools.classList.toggle('hidden', !active);
     categories.classList.toggle('hidden', !active);
@@ -115,14 +119,21 @@ function renderEmployeeRevisionControls() {
         hint.textContent = 'Кнопка «Завершить ревизию» фиксирует завершение на сервере и блокирует продолжение работы до следующего дня.';
     } else if (!active) {
         banner.className = 'employee-revision-banner idle';
-        banner.innerHTML = inventoryState?.report_started
-            ? '<strong>Вы ещё не начали свою ревизию.</strong> Нажмите «Начать ревизию», чтобы открыть категории и приступить к работе.'
-            : '<strong>Ревизия ещё не начата.</strong> Нажмите «Начать ревизию», чтобы открыть категории и приступить к работе.';
-        hint.textContent = 'После завершения ревизии на текущий день продолжить её уже будет нельзя.';
+        if (startBlockedMessage) {
+            banner.innerHTML = `<strong>Нельзя начать новую ревизию.</strong> ${escapeHtml(startBlockedMessage)}`;
+            hint.textContent = 'Сначала должна быть закрыта ваша предыдущая незавершённая ревизия.';
+        } else {
+            banner.innerHTML = inventoryState?.report_started
+                ? '<strong>Вы ещё не начали свою ревизию.</strong> Нажмите «Начать ревизию», чтобы открыть категории и приступить к работе.'
+                : '<strong>Ревизия ещё не начата.</strong> Нажмите «Начать ревизию», чтобы открыть категории и приступить к работе.';
+            hint.textContent = 'После завершения ревизии на текущий день продолжить её уже будет нельзя.';
+        }
     } else {
         banner.className = 'employee-revision-banner hidden';
         banner.innerHTML = '';
-        hint.textContent = 'Когда закончите работу, нажмите «Завершить ревизию». После подтверждения продолжить её в этот день уже нельзя.';
+        hint.textContent = inventoryState?.finish_block_message
+            ? inventoryState.finish_block_message
+            : 'Когда закончите работу, нажмите «Завершить ревизию». После подтверждения продолжить её в этот день уже нельзя.';
     }
 }
 

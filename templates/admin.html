@@ -65,7 +65,7 @@
     <section class="category-card report-summary-v2">
         <div class="report-summary-header">
             <div>
-                <h2>Сводка по ревизии</h2>
+                <h2>Сверка по циклу</h2>
                 <p class="muted-text">Общий статус, состав команды и ключевые показатели.</p>
             </div>
             <div class="report-status-chip" id="report-status-chip">—</div>
@@ -104,15 +104,15 @@
                 <strong id="employees-count">0</strong>
             </div>
             <div class="summary-kpi-card neutral">
-                <span class="summary-kpi-label">Категорий завершено</span>
+                <span class="summary-kpi-label">Подкатегорий завершено</span>
                 <strong id="completed-categories">0/0</strong>
             </div>
             <div class="summary-kpi-card warning">
-                <span class="summary-kpi-label">Категорий с расхождениями</span>
+                <span class="summary-kpi-label">Подкатегорий с расхождениями</span>
                 <strong id="discrepancy-categories">0</strong>
             </div>
             <div class="summary-kpi-card plus">
-                <span class="summary-kpi-label">Категорий без расхождений</span>
+                <span class="summary-kpi-label">Подкатегорий без расхождений</span>
                 <strong id="no-discrepancy-categories">0</strong>
             </div>
             <div class="summary-kpi-card minus">
@@ -138,8 +138,8 @@
         <details class="selected-cycle-details">
             <summary class="selected-cycle-summary">
                 <div>
-                    <h2 id="selected-scope-title" class="section-title selected-cycle-title">Выбрано на текущий цикл</h2>
-                    <p id="selected-scope-subtitle" class="muted-text selected-cycle-subtitle">Быстрый список категорий и подкатегорий, которые сейчас включены в ревизию для выбранной точки.</p>
+                    <h2 id="selected-scope-title" class="section-title selected-cycle-title">Выбрано в текущей ревизии</h2>
+                    <p id="selected-scope-subtitle" class="muted-text selected-cycle-subtitle">Категории и подкатегории текущей ревизии с подсветкой того, что уже взято или завершено.</p>
                 </div>
                 <span class="selected-cycle-toggle-text" aria-hidden="true"></span>
             </summary>
@@ -160,7 +160,7 @@
         </details>
     </section>
 
-    <section class="category-card">
+    <section id="report-employees-section" class="category-card">
         <div class="section-title-row">
             <div>
                 <h2 class="section-title">Сотрудники в ревизии</h2>
@@ -204,10 +204,6 @@
                     Показать только с расхождениями
                 </label>
 
-                <label class="checkbox-row admin-filter-checkbox detail-filter-checkbox-inline">
-                    <input type="checkbox" id="admin-completed-only">
-                    Показать только пройденные категории
-                </label>
 
                 <div class="detail-mode-wrap">
                     <div class="view-mode-switch" id="admin-view-mode-switch">
@@ -424,7 +420,7 @@
         <div class="modal-header">
             <div>
                 <h2>Категории цикла</h2>
-                <p class="muted-text">На 1-й день цикла администратор задаёт категории и подкатегории, которые сотрудники будут распределять между собой.</p>
+                <p class="muted-text">Выбирайте подкатегории по конкретной дате внутри текущего 15-дневного цикла. Завершённые ревизии доступны только для просмотра.</p>
             </div>
             <div class="modal-header-actions">
                 <button id="apply-previous-cycle-targets-btn" class="btn secondary btn-inline" type="button">Добавить прошлый выбор</button>
@@ -434,15 +430,19 @@
         </div>
         <div class="cycle-targets-toolbar">
             <label>
-                Дата начала цикла
+                Старт цикла
                 <input type="date" id="cycle-start-date">
+            </label>
+            <label>
+                Дата ревизии
+                <input type="date" id="cycle-target-date">
             </label>
             <label>
                 Поиск по категориям
                 <input type="text" id="cycle-targets-search" placeholder="Начните вводить категорию или подкатегорию..." autocomplete="off">
             </label>
         </div>
-        <p class="muted-text" style="margin:0 0 12px;">Можно выбрать дату в пределах последних 15 дней. Ниже — полный список категорий: можно выбрать всю категорию целиком или раскрыть её и отметить только нужные подкатегории.</p>
+        <p class="muted-text" style="margin:0 0 12px;">Выберите дату внутри текущего 15-дневного цикла и отметьте подкатегории именно на этот день. Итоговая ревизия за цикл остаётся без изменений.</p>
         <div id="cycle-targets-meta" class="muted-text" style="margin-bottom:6px;"></div>
         <div class="cycle-targets-status-row muted-text">
             <span id="cycle-targets-selected-count">Выбрано категорий: 0. Подкатегорий: 0.</span>

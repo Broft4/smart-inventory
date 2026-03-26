@@ -111,6 +111,27 @@ class SelectionTarget(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class SelectionTargetDay(Base):
+    __tablename__ = 'selection_target_days'
+    __table_args__ = (
+        UniqueConstraint('location', 'cycle_version', 'target_date', 'target_type', 'target_id', name='uq_selection_target_days_per_date'),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    location: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    cycle_version: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    target_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    category_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    category_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    subcategory_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    subcategory_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    target_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    target_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    target_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+
 class CategoryAssignment(Base):
     __tablename__ = 'category_assignments'
     __table_args__ = (

@@ -43,7 +43,6 @@ const adminState = {
     periodDateTo: '',
     employeeFilter: '',
     discrepancyOnly: false,
-    completedOnly: false,
     expandedCategories: new Set(),
     viewMode: 'categories',
     searchQuery: '',
@@ -55,6 +54,11 @@ const adminState = {
     editingDiscrepancy: null,
     cycleTargetsPreviousCategoryIds: new Set(),
     cycleTargetsPreviousSubcategoryIds: new Set(),
+    cycleTargetsTargetDate: '',
+    cycleTargetsMinDate: '',
+    cycleTargetsMaxDate: '',
+    cycleTargetsLocked: false,
+    cycleTargetsLockedMessage: '',
 };
 
 function formatDateTime(value) {
@@ -139,7 +143,7 @@ function buildEmployeeRevisionStatus(employee, report) {
     }
 
     return {
-        label: canManage ? 'Ревизия не начата' : 'Статус только для просмотра',
+        label: canManage ? 'Назначена' : 'Статус только для просмотра',
         className: canManage ? 'grey' : 'orange',
         actionHtml: '',
     };
@@ -359,6 +363,81 @@ function parseRuDateToIso(value) {
     if (!match) return '';
     const [, day, month, year] = match;
     return `${year}-${month}-${day}`;
+}
+
+
+function extractIsoDateFromRuDate(value) {
+    const match = String(value || '').match(/^(\d{2})\.(\d{2})\.(\d{4})/);
+    if (!match) return '';
+    const [, day, month, year] = match;
+    return `${year}-${month}-${day}`;
+}
+
+function getDefaultCycleTargetDate() {
+    const targetDateInput = document.getElementById('cycle-target-date');
+    if (targetDateInput?.value) return targetDateInput.value;
+    if (adminState.report?.report_type === 'daily') {
+        const reportDate = extractIsoDateFromRuDate(adminState.report.date);
+        if (reportDate) return reportDate;
+    }
+    return getTodayIsoDate();
+}
+
+function getEmployeeSubcategoryStatsMap(report) {
+    const statsMap = new Map();
+    const employees = buildEmployeeDetailGroups(report);
+
+    employees.forEach(employee => {
+        const allSubcategories = new Set();
+        const completedSubcategories = new Set();
+        const discrepancySubcategories = new Set();
+
+        (employee.categories || []).forEach(category => {
+            (category.in_progress_subcategories || []).forEach(sub => {
+                if (!sub?.name) return;
+                allSubcategories.add(`${category.name}::${sub.name}`);
+            });
+            (category.completed_subcategories || []).forEach(sub => {
+                if (!sub?.name) return;
+                const key = `${category.name}::${sub.name}`;
+                allSubcategories.add(key);
+                completedSubcategories.add(key);
+            });
+        });
+
+        (employee.discrepancyItems || []).forEach(item => {
+            if (!item?.subcategory_name || item.subcategory_name === '-') return;
+            const key = `${item.category_name}::${item.subcategory_name}`;
+            allSubcategories.add(key);
+            completedSubcategories.add(key);
+            discrepancySubcategories.add(key);
+        });
+
+        statsMap.set(employee.full_name, {
+            total: allSubcategories.size,
+            completed: completedSubcategories.size,
+            discrepancy: discrepancySubcategories.size,
+        });
+    });
+
+    return statsMap;
+}
+
+function toggleReportEmployeesSection(report) {
+    const section = document.getElementById('report-employees-section');
+    if (!section) return;
+    const employeesCount = Array.isArray(report?.employees) ? report.employees.length : 0;
+    section.classList.toggle('hidden', employeesCount <= 1);
+}
+
+function setCycleTargetsSaveButtonState(isLoading) {
+    const button = document.getElementById('save-cycle-targets-btn');
+    if (!button) return;
+    if (!button.dataset.defaultLabel) {
+        button.dataset.defaultLabel = button.textContent || 'Сохранить';
+    }
+    button.disabled = Boolean(isLoading || adminState.cycleTargetsLocked);
+    button.textContent = isLoading ? 'Сохраняем...' : button.dataset.defaultLabel;
 }
 
 function toggleCycleCategoryBody(categoryId) {
@@ -1168,7 +1247,8 @@ function updateCycleTargetDependencyState() {
 
         subCheckboxes.forEach(subCheckbox => {
             const wasChecked = subCheckbox.checked;
-            subCheckbox.disabled = categorySelected;
+            const baseDisabled = subCheckbox.dataset.baseDisabled === 'true';
+            subCheckbox.disabled = adminState.cycleTargetsLocked || baseDisabled || categorySelected;
             if (categorySelected && wasChecked) {
                 subCheckbox.checked = false;
             }
@@ -1192,7 +1272,8 @@ function renderCycleTargetsSelectionSummary() {
     }
 
     if (filteredCountNode) {
-        filteredCountNode.textContent = `Показано категорий: ${categoryCheckboxes.length}. Уже пройдено подкатегорий в цикле: ${completedSubcategoryNodes.length}.`;
+        const availableSubcategories = subcategoryCheckboxes.length;
+        filteredCountNode.textContent = `Показано категорий: ${categoryCheckboxes.length}. Доступно подкатегорий: ${availableSubcategories}. Уже пройдено до выбранной даты: ${completedSubcategoryNodes.length}.`;
     }
 }
 
@@ -1205,14 +1286,11 @@ function clearCycleTargetsSelection() {
 }
 
 function rememberCycleTargetsPreviousSelection(data) {
-    const categories = Array.isArray(data?.categories) ? data.categories : [];
     adminState.cycleTargetsPreviousCategoryIds = new Set(
-        categories.filter(category => category?.selected).map(category => String(category.id)),
+        (Array.isArray(data?.previous_category_ids) ? data.previous_category_ids : []).map(id => String(id)),
     );
     adminState.cycleTargetsPreviousSubcategoryIds = new Set(
-        categories.flatMap(category => (Array.isArray(category?.subcategories) ? category.subcategories : []))
-            .filter(subcategory => subcategory?.selected)
-            .map(subcategory => String(subcategory.id)),
+        (Array.isArray(data?.previous_subcategory_ids) ? data.previous_subcategory_ids : []).map(id => String(id)),
     );
 }
 
@@ -1221,8 +1299,13 @@ function applyPreviousCycleTargetsSelection() {
     const categoryIds = adminState.cycleTargetsPreviousCategoryIds || new Set();
     const subcategoryIds = adminState.cycleTargetsPreviousSubcategoryIds || new Set();
 
+    if (adminState.cycleTargetsLocked) {
+        setMessage(message, adminState.cycleTargetsLockedMessage || 'Для завершённой ревизии выбор менять нельзя.', '#b06000');
+        return;
+    }
+
     if (!categoryIds.size && !subcategoryIds.size) {
-        setMessage(message, 'Прошлого выбора для этой точки пока нет.', '#6b7280');
+        setMessage(message, 'Прошлого доступного выбора для этой даты нет.', '#6b7280');
         return;
     }
 
@@ -1274,8 +1357,8 @@ function updateSelectedScopeHeader(report) {
         return;
     }
 
-    title.textContent = 'Выбрано на текущий цикл';
-    subtitle.textContent = 'Быстрый список категорий и подкатегорий, которые сейчас включены в ревизию для выбранной точки.';
+    title.textContent = 'Выбрано в текущей ревизии';
+    subtitle.textContent = 'Категории и подкатегории текущей ревизии с подсветкой того, что уже взято или завершено.';
 }
 
 function updateReportActionButtons(report) {
@@ -1294,74 +1377,156 @@ function renderSelectedCycleScope(report) {
     const subcategoriesContainer = document.getElementById('selected-cycle-subcategories-list');
     if (!categoriesContainer || !subcategoriesContainer) return;
 
-    const selectedCategories = Array.isArray(report?.selected_categories) ? report.selected_categories : [];
-    const selectedSubcategories = Array.isArray(report?.selected_subcategories) ? report.selected_subcategories : [];
-    const remainingTakenSubcategories = [];
-    const remainingTakenSeen = new Set();
+    if (report?.report_type !== 'daily') {
+        const selectedCategories = Array.isArray(report?.selected_categories) ? report.selected_categories : [];
+        const selectedSubcategories = Array.isArray(report?.selected_subcategories) ? report.selected_subcategories : [];
+        categoriesContainer.innerHTML = selectedCategories.length
+            ? selectedCategories.map(name => `<span class="category-chip">${highlightMatch(name, adminState.searchQuery)}</span>`).join('')
+            : '<span class="muted-text">Нет выбранных категорий</span>';
+        subcategoriesContainer.innerHTML = selectedSubcategories.length
+            ? selectedSubcategories.map(name => `<span class="category-chip">${highlightMatch(name, adminState.searchQuery)}</span>`).join('')
+            : '<span class="muted-text">Нет выбранных подкатегорий</span>';
+        return;
+    }
 
-    (Array.isArray(report?.categories) ? report.categories : []).forEach(category => {
-        const categoryName = category?.name || '';
-        const completedNames = new Set((Array.isArray(category?.completed_subcategories) ? category.completed_subcategories : [])
+    const categoryChips = [];
+    const subcategoryChips = [];
+    const seenCategoryLabels = new Set();
+    const seenSubcategoryLabels = new Set();
+    const categories = Array.isArray(report?.categories) ? report.categories : [];
+
+    const pushCategoryChip = (label, variant = '') => {
+        const key = normalizeSearch(label);
+        if (!key || seenCategoryLabels.has(key)) return;
+        seenCategoryLabels.add(key);
+        const extraClass = variant ? ` ${variant}` : '';
+        categoryChips.push(`<span class="category-chip${extraClass}">${highlightMatch(label, adminState.searchQuery)}</span>`);
+    };
+
+    const pushSubcategoryChip = (label, variant = '', owner = '') => {
+        const key = normalizeSearch(`${label}::${owner}`);
+        if (!key || seenSubcategoryLabels.has(key)) return;
+        seenSubcategoryLabels.add(key);
+        const extraClass = variant ? ` ${variant}` : '';
+        subcategoryChips.push(`<span class="category-chip${extraClass}">${highlightMatch(label, adminState.searchQuery)}${owner ? ` · ${highlightMatch(owner, adminState.searchQuery)}` : ''}</span>`);
+    };
+
+    categories.forEach(category => {
+        const categoryLabel = category?.name || '';
+        const completedSubNames = new Set((Array.isArray(category?.completed_subcategories) ? category.completed_subcategories : [])
             .map(sub => normalizeSearch(sub?.name || ''))
             .filter(Boolean));
-        const problemNames = new Set((Array.isArray(category?.problem_items) ? category.problem_items : [])
+        const discrepancySubNames = new Set((Array.isArray(category?.problem_items) ? category.problem_items : [])
             .map(item => normalizeSearch(item?.subcategory_name || ''))
             .filter(Boolean));
+        const inProgressSubcategories = Array.isArray(category?.in_progress_subcategories) ? category.in_progress_subcategories : [];
+        const selectedSubNames = Array.isArray(category?.selected_subcategories) ? category.selected_subcategories : [];
 
-        (Array.isArray(category?.in_progress_subcategories) ? category.in_progress_subcategories : []).forEach(sub => {
-            const subName = sub?.name || '';
+        if (category?.selected_on_cycle) {
+            if (['green', 'red'].includes(normalizeSearch(category.status || ''))) {
+                pushCategoryChip(categoryLabel, 'category-chip--success');
+            } else if (inProgressSubcategories.length || category?.assigned_to) {
+                pushCategoryChip(categoryLabel, 'category-chip--warning');
+            } else {
+                pushCategoryChip(categoryLabel);
+            }
+        }
+
+        selectedSubNames.forEach(subName => {
+            const label = categoryLabel ? `${categoryLabel} → ${subName}` : subName;
             const normalizedSubName = normalizeSearch(subName);
-            if (!normalizedSubName) return;
-            if (completedNames.has(normalizedSubName) || problemNames.has(normalizedSubName)) return;
+            if (completedSubNames.has(normalizedSubName) || discrepancySubNames.has(normalizedSubName)) {
+                pushSubcategoryChip(label, 'category-chip--success');
+            } else {
+                const inProgress = inProgressSubcategories.find(sub => normalizeSearch(sub?.name || '') === normalizedSubName);
+                if (inProgress) {
+                    pushSubcategoryChip(label, 'category-chip--warning', inProgress.assigned_to || '');
+                } else {
+                    pushSubcategoryChip(label);
+                }
+            }
+        });
 
-            const label = categoryName ? `${categoryName} → ${subName}` : subName;
-            const dedupeKey = normalizeSearch(`${label}::${sub?.assigned_to || ''}`);
-            if (remainingTakenSeen.has(dedupeKey)) return;
-            remainingTakenSeen.add(dedupeKey);
-            remainingTakenSubcategories.push({
-                label,
-                assigned_to: sub?.assigned_to || '',
-            });
+        inProgressSubcategories.forEach(sub => {
+            const subName = sub?.name || '';
+            if (!subName) return;
+            const normalizedSubName = normalizeSearch(subName);
+            if (completedSubNames.has(normalizedSubName) || discrepancySubNames.has(normalizedSubName)) return;
+            const label = categoryLabel ? `${categoryLabel} → ${subName}` : subName;
+            pushSubcategoryChip(label, 'category-chip--warning', sub?.assigned_to || '');
+        });
+
+        (Array.isArray(category?.completed_subcategories) ? category.completed_subcategories : []).forEach(sub => {
+            const subName = sub?.name || '';
+            if (!subName) return;
+            const label = categoryLabel ? `${categoryLabel} → ${subName}` : subName;
+            pushSubcategoryChip(label, 'category-chip--success', sub?.checked_by || '');
+        });
+
+        (Array.isArray(category?.problem_items) ? category.problem_items : []).forEach(item => {
+            const subName = item?.subcategory_name || '';
+            if (!subName || subName === '-') return;
+            const label = categoryLabel ? `${categoryLabel} → ${subName}` : subName;
+            pushSubcategoryChip(label, 'category-chip--success', item?.checked_by || '');
         });
     });
 
-    categoriesContainer.innerHTML = selectedCategories.length
-        ? selectedCategories.map(name => `<span class="category-chip">${highlightMatch(name, adminState.searchQuery)}</span>`).join('')
+    categoriesContainer.innerHTML = categoryChips.length
+        ? categoryChips.join('')
         : '<span class="muted-text">Нет выбранных категорий</span>';
-
-    const selectedSubcategoriesHtml = selectedSubcategories.length
-        ? selectedSubcategories.map(name => `<span class="category-chip">${highlightMatch(name, adminState.searchQuery)}</span>`).join('')
-        : '';
-    const remainingTakenHtml = remainingTakenSubcategories.length
-        ? `${remainingTakenSubcategories.map(sub => `
-                <span class="category-chip category-chip--warning">
-                    ${highlightMatch(sub.label, adminState.searchQuery)}${sub.assigned_to ? ` · ${highlightMatch(sub.assigned_to, adminState.searchQuery)}` : ''}
-                </span>
-            `).join('')}`
-        : '';
-
-    subcategoriesContainer.innerHTML = (selectedSubcategoriesHtml || remainingTakenHtml)
-        ? `${selectedSubcategoriesHtml}${remainingTakenHtml}`
+    subcategoriesContainer.innerHTML = subcategoryChips.length
+        ? subcategoryChips.join('')
         : '<span class="muted-text">Нет выбранных подкатегорий</span>';
 }
 
 function renderCycleTargets(data) {
     const container = document.getElementById('cycle-targets-list');
     const meta = document.getElementById('cycle-targets-meta');
-    const dateInput = document.getElementById('cycle-start-date');
+    const cycleStartInput = document.getElementById('cycle-start-date');
+    const targetDateInput = document.getElementById('cycle-target-date');
+    const applyPreviousButton = document.getElementById('apply-previous-cycle-targets-btn');
     if (!container) return;
 
     const categories = Array.isArray(data?.categories) ? data.categories : [];
     rememberCycleTargetsPreviousSelection(data);
+    adminState.cycleTargetsTargetDate = data?.target_date || '';
+    adminState.cycleTargetsMinDate = data?.min_target_date || '';
+    adminState.cycleTargetsMaxDate = data?.max_target_date || '';
+    adminState.cycleTargetsLocked = Boolean(data?.is_locked);
+    adminState.cycleTargetsLockedMessage = data?.locked_message || '';
+
     if (meta) {
-        meta.textContent = `Точка: ${data?.location || '-'} · Версия цикла: ${data?.cycle_version || '-'} · Старт: ${data?.cycle_started_at || '-'}`;
+        const previousLabel = data?.previous_target_date
+            ? ` · прошлый сохранённый выбор: ${data.previous_target_date}`
+            : '';
+        const lockLabel = data?.is_locked
+            ? ` · ${data?.report_status || 'Завершена'} · только просмотр`
+            : '';
+        meta.textContent = `Точка: ${data?.location || '-'} · Версия цикла: ${data?.cycle_version || '-'} · Старт цикла: ${data?.cycle_started_at || '-'} · Дата ревизии: ${data?.target_date || '-'}${previousLabel}${lockLabel}`;
     }
-    if (dateInput) {
-        dateInput.value = parseRuDateToIso(data?.cycle_started_at || '');
+    if (cycleStartInput) {
+        cycleStartInput.value = parseRuDateToIso(data?.cycle_started_at || '');
+        cycleStartInput.disabled = Boolean(data?.is_locked);
+    }
+    if (targetDateInput) {
+        targetDateInput.value = data?.target_date || '';
+        targetDateInput.min = data?.min_target_date || '';
+        targetDateInput.max = data?.max_target_date || '';
+    }
+    setCycleTargetsSaveButtonState(false);
+    const modalMessage = document.getElementById('cycle-targets-message');
+    if (data?.is_locked) {
+        setMessage(modalMessage, data?.locked_message || 'Для завершённой ревизии выбор менять нельзя.', '#b06000');
+    } else {
+        setMessage(modalMessage, '');
+    }
+    if (applyPreviousButton) {
+        const hasPrevious = Boolean(adminState.cycleTargetsPreviousCategoryIds?.size || adminState.cycleTargetsPreviousSubcategoryIds?.size);
+        applyPreviousButton.disabled = Boolean(data?.is_locked || !hasPrevious);
     }
 
     if (!categories.length) {
-        container.innerHTML = '<div class="category-card"><p class="empty-text">Нет доступных категорий для настройки цикла.</p></div>';
+        container.innerHTML = '<div class="category-card"><p class="empty-text">Нет доступных категорий для настройки ревизии на выбранную дату.</p></div>';
         renderCycleTargetsSelectionSummary();
         return;
     }
@@ -1375,15 +1540,21 @@ function renderCycleTargets(data) {
         return `
             <article class="category-card admin-category-card status-grey">
                 <div class="admin-category-header">
-                    <label class="checkbox-row" style="display:flex;align-items:flex-start;gap:10px;flex:1;cursor:pointer;">
+                    <label class="checkbox-row" style="display:flex;align-items:flex-start;gap:10px;flex:1;cursor:${category.disabled ? 'not-allowed' : 'pointer'};opacity:${category.disabled ? '0.68' : '1'};">
                         <input
                             type="checkbox"
                             data-cycle-category-id="${escapeHtml(category.id)}"
+                            data-base-disabled="${category.disabled ? 'true' : 'false'}"
                             ${category.selected ? 'checked' : ''}
+                            ${category.disabled ? 'disabled' : ''}
                         >
                         <div>
                             <strong>${escapeHtml(category.name)}</strong>
-                            <div class="muted-text">Выбрать всю категорию на цикл. Сотрудники увидят только новые подкатегории, ещё не пройденные в этом цикле.</div>
+                            <div class="muted-text">
+                                ${category.disabled && !category.selected
+                                    ? 'Всю категорию на эту дату выбрать нельзя: часть подкатегорий уже занята в других ревизиях цикла или дата закрыта.'
+                                    : 'Выбрать всю категорию на выбранную дату. Сотрудники увидят только подкатегории, актуальные для этой даты.'}
+                            </div>
                         </div>
                     </label>
                     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end;">
@@ -1412,17 +1583,18 @@ function renderCycleTargets(data) {
                     <div class="admin-category-body ${expanded ? '' : 'hidden'}" data-cycle-category-body="${escapeHtml(category.id)}">
                         <div style="display:grid;gap:8px;">
                             ${subcategories.map(subcategory => `
-                                <label class="checkbox-row" style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;">
+                                <label class="checkbox-row" style="display:flex;align-items:flex-start;gap:10px;cursor:${(subcategory.disabled || adminState.cycleTargetsLocked) ? 'not-allowed' : 'pointer'};opacity:${(subcategory.disabled || adminState.cycleTargetsLocked) ? '0.68' : '1'};">
                                     <input
                                         type="checkbox"
                                         data-cycle-subcategory-id="${escapeHtml(subcategory.id)}"
                                         data-cycle-subcategory-for="${escapeHtml(category.id)}"
+                                        data-base-disabled="${subcategory.disabled ? 'true' : 'false'}"
                                         ${subcategory.selected ? 'checked' : ''}
-                                        ${category.selected ? 'disabled' : ''}
+                                        ${(subcategory.disabled || category.selected || adminState.cycleTargetsLocked) ? 'disabled' : ''}
                                     >
                                     <div>
                                         <strong>${escapeHtml(subcategory.name)}</strong>
-                                        <div class="muted-text">Выбрать отдельно только эту новую подкатегорию</div>
+                                        <div class="muted-text">Выбрать отдельно только эту подкатегорию на выбранную дату</div>
                                     </div>
                                 </label>
                             `).join('')}
@@ -1430,12 +1602,12 @@ function renderCycleTargets(data) {
                     </div>
                 ` : `
                     <div class="admin-category-body" data-cycle-category-body="${escapeHtml(category.id)}">
-                        <div class="muted-text">Все текущие подкатегории уже пройдены в этом 15-дневном цикле.</div>
+                        <div class="muted-text">Для этой даты свободных подкатегорий в категории не осталось.</div>
                     </div>
                 `}
                 ${hasCompletedSubcategories ? `
                     <div class="admin-category-body hidden" data-cycle-completed-body="${escapeHtml(category.id)}" style="margin-top:12px;border-top:1px solid rgba(148,163,184,0.25);padding-top:12px;">
-                        <div class="success-text" style="margin-bottom:8px;font-weight:600;">Успешно пройденные подкатегории</div>
+                        <div class="success-text" style="margin-bottom:8px;font-weight:600;">Успешно пройденные до выбранной даты</div>
                         <div class="employee-category-chips">
                             ${completedSubcategories.map(subcategory => `<span class="category-chip" data-cycle-completed-subcategory-id="${escapeHtml(subcategory.id)}">${escapeHtml(subcategory.name)}</span>`).join('')}
                         </div>
@@ -1452,15 +1624,14 @@ function renderCycleTargets(data) {
             updateCycleTargetDependencyState();
         });
     });
-
-    clearCycleTargetsSelection();
 }
 
-async function openCycleTargetsModal() {
+async function openCycleTargetsModal(targetDate = getDefaultCycleTargetDate()) {
     const location = getSelectedAdminLocation();
     const container = document.getElementById('cycle-targets-list');
     const message = document.getElementById('cycle-targets-message');
     const meta = document.getElementById('cycle-targets-meta');
+    const targetDateInput = document.getElementById('cycle-target-date');
 
     if (!location) {
         alert('Сначала выберите точку.');
@@ -1469,10 +1640,18 @@ async function openCycleTargetsModal() {
 
     if (container) container.innerHTML = '<p>Загрузка...</p>';
     if (meta) meta.textContent = '';
+    if (targetDateInput && targetDate) targetDateInput.value = targetDate;
     setMessage(message, '');
+    adminState.cycleTargetsLocked = false;
+    adminState.cycleTargetsLockedMessage = '';
+    setCycleTargetsSaveButtonState(false);
     showModal('cycle-targets-modal');
 
-    const response = await fetch(`/api/cycle-targets?location=${encodeURIComponent(location)}`);
+    const params = new URLSearchParams({ location });
+    if (targetDate) {
+        params.set('target_date', targetDate);
+    }
+    const response = await fetch(`/api/cycle-targets?${params.toString()}`);
     let data = null;
     try {
         data = await response.json();
@@ -1490,51 +1669,63 @@ async function openCycleTargetsModal() {
 async function saveCycleTargetsSelection() {
     const location = getSelectedAdminLocation();
     const message = document.getElementById('cycle-targets-message');
-    const dateInput = document.getElementById('cycle-start-date');
+    const cycleStartInput = document.getElementById('cycle-start-date');
+    const targetDateInput = document.getElementById('cycle-target-date');
 
     if (!location) {
         setMessage(message, 'Сначала выберите точку.');
+        return;
+    }
+    if (adminState.cycleTargetsLocked) {
+        setMessage(message, adminState.cycleTargetsLockedMessage || 'Для завершённой ревизии выбор менять нельзя.', '#b06000');
         return;
     }
 
     const categoryIds = [...document.querySelectorAll('[data-cycle-category-id]:checked')].map(node => node.dataset.cycleCategoryId).filter(Boolean);
     const subcategoryIds = [...document.querySelectorAll('[data-cycle-subcategory-id]:checked')].map(node => node.dataset.cycleSubcategoryId).filter(Boolean);
     const hasPreviousSelection = Boolean(adminState.cycleTargetsPreviousCategoryIds?.size || adminState.cycleTargetsPreviousSubcategoryIds?.size);
+    const targetDate = targetDateInput?.value || adminState.cycleTargetsTargetDate || getDefaultCycleTargetDate();
 
     if (!categoryIds.length && !subcategoryIds.length && hasPreviousSelection) {
-        setMessage(message, 'Пустой выбор не сохраняется. Оставлен предыдущий выбор цикла.', '#6b7280');
-        await openCycleTargetsModal();
+        setMessage(message, 'Пустой выбор не сохраняется. Оставлен предыдущий выбор для выбранной даты.', '#6b7280');
+        await openCycleTargetsModal(targetDate);
         return;
     }
 
+    setCycleTargetsSaveButtonState(true);
     setMessage(message, 'Сохраняем...', '#6b7280');
 
-    const response = await fetch('/api/cycle-targets', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            location,
-            cycle_started_at: dateInput?.value || null,
-            category_ids: categoryIds,
-            subcategory_ids: subcategoryIds,
-        }),
-    });
-
-    let data = null;
     try {
-        data = await response.json();
-    } catch {
-        data = null;
-    }
+        const response = await fetch('/api/cycle-targets', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                location,
+                cycle_started_at: cycleStartInput?.value || null,
+                target_date: targetDate || null,
+                category_ids: categoryIds,
+                subcategory_ids: subcategoryIds,
+            }),
+        });
 
-    if (!response.ok) {
-        setMessage(message, data?.detail || data?.message || 'Не удалось сохранить категории цикла.');
-        return;
-    }
+        let data = null;
+        try {
+            data = await response.json();
+        } catch {
+            data = null;
+        }
 
-    setMessage(message, data?.message || 'Категории цикла сохранены.', '#1f9d55');
-    await openCycleTargetsModal();
-    await reloadReportsSection(location);
+        if (!response.ok) {
+            setMessage(message, data?.detail || data?.message || 'Не удалось сохранить категории цикла.');
+            return;
+        }
+
+        setMessage(message, data?.message || 'Изменения сохранены.', '#1f9d55');
+        await openCycleTargetsModal(data?.target_date || targetDate);
+        await reloadReportsSection(location);
+    } finally {
+        setCycleTargetsSaveButtonState(false);
+    }
 }
 
 function getCategoryStatusLabel(status, category = null) {
@@ -1543,7 +1734,7 @@ function getCategoryStatusLabel(status, category = null) {
     if (status === 'green') return 'Завершена';
     if (status === 'orange') return 'В работе';
     if (status === 'red') return 'Есть расхождения';
-    return 'Не начата';
+    return 'Назначена';
 }
 
 function getCategoryStatusClass(status, category = null) {
@@ -1587,10 +1778,6 @@ function getFilteredCategories(report) {
 
     if (adminState.discrepancyOnly) {
         categories = categories.filter(cat => (cat.problem_items || []).length > 0);
-    }
-
-    if (adminState.completedOnly) {
-        categories = categories.filter(cat => ['green', 'red'].includes((cat.status || '').toLowerCase()));
     }
 
     return categories;
@@ -1973,6 +2160,20 @@ function renderEmployeeDetails(report) {
             : '<div class="category-empty-state green">У этого сотрудника нет расхождений по текущим фильтрам.</div>';
 
         const revisionStatus = buildEmployeeRevisionStatus(employee, report);
+        const employeeSubcategoryKeys = new Set();
+        (employee.categories || []).forEach(category => {
+            (category.in_progress_subcategories || []).forEach(sub => {
+                if (sub?.name) employeeSubcategoryKeys.add(`${category.name}::${sub.name}`);
+            });
+            (category.completed_subcategories || []).forEach(sub => {
+                if (sub?.name) employeeSubcategoryKeys.add(`${category.name}::${sub.name}`);
+            });
+        });
+        (employee.discrepancyItems || []).forEach(item => {
+            if (item?.subcategory_name && item.subcategory_name !== '-') {
+                employeeSubcategoryKeys.add(`${item.category_name}::${item.subcategory_name}`);
+            }
+        });
         return `
             <article class="category-card employee-detail-card">
                 <div class="employee-detail-header">
@@ -1987,7 +2188,7 @@ function renderEmployeeDetails(report) {
                         ` : ''}
                     </div>
                     <div class="employee-detail-kpis">
-                        <div><span class="summary-label">Категорий</span><strong>${employee.categories.length}</strong></div>
+                        <div><span class="summary-label">Подкатегорий</span><strong>${employeeSubcategoryKeys.size}</strong></div>
                         <div><span class="summary-label">Расхождений</span><strong>${employee.discrepancyItems.length}</strong></div>
                     </div>
                 </div>
@@ -2047,16 +2248,12 @@ function updateSummary(report) {
     document.getElementById('report-status-chip').className = `report-status-chip ${((report.status || '').toLowerCase().includes('заверш')) ? 'completed' : 'progress'}`;
 
     const countedCategories = (report.categories || []).filter(cat => !isDiagnosticsCategoryName(cat.name));
-    const totalCategories = countedCategories.length;
-    const completedCategories = countedCategories.filter(cat => cat.status === 'green' || cat.status === 'red').length;
-    const discrepancyCategories = countedCategories.filter(cat => (cat.problem_items || []).length > 0).length;
-    const noDiscrepancyCategories = countedCategories.filter(cat => (cat.status || '').toLowerCase() === 'green').length;
     const discrepancyItems = countedCategories.reduce((sum, cat) => sum + (cat.problem_items || []).length, 0);
 
     document.getElementById('employees-count').textContent = String((report.employees || []).length);
-    document.getElementById('completed-categories').textContent = `${completedCategories}/${totalCategories}`;
-    document.getElementById('discrepancy-categories').textContent = String(discrepancyCategories);
-    document.getElementById('no-discrepancy-categories').textContent = String(noDiscrepancyCategories);
+    document.getElementById('completed-categories').textContent = `${Number(report.completed_subcategories_count || 0)}/${Number(report.total_subcategories || 0)}`;
+    document.getElementById('discrepancy-categories').textContent = String(Number(report.discrepancy_subcategories_count || 0));
+    document.getElementById('no-discrepancy-categories').textContent = String(Number(report.no_discrepancy_subcategories_count || 0));
     document.getElementById('discrepancy-items').textContent = String(discrepancyItems);
     document.getElementById('total-cost').textContent = formatMoney(report.total_cost);
     document.getElementById('total-retail').textContent = formatMoney(report.total_retail);
@@ -2065,11 +2262,13 @@ function updateSummary(report) {
     renderSelectedCycleScope(report);
     updateReportActionButtons(report);
     updateExportReportButton(report);
+    toggleReportEmployeesSection(report);
 }
 
 function renderEmployees(report) {
     const container = document.getElementById('report-employees');
     const employees = getFilteredEmployeeSummaries(report);
+    const subcategoryStatsMap = getEmployeeSubcategoryStatsMap(report);
 
     if (!employees.length) {
         container.innerHTML = '<p class="empty-text">По текущим фильтрам сотрудники не найдены.</p>';
@@ -2080,6 +2279,7 @@ function renderEmployees(report) {
         <div class="employee-summary-grid">
             ${employees.map(employee => {
                 const revisionStatus = buildEmployeeRevisionStatus(employee, report);
+                const subcategoryStats = subcategoryStatsMap.get(employee.full_name) || { total: 0, completed: 0, discrepancy: Number(employee.discrepancy_items || 0) };
                 return `
                 <article class="employee-summary-card">
                     <div class="employee-card-head">
@@ -2094,16 +2294,16 @@ function renderEmployees(report) {
                     </div>
                     <div class="employee-meta-grid">
                         <div>
-                            <span class="summary-label">Категории</span>
-                            <strong>${employee.categories.length}</strong>
+                            <span class="summary-label">Подкатегории</span>
+                            <strong>${subcategoryStats.total}</strong>
                         </div>
                         <div>
                             <span class="summary-label">Завершено</span>
-                            <strong>${employee.completed_categories}</strong>
+                            <strong>${subcategoryStats.completed}</strong>
                         </div>
                         <div>
                             <span class="summary-label">Расхождений</span>
-                            <strong>${employee.discrepancy_items}</strong>
+                            <strong>${subcategoryStats.discrepancy}</strong>
                         </div>
                         <div>
                             <span class="summary-label">Себестоимость</span>
@@ -2703,7 +2903,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     const locationSelect = document.getElementById('admin-location-select');
     const employeeFilter = document.getElementById('admin-employee-filter');
     const discrepancyOnly = document.getElementById('admin-discrepancy-only');
-    const completedOnly = document.getElementById('admin-completed-only');
     const searchInput = document.getElementById('admin-search-input');
     const userRoleSelect = document.getElementById('user-role');
 
@@ -2738,6 +2937,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('close-cycle-targets-modal-btn')?.addEventListener('click', () => hideModal('cycle-targets-modal'));
     document.getElementById('save-cycle-targets-btn')?.addEventListener('click', saveCycleTargetsSelection);
     document.getElementById('apply-previous-cycle-targets-btn')?.addEventListener('click', applyPreviousCycleTargetsSelection);
+    document.getElementById('cycle-target-date')?.addEventListener('change', async (event) => {
+        const nextDate = event.target?.value || '';
+        if (!nextDate) return;
+        try {
+            await openCycleTargetsModal(nextDate);
+        } catch (error) {
+            console.error(error);
+            alert('Не удалось загрузить подкатегории на выбранную дату.');
+        }
+    });
     document.getElementById('close-users-modal-btn').addEventListener('click', () => hideModal('users-modal'));
     document.getElementById('open-create-user-btn').textContent = isSuperadmin() ? 'Добавить пользователя' : 'Добавить сотрудника';
     document.getElementById('open-create-user-btn').addEventListener('click', openCreateUserModal);
@@ -2840,13 +3049,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     discrepancyOnly.addEventListener('change', () => {
         adminState.discrepancyOnly = discrepancyOnly.checked;
-        if (adminState.report) {
-            renderAllReportViews(adminState.report);
-        }
-    });
-
-    completedOnly?.addEventListener('change', () => {
-        adminState.completedOnly = completedOnly.checked;
         if (adminState.report) {
             renderAllReportViews(adminState.report);
         }

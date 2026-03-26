@@ -188,6 +188,9 @@ class InventoryStructureResponse(BaseModel):
     employee_finished: bool = False
     report_started: bool = False
     report_completed: bool = False
+    can_finish_report: bool = False
+    finish_block_message: Optional[str] = None
+    start_block_message: Optional[str] = None
 
 
 class AssignSelectionRequest(BaseModel):
@@ -313,6 +316,10 @@ class AdminReport(BaseModel):
     categories: list[CategoryResult]
     selected_categories: list[str] = Field(default_factory=list)
     selected_subcategories: list[str] = Field(default_factory=list)
+    total_subcategories: int = 0
+    completed_subcategories_count: int = 0
+    discrepancy_subcategories_count: int = 0
+    no_discrepancy_subcategories_count: int = 0
     total_plus: float
     total_minus: float
     total_cost: float = 0.0
@@ -405,12 +412,22 @@ class AdminCycleTargetsResponse(BaseModel):
     location: str
     cycle_version: int
     cycle_started_at: str
+    target_date: str
+    min_target_date: str
+    max_target_date: str
+    previous_target_date: Optional[str] = None
+    previous_category_ids: list[str] = Field(default_factory=list)
+    previous_subcategory_ids: list[str] = Field(default_factory=list)
+    is_locked: bool = False
+    locked_message: Optional[str] = None
+    report_status: Optional[str] = None
     categories: list[AdminCycleTargetCategory]
 
 
 class SaveCycleTargetsRequest(BaseModel):
     location: str
     cycle_started_at: Optional[date] = None
+    target_date: Optional[date] = None
     category_ids: list[str] = Field(default_factory=list)
     subcategory_ids: list[str] = Field(default_factory=list)
 
@@ -419,3 +436,4 @@ class SaveCycleTargetsResponse(BaseModel):
     success: bool
     message: str
     cycle_started_at: Optional[str] = None
+    target_date: Optional[str] = None

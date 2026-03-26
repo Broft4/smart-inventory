@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.moysklad import DEFAULT_CATEGORY_NAME, DEFAULT_SUBCATEGORY_NAME, ms_client
-from app.models import AdminLocationAccess, CategoryAssignment, CheckResult, LocationPoint, Report, ReportEmployeeCompletion, ReportEmployeeStart, ReportTargetSnapshot, SelectionCycle, SelectionTarget, User, VerifyAttemptProgress
+from app.models import AdminLocationAccess, CategoryAssignment, CheckResult, LocationPoint, Report, ReportEmployeeCompletion, ReportEmployeeStart, ReportTargetSnapshot, SelectionCycle, SelectionTarget, SelectionTargetDay, User, VerifyAttemptProgress
 logger = logging.getLogger(__name__)
 
 
@@ -389,7 +389,7 @@ def _format_moscow_datetime(dt: datetime | None) -> str:
 
 def _report_status_label(status: str) -> str:
     if status == 'created':
-        return 'Не начата'
+        return 'Назначена'
     if status == 'completed':
         return 'Завершена'
     return 'В процессе'
@@ -439,6 +439,13 @@ def bootstrap_schema_and_admin(sync_conn) -> None:
         required = {'id', 'location', 'cycle_version', 'category_id', 'category_name', 'subcategory_id', 'subcategory_name', 'target_type', 'target_id', 'target_name', 'created_at'}
         if not required.issubset(cols):
             sync_conn.execute(text('DROP TABLE IF EXISTS selection_targets'))
+
+
+    if 'selection_target_days' in tables:
+        cols = {c['name'] for c in inspector.get_columns('selection_target_days')}
+        required = {'id', 'location', 'cycle_version', 'target_date', 'category_id', 'category_name', 'subcategory_id', 'subcategory_name', 'target_type', 'target_id', 'target_name', 'created_at'}
+        if not required.issubset(cols):
+            sync_conn.execute(text('DROP TABLE IF EXISTS selection_target_days'))
 
     if 'location_points' in tables:
         cols = {c['name'] for c in inspector.get_columns('location_points')}
@@ -1325,36 +1332,13 @@ async def _sync_report_status(report: Report, db: AsyncSession) -> None:
         select(func.count()).select_from(ReportEmployeeCompletion).where(ReportEmployeeCompletion.report_id == report.id)
     )
     required_finish_count = len(participant_user_ids)
-    newer_report_exists = await db.scalar(
-        select(func.count()).select_from(Report).where(
-            Report.location == report.location,
-            Report.report_date > report.report_date,
-        )
-    )
 
     if required_finish_count > 0 and (completion_count or 0) >= required_finish_count:
-        report.status = 'completed'
-    elif (newer_report_exists or 0) > 0:
         report.status = 'completed'
     elif not participant_user_ids:
         report.status = 'created'
     else:
         report.status = 'in_progress'
-
-
-async def _complete_previous_reports(location: str, current_report_date: date, db: AsyncSession) -> None:
-    previous_reports = (
-        await db.scalars(
-            select(Report).where(
-                Report.location == location,
-                Report.report_date < current_report_date,
-                Report.report_type == DAILY_REPORT_TYPE,
-                Report.status != 'completed',
-            )
-        )
-    ).all()
-    for report in previous_reports:
-        report.status = 'completed'
 
 
 async def get_or_create_daily_report(location: str, cycle_version: int, db: AsyncSession) -> Report:
@@ -1381,7 +1365,6 @@ async def get_or_create_daily_report(location: str, cycle_version: int, db: Asyn
             CategoryAssignment.cycle_version == cycle_version,
         )
     )
-    await _complete_previous_reports(normalized, today, db)
     await db.commit()
     await db.refresh(report)
     return report
@@ -1421,6 +1404,60 @@ async def _load_report_target_snapshots_for_report_ids(report_ids: list[int], db
 
 async def _load_selection_targets(location: str, cycle_version: int, db: AsyncSession) -> list[SelectionTarget]:
     return (await db.scalars(select(SelectionTarget).where(SelectionTarget.location == location, SelectionTarget.cycle_version == cycle_version))).all()
+
+
+async def _load_selection_targets_for_date(location: str, cycle_version: int, target_date: date, db: AsyncSession) -> list[SelectionTargetDay]:
+    return (
+        await db.scalars(
+            select(SelectionTargetDay)
+            .where(SelectionTargetDay.location == location)
+            .where(SelectionTargetDay.cycle_version == cycle_version)
+            .where(SelectionTargetDay.target_date == target_date)
+        )
+    ).all()
+
+
+async def _resolve_selection_targets_for_date(location: str, cycle_version: int, target_date: date, db: AsyncSession) -> list[SelectionTarget | SelectionTargetDay]:
+    dated_targets = await _load_selection_targets_for_date(location, cycle_version, target_date, db)
+    if dated_targets:
+        return dated_targets
+    return await _load_selection_targets(location, cycle_version, db)
+
+
+async def _resolve_previous_selection_targets_for_date(
+    location: str,
+    cycle_version: int,
+    target_date: date,
+    db: AsyncSession,
+) -> tuple[list[SelectionTarget | SelectionTargetDay], date | None]:
+    previous_target_date = await db.scalar(
+        select(SelectionTargetDay.target_date)
+        .where(SelectionTargetDay.location == location)
+        .where(SelectionTargetDay.cycle_version == cycle_version)
+        .where(SelectionTargetDay.target_date < target_date)
+        .order_by(SelectionTargetDay.target_date.desc())
+        .limit(1)
+    )
+    if previous_target_date is not None:
+        return await _load_selection_targets_for_date(location, cycle_version, previous_target_date, db), previous_target_date
+    legacy_targets = await _load_selection_targets(location, cycle_version, db)
+    return legacy_targets, None
+
+
+def _cycle_date_bounds(cycle_started_at: date) -> tuple[date, date]:
+    min_date = cycle_started_at
+    max_date = cycle_started_at + timedelta(days=14)
+    return min_date, max_date
+
+
+def _resolve_cycle_target_date(cycle_started_at: date, requested_date: date | None) -> date:
+    min_date, max_date = _cycle_date_bounds(cycle_started_at)
+    candidate = requested_date or get_moscow_today()
+    if candidate < min_date:
+        return min_date
+    if candidate > max_date:
+        return max_date
+    return candidate
 
 
 async def _load_completed_subcategory_ids_for_cycle(
@@ -1483,6 +1520,148 @@ def _selection_target_maps(targets: list[SelectionTarget]) -> tuple[set[str], di
         elif row.target_type == 'subcategory' and row.subcategory_id:
             subcategory_ids[row.category_id].add(row.subcategory_id)
     return category_ids, subcategory_ids
+
+
+def _iter_real_subcategory_ids(raw_category: dict[str, Any]) -> list[str]:
+    return [
+        sub['id']
+        for sub in raw_category.get('subcategories', [])
+        if not _is_categoryless_subcategory(raw_category, sub)
+    ]
+
+
+async def _load_cycle_scope_taken_elsewhere(
+    location: str,
+    cycle_version: int,
+    inventory: dict[str, Any],
+    db: AsyncSession,
+    exclude_target_date: date | None = None,
+) -> tuple[set[str], dict[str, set[str]]]:
+    reports = (
+        await db.scalars(
+            select(Report)
+            .where(Report.location == location)
+            .where(Report.cycle_version == cycle_version)
+            .where(Report.report_type == DAILY_REPORT_TYPE)
+            .order_by(Report.report_date.asc(), Report.id.asc())
+        )
+    ).all()
+    dated_rows = (
+        await db.scalars(
+            select(SelectionTargetDay)
+            .where(SelectionTargetDay.location == location)
+            .where(SelectionTargetDay.cycle_version == cycle_version)
+            .order_by(SelectionTargetDay.target_date.asc(), SelectionTargetDay.id.asc())
+        )
+    ).all()
+
+    dated_targets_by_date: dict[date, list[SelectionTargetDay]] = defaultdict(list)
+    for row in dated_rows:
+        dated_targets_by_date[row.target_date].append(row)
+
+    legacy_targets: list[SelectionTarget] | None = None
+    category_lookup = {category['id']: category for category in inventory.get('categories', [])}
+    occupied_category_ids: set[str] = set()
+    occupied_subcategory_ids: dict[str, set[str]] = defaultdict(set)
+    consumed_dates: set[date] = set()
+
+    def absorb(targets: list[SelectionTarget | SelectionTargetDay]) -> None:
+        for row in targets:
+            raw_category = category_lookup.get(row.category_id)
+            if not raw_category or raw_category.get('name') == DEFAULT_CATEGORY_NAME:
+                continue
+            if row.target_type == 'category':
+                occupied_category_ids.add(row.category_id)
+                occupied_subcategory_ids[row.category_id].update(_iter_real_subcategory_ids(raw_category))
+            elif row.target_type == 'subcategory' and row.subcategory_id:
+                occupied_subcategory_ids[row.category_id].add(row.subcategory_id)
+
+    for report in reports:
+        if exclude_target_date is not None and report.report_date == exclude_target_date:
+            continue
+        consumed_dates.add(report.report_date)
+        report_targets = dated_targets_by_date.get(report.report_date)
+        if report_targets is None:
+            if legacy_targets is None:
+                legacy_targets = await _load_selection_targets(location, cycle_version, db)
+            report_targets = legacy_targets
+        absorb(report_targets)
+
+    for target_date, targets in dated_targets_by_date.items():
+        if exclude_target_date is not None and target_date == exclude_target_date:
+            continue
+        if target_date in consumed_dates:
+            continue
+        absorb(targets)
+
+    return occupied_category_ids, {category_id: set(sub_ids) for category_id, sub_ids in occupied_subcategory_ids.items()}
+
+
+async def _get_daily_report_for_cycle_date(location: str, cycle_version: int, target_date: date, db: AsyncSession) -> Report | None:
+    report = await db.scalar(
+        select(Report)
+        .where(Report.location == location)
+        .where(Report.cycle_version == cycle_version)
+        .where(Report.report_type == DAILY_REPORT_TYPE)
+        .where(Report.report_date == target_date)
+        .order_by(Report.id.desc())
+        .limit(1)
+    )
+    if report is not None:
+        await _sync_report_status(report, db)
+    return report
+
+
+def _admin_report_subcategory_stats(
+    categories: list[CategoryResult],
+    source_inventory_by_name: dict[str, dict[str, Any]],
+    completed_before_report: dict[str, set[str]] | None = None,
+    report_type: str = DAILY_REPORT_TYPE,
+) -> tuple[int, int, int, int]:
+    completed_before_report = completed_before_report or {}
+    total_subcategories = 0
+    discrepancy_subcategories = 0
+    no_discrepancy_subcategories = 0
+
+    for category in categories:
+        source_category = source_inventory_by_name.get(category.name)
+        scoped_names: set[str] = set()
+        if category.selected_on_cycle and source_category is not None:
+            excluded_ids = completed_before_report.get(source_category['id'], set()) if report_type == DAILY_REPORT_TYPE else set()
+            for sub in source_category.get('subcategories', []):
+                if _is_categoryless_subcategory(source_category, sub):
+                    continue
+                if sub['id'] in excluded_ids:
+                    continue
+                scoped_names.add(sub['name'])
+
+        scoped_names.update(name for name in category.selected_subcategories if name)
+        scoped_names.update(name for name in category.remaining_subcategories if name)
+        scoped_names.update(item.name for item in category.completed_subcategories if item.name)
+        scoped_names.update(
+            item.subcategory_name
+            for item in category.problem_items
+            if item.subcategory_name and item.subcategory_name != '-'
+        )
+
+        discrepancy_names = {
+            item.subcategory_name
+            for item in category.problem_items
+            if item.subcategory_name and item.subcategory_name != '-'
+        }
+        no_discrepancy_names = {
+            item.name
+            for item in category.completed_subcategories
+            if item.name and item.name not in discrepancy_names
+        }
+
+        total_subcategories += len(scoped_names)
+        discrepancy_subcategories += len(discrepancy_names)
+        no_discrepancy_subcategories += len(no_discrepancy_names)
+
+    completed_subcategories = discrepancy_subcategories + no_discrepancy_subcategories
+    return total_subcategories, completed_subcategories, discrepancy_subcategories, no_discrepancy_subcategories
+
 
 
 def _report_selection_scope(
@@ -1699,6 +1878,7 @@ async def update_location_point(location_id: int, payload: UpdateLocationRequest
         await db.execute(update(Report).where(Report.location == old_name).values(location=point.name))
         await db.execute(update(SelectionCycle).where(SelectionCycle.location == old_name).values(location=point.name))
         await db.execute(update(SelectionTarget).where(SelectionTarget.location == old_name).values(location=point.name))
+        await db.execute(update(SelectionTargetDay).where(SelectionTargetDay.location == old_name).values(location=point.name))
         await db.execute(update(CategoryAssignment).where(CategoryAssignment.location == old_name).values(location=point.name))
 
     await db.commit()
@@ -1721,6 +1901,7 @@ async def delete_location_point(location_id: int, db: AsyncSession) -> DeleteRes
         ('ревизии', Report),
         ('циклы выбора', SelectionCycle),
         ('выбор категорий цикла', SelectionTarget),
+        ('выбор подкатегорий по дням', SelectionTargetDay),
         ('закрепления сотрудников', CategoryAssignment),
     ]
     for label, model in checks:
@@ -1746,51 +1927,122 @@ async def delete_location_point(location_id: int, db: AsyncSession) -> DeleteRes
     return DeleteResponse(success=True, message='Точка удалена.')
 
 
-async def get_cycle_targets(location: str, db: AsyncSession) -> AdminCycleTargetsResponse:
+async def get_cycle_targets(location: str, db: AsyncSession, target_date: date | None = None) -> AdminCycleTargetsResponse:
     normalized = _normalize_location(location)
     cycle = await _get_or_create_selection_cycle(normalized, db)
+    resolved_target_date = _resolve_cycle_target_date(cycle.started_at, target_date)
     inventory = await _get_inventory_for(normalized)
-    targets = await _load_selection_targets(normalized, cycle.cycle_version, db)
+    targets = await _resolve_selection_targets_for_date(normalized, cycle.cycle_version, resolved_target_date, db)
+    previous_targets, previous_target_date = await _resolve_previous_selection_targets_for_date(
+        normalized,
+        cycle.cycle_version,
+        resolved_target_date,
+        db,
+    )
     selected_category_ids, selected_subcategory_ids = _selection_target_maps(targets)
+    previous_category_ids, previous_subcategory_ids = _selection_target_maps(previous_targets)
     completed_subcategory_ids = await _load_completed_subcategory_ids_for_cycle(
         normalized,
         cycle.cycle_version,
         inventory,
         db,
+        before_report_date=resolved_target_date,
+    )
+    occupied_category_ids, occupied_subcategory_ids = await _load_cycle_scope_taken_elsewhere(
+        normalized,
+        cycle.cycle_version,
+        inventory,
+        db,
+        exclude_target_date=resolved_target_date,
+    )
+    target_report = await _get_daily_report_for_cycle_date(normalized, cycle.cycle_version, resolved_target_date, db)
+    is_locked = bool(target_report and target_report.status == 'completed')
+    locked_message = (
+        f'Ревизия за {resolved_target_date.strftime("%d.%m.%Y")} уже завершена. Для неё можно только посмотреть выбранные подкатегории.'
+        if is_locked
+        else None
     )
 
+    visible_previous_category_ids: set[str] = set()
+    visible_previous_subcategory_ids: set[str] = set()
     categories: list[AdminCycleTargetCategory] = []
     for category in inventory['categories']:
         if category['name'] == DEFAULT_CATEGORY_NAME:
             continue
+
+        category_id = category['id']
+        selected_whole_category = category_id in selected_category_ids
+        current_selected_sub_ids = selected_subcategory_ids.get(category_id, set())
+        completed_ids_for_category = completed_subcategory_ids.get(category_id, set())
+        occupied_ids_for_category = occupied_subcategory_ids.get(category_id, set())
+
+        has_other_taken_remaining = any(
+            sub['id'] not in completed_ids_for_category and sub['id'] in occupied_ids_for_category and sub['id'] not in current_selected_sub_ids
+            for sub in category['subcategories']
+            if not _is_categoryless_subcategory(category, sub)
+        )
+        whole_category_taken_elsewhere = category_id in occupied_category_ids and not selected_whole_category
+        category_disabled = is_locked or (not selected_whole_category and (whole_category_taken_elsewhere or has_other_taken_remaining))
+
         subcategories: list[AdminCycleTargetItem] = []
         completed_subcategories: list[AdminCycleTargetItem] = []
-        completed_ids_for_category = completed_subcategory_ids.get(category['id'], set())
         for sub in category['subcategories']:
             if _is_categoryless_subcategory(category, sub):
                 continue
-            item = AdminCycleTargetItem(
+
+            is_selected = sub['id'] in current_selected_sub_ids
+            if sub['id'] in completed_ids_for_category:
+                completed_subcategories.append(AdminCycleTargetItem(
+                    id=sub['id'],
+                    name=sub['name'],
+                    selected=is_selected,
+                    disabled=True,
+                ))
+                continue
+
+            occupied_elsewhere = sub['id'] in occupied_ids_for_category and not is_selected
+            if occupied_elsewhere:
+                continue
+
+            subcategories.append(AdminCycleTargetItem(
                 id=sub['id'],
                 name=sub['name'],
-                selected=sub['id'] in selected_subcategory_ids.get(category['id'], set()),
-                disabled=category['id'] in selected_category_ids,
-            )
-            if sub['id'] in completed_ids_for_category:
-                completed_subcategories.append(item)
-            else:
-                subcategories.append(item)
+                selected=is_selected,
+                disabled=is_locked,
+            ))
+
+        if category_id in previous_category_ids and (selected_whole_category or not category_disabled):
+            visible_previous_category_ids.add(category_id)
+        for sub in subcategories:
+            if sub.id in previous_subcategory_ids.get(category_id, set()):
+                visible_previous_subcategory_ids.add(sub.id)
+
+        if not selected_whole_category and not subcategories and not completed_subcategories:
+            continue
+
         categories.append(AdminCycleTargetCategory(
-            id=category['id'],
+            id=category_id,
             name=category['name'],
-            selected=category['id'] in selected_category_ids,
+            selected=selected_whole_category,
+            disabled=category_disabled,
             subcategories=subcategories,
             completed_subcategories=completed_subcategories,
         ))
 
+    min_target_date, max_target_date = _cycle_date_bounds(cycle.started_at)
     return AdminCycleTargetsResponse(
         location=normalized,
         cycle_version=cycle.cycle_version,
         cycle_started_at=cycle.started_at.strftime('%d.%m.%Y'),
+        target_date=resolved_target_date.isoformat(),
+        min_target_date=min_target_date.isoformat(),
+        max_target_date=max_target_date.isoformat(),
+        previous_target_date=previous_target_date.isoformat() if previous_target_date else None,
+        previous_category_ids=sorted(visible_previous_category_ids),
+        previous_subcategory_ids=sorted(visible_previous_subcategory_ids),
+        is_locked=is_locked,
+        locked_message=locked_message,
+        report_status=_report_status_label(target_report.status) if target_report is not None else None,
         categories=categories,
     )
 
@@ -1799,26 +2051,37 @@ async def save_cycle_targets(payload: SaveCycleTargetsRequest, db: AsyncSession)
     normalized = _normalize_location(payload.location)
     cycle = await _get_or_create_selection_cycle(normalized, db)
 
-    requested_category_ids = sorted(set(payload.category_ids))
-    requested_subcategory_ids = sorted(set(payload.subcategory_ids))
-    existing_targets = await _load_selection_targets(normalized, cycle.cycle_version, db)
-
     if payload.cycle_started_at:
         cycle.started_at = payload.cycle_started_at
         cycle.updated_at = datetime.utcnow()
+
+    target_date = _resolve_cycle_target_date(cycle.started_at, payload.target_date)
+    min_target_date, max_target_date = _cycle_date_bounds(cycle.started_at)
+    if target_date < min_target_date or target_date > max_target_date:
+        raise HTTPException(status_code=400, detail='Дата выбора должна быть в пределах текущего 15-дневного цикла.')
+
+    target_report = await _get_daily_report_for_cycle_date(normalized, cycle.cycle_version, target_date, db)
+    if target_report is not None and target_report.status == 'completed':
+        raise HTTPException(status_code=400, detail=f'Ревизия за {target_date.strftime("%d.%m.%Y")} уже завершена, менять её подкатегории нельзя.')
+
+    requested_category_ids = sorted(set(payload.category_ids))
+    requested_subcategory_ids = sorted(set(payload.subcategory_ids))
+    existing_targets = await _resolve_selection_targets_for_date(normalized, cycle.cycle_version, target_date, db)
 
     if not requested_category_ids and not requested_subcategory_ids:
         await db.commit()
         if existing_targets:
             return SaveCycleTargetsResponse(
                 success=True,
-                message='Пустой выбор не сохранён. Оставлен предыдущий выбор цикла.',
+                message='Пустой выбор не сохранён. Оставлен предыдущий выбор для выбранной даты.',
                 cycle_started_at=cycle.started_at.strftime('%d.%m.%Y'),
+                target_date=target_date.isoformat(),
             )
         return SaveCycleTargetsResponse(
             success=True,
             message='Нечего сохранять: категории и подкатегории не выбраны.',
             cycle_started_at=cycle.started_at.strftime('%d.%m.%Y'),
+            target_date=target_date.isoformat(),
         )
 
     inventory = await _get_inventory_for(normalized)
@@ -1828,6 +2091,14 @@ async def save_cycle_targets(payload: SaveCycleTargetsRequest, db: AsyncSession)
         cycle.cycle_version,
         inventory,
         db,
+        before_report_date=target_date,
+    )
+    occupied_category_ids, occupied_subcategory_ids = await _load_cycle_scope_taken_elsewhere(
+        normalized,
+        cycle.cycle_version,
+        inventory,
+        db,
+        exclude_target_date=target_date,
     )
 
     category_by_id = {row['id']: row for row in inventory['categories']}
@@ -1836,15 +2107,33 @@ async def save_cycle_targets(payload: SaveCycleTargetsRequest, db: AsyncSession)
         for sub in category['subcategories']:
             sub_by_id[sub['id']] = (category, sub)
 
-    await db.execute(delete(SelectionTarget).where(SelectionTarget.location == normalized, SelectionTarget.cycle_version == cycle.cycle_version))
+    await db.execute(
+        delete(SelectionTargetDay)
+        .where(SelectionTargetDay.location == normalized)
+        .where(SelectionTargetDay.cycle_version == cycle.cycle_version)
+        .where(SelectionTargetDay.target_date == target_date)
+    )
+
+    skipped_completed_subcategories = 0
+    skipped_busy_subcategories = 0
+    skipped_busy_categories = 0
 
     for category_id in requested_category_ids:
         category = category_by_id.get(category_id)
         if not category or category['name'] == DEFAULT_CATEGORY_NAME:
             continue
-        db.add(SelectionTarget(
+        remaining_sub_ids = [
+            sub['id']
+            for sub in category['subcategories']
+            if not _is_categoryless_subcategory(category, sub) and sub['id'] not in completed_subcategory_ids.get(category_id, set())
+        ]
+        if category_id in occupied_category_ids or any(sub_id in occupied_subcategory_ids.get(category_id, set()) for sub_id in remaining_sub_ids):
+            skipped_busy_categories += 1
+            continue
+        db.add(SelectionTargetDay(
             location=normalized,
             cycle_version=cycle.cycle_version,
+            target_date=target_date,
             category_id=category_id,
             category_name=category['name'],
             subcategory_id=None,
@@ -1855,7 +2144,6 @@ async def save_cycle_targets(payload: SaveCycleTargetsRequest, db: AsyncSession)
         ))
 
     selected_categories = set(requested_category_ids)
-    skipped_completed_subcategories = 0
     for subcategory_id in requested_subcategory_ids:
         pair = sub_by_id.get(subcategory_id)
         if not pair:
@@ -1866,9 +2154,13 @@ async def save_cycle_targets(payload: SaveCycleTargetsRequest, db: AsyncSession)
         if sub['id'] in completed_subcategory_ids.get(category['id'], set()):
             skipped_completed_subcategories += 1
             continue
-        db.add(SelectionTarget(
+        if category['id'] in occupied_category_ids or sub['id'] in occupied_subcategory_ids.get(category['id'], set()):
+            skipped_busy_subcategories += 1
+            continue
+        db.add(SelectionTargetDay(
             location=normalized,
             cycle_version=cycle.cycle_version,
+            target_date=target_date,
             category_id=category['id'],
             category_name=category['name'],
             subcategory_id=sub['id'],
@@ -1880,10 +2172,19 @@ async def save_cycle_targets(payload: SaveCycleTargetsRequest, db: AsyncSession)
 
     await db.commit()
     _invalidate_runtime_inventory_cache(normalized)
-    message = 'Изменения сохранены.'
+    message_parts = ['Изменения сохранены.']
     if skipped_completed_subcategories:
-        message = f'{message} Уже пройденных подкатегорий, пропущенных при сохранении: {skipped_completed_subcategories}.'
-    return SaveCycleTargetsResponse(success=True, message=message, cycle_started_at=cycle.started_at.strftime('%d.%m.%Y'))
+        message_parts.append(f'Уже пройденных подкатегорий до выбранной даты пропущено: {skipped_completed_subcategories}.')
+    if skipped_busy_categories:
+        message_parts.append(f'Категорий, уже занятых в других ревизиях цикла, пропущено: {skipped_busy_categories}.')
+    if skipped_busy_subcategories:
+        message_parts.append(f'Подкатегорий, уже занятых в других ревизиях цикла, пропущено: {skipped_busy_subcategories}.')
+    return SaveCycleTargetsResponse(
+        success=True,
+        message=' '.join(message_parts),
+        cycle_started_at=cycle.started_at.strftime('%d.%m.%Y'),
+        target_date=target_date.isoformat(),
+    )
 
 
 def _category_assignments_map(assignments: list[CategoryAssignment]) -> tuple[
@@ -2068,16 +2369,70 @@ async def _refresh_report_status(report: Report, db: AsyncSession) -> None:
     await db.commit()
 
 
-async def get_inventory_data(location: str, db: AsyncSession, user: User) -> InventoryStructureResponse:
-    normalized = _normalize_location(location)
-    cycle = await _get_or_create_selection_cycle(normalized, db)
-    report = await get_or_create_daily_report(normalized, cycle.cycle_version, db)
-    assignments = await _load_assignments(normalized, cycle.cycle_version, db)
+def _subcategory_belongs_to_current_user(subcategory: SubcategoryModel) -> bool:
+    if subcategory.assigned_to_current_user or subcategory.taken_as_part_of_category or subcategory.has_my_items:
+        return True
+    return any(item.assigned_to_current_user for item in subcategory.items)
+
+
+def _subcategory_has_pending_mine_work(subcategory: SubcategoryModel) -> bool:
+    if not _subcategory_belongs_to_current_user(subcategory):
+        return False
+
+    has_pending_whole_subcategory = (subcategory.assigned_to_current_user or subcategory.taken_as_part_of_category) and not subcategory.is_completed
+    has_pending_diagnostic_items = any(item.assigned_to_current_user and not item.is_final for item in subcategory.items)
+    return has_pending_whole_subcategory or has_pending_diagnostic_items
+
+
+def _category_has_pending_mine_work(category: CategoryModel) -> bool:
+    if category.assigned_to_current_user and not category.is_completed:
+        return True
+    return any(_subcategory_has_pending_mine_work(subcategory) for subcategory in category.subcategories)
+
+
+def _category_has_free_work(category: CategoryModel) -> bool:
+    if category.can_take:
+        return True
+    if any(subcategory.can_take for subcategory in category.subcategories):
+        return True
+    return any(item.can_take for subcategory in category.subcategories for item in subcategory.items)
+
+
+def _build_finish_block_message(my_pending_count: int, free_pending_count: int) -> str | None:
+    parts: list[str] = []
+    if my_pending_count > 0:
+        parts.append('в разделе «Мои» ещё есть незавершённые выборы')
+    if free_pending_count > 0:
+        parts.append('в разделе «Свободные» ещё остались незакреплённые категории, подкатегории или товары')
+    if not parts:
+        return None
+    return 'Нельзя завершить ревизию: ' + ' и '.join(parts) + '.'
+
+
+def _evaluate_finish_readiness(categories: list[CategoryModel]) -> tuple[bool, int, int, str | None]:
+    my_pending_count = sum(1 for category in categories if _category_has_pending_mine_work(category))
+    free_pending_count = sum(1 for category in categories if _category_has_free_work(category))
+    can_finish = my_pending_count == 0 and free_pending_count == 0
+    return can_finish, my_pending_count, free_pending_count, _build_finish_block_message(my_pending_count, free_pending_count)
+
+
+async def _build_inventory_structure_for_report(
+    report: Report,
+    *,
+    db: AsyncSession,
+    user: User,
+    cycle_started_at: date | None = None,
+    cycle_days_left: int | None = None,
+    start_block_message: str | None = None,
+) -> InventoryStructureResponse:
+    normalized = _normalize_location(report.location)
+    cycle_version = int(report.cycle_version or 1)
+    assignments = await _load_assignments(normalized, cycle_version, db)
     results = [
         row for row in await _load_results(report.id, db)
         if row.category_name != DEFAULT_CATEGORY_NAME and (row.subcategory_name is None or row.subcategory_name != DEFAULT_SUBCATEGORY_NAME)
     ]
-    targets = await _load_selection_targets(normalized, cycle.cycle_version, db)
+    targets = await _resolve_selection_targets_for_date(normalized, cycle_version, report.report_date, db)
     report_snapshots = await _bootstrap_report_target_snapshots(report, assignments, results, db)
     employee_started = await _is_employee_started_report(report.id, user.id, db)
     employee_finished = await _is_employee_finished_report(report.id, user.id, db)
@@ -2105,7 +2460,7 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
     inventory = await _get_inventory_for(normalized)
     completed_subcategory_ids = await _load_completed_subcategory_ids_for_cycle(
         normalized,
-        cycle.cycle_version,
+        cycle_version,
         inventory,
         db,
         before_report_date=report.report_date,
@@ -2126,19 +2481,30 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
         sub_assignments = subcategory_assignments.get(raw_category['id'], {})
         item_assignments_by_sub = item_assignments.get(raw_category['id'], {})
 
+        snapshot_category_user_set = snapshot_category_user_ids.get(raw_category['id'], set())
         snapshot_category_taken_by_user = user.id in snapshot_category_user_ids.get(raw_category['id'], set())
+        snapshot_category_taken_by_other = any(owner_id != user.id for owner_id in snapshot_category_user_set)
+        snapshot_has_subcategory_assignments = any(snapshot_subcategory_user_ids.get(raw_category['id'], {}).values())
+        snapshot_has_item_assignments = any(snapshot_item_user_ids.get(raw_category['id'], {}).values())
         assigned_to_current_user = bool((category_assignment and category_assignment.user_id == user.id) or snapshot_category_taken_by_user)
-        assigned_to_other = bool(category_assignment and category_assignment.user_id != user.id)
+        assigned_to_other = bool((category_assignment and category_assignment.user_id != user.id) or snapshot_category_taken_by_other)
         has_my_subcategories = any(a.user_id == user.id for a in sub_assignments.values()) or any(
             user.id in user_ids for user_ids in snapshot_subcategory_user_ids.get(raw_category['id'], {}).values()
         )
-        has_other_subcategories = any(a.user_id != user.id for a in sub_assignments.values())
+        has_other_subcategories = any(a.user_id != user.id for a in sub_assignments.values()) or any(
+            any(owner_id != user.id for owner_id in user_ids)
+            for user_ids in snapshot_subcategory_user_ids.get(raw_category['id'], {}).values()
+        )
         has_my_items = any(a.user_id == user.id for sub_items in item_assignments_by_sub.values() for a in sub_items.values()) or any(
             user.id in user_ids
             for sub_items in snapshot_item_user_ids.get(raw_category['id'], {}).values()
             for user_ids in sub_items.values()
         )
-        has_other_items = any(a.user_id != user.id for sub_items in item_assignments_by_sub.values() for a in sub_items.values())
+        has_other_items = any(a.user_id != user.id for sub_items in item_assignments_by_sub.values() for a in sub_items.values()) or any(
+            any(owner_id != user.id for owner_id in user_ids)
+            for sub_items in snapshot_item_user_ids.get(raw_category['id'], {}).values()
+            for user_ids in sub_items.values()
+        )
 
         has_free_diag_items = False
         for raw_sub in raw_category['subcategories']:
@@ -2146,7 +2512,11 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
             if not diagnostic_sub:
                 continue
             assigned_item_ids = set(item_assignments_by_sub.get(raw_sub['id'], {}).keys())
-            if any(item['id'] not in assigned_item_ids for item in raw_sub['items']):
+            if any(
+                item['id'] not in assigned_item_ids
+                and not snapshot_item_user_ids.get(raw_category['id'], {}).get(raw_sub['id'], {}).get(item['id'])
+                for item in raw_sub['items']
+            ):
                 has_free_diag_items = True
                 break
 
@@ -2162,8 +2532,11 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
             and (not category_is_diagnostic)
             and (not has_diagnostic_subcategories)
             and category_assignment is None
+            and not snapshot_category_user_set
             and not sub_assignments
+            and not snapshot_has_subcategory_assignments
             and not item_assignments_by_sub
+            and not snapshot_has_item_assignments
         )
 
         owner_names = {a.user_full_name_snapshot for a in sub_assignments.values() if a.user_full_name_snapshot}
@@ -2180,6 +2553,8 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
             else:
                 assigned_to = 'Несколько сотрудников'
                 mixed_assignment = True
+        elif snapshot_category_taken_by_other:
+            assigned_to = snapshot_category_owner_names.get(raw_category['id']) or 'Другой сотрудник'
 
         category_results = rows_by_category_target.get(raw_category['id'], {})
         subcategories: list[SubcategoryModel] = []
@@ -2197,12 +2572,17 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
             diagnostic_sub = category_is_diagnostic or raw_sub['name'] == DEFAULT_SUBCATEGORY_NAME
             is_completed, status = sub_states[raw_sub['id']]
             sub_item_assignments = item_assignments_by_sub.get(raw_sub['id'], {})
-            snapshot_sub_taken_by_user = user.id in snapshot_subcategory_user_ids.get(raw_category['id'], {}).get(raw_sub['id'], set())
+            snapshot_sub_user_set = snapshot_subcategory_user_ids.get(raw_category['id'], {}).get(raw_sub['id'], set())
+            snapshot_sub_taken_by_user = user.id in snapshot_sub_user_set
+            snapshot_sub_taken_by_other = any(owner_id != user.id for owner_id in snapshot_sub_user_set)
             has_my_items_in_sub = any(a.user_id == user.id for a in sub_item_assignments.values()) or any(
                 user.id in user_ids
                 for user_ids in snapshot_item_user_ids.get(raw_category['id'], {}).get(raw_sub['id'], {}).values()
             )
-            has_other_items_in_sub = any(a.user_id != user.id for a in sub_item_assignments.values())
+            has_other_items_in_sub = any(a.user_id != user.id for a in sub_item_assignments.values()) or any(
+                any(owner_id != user.id for owner_id in user_ids)
+                for user_ids in snapshot_item_user_ids.get(raw_category['id'], {}).get(raw_sub['id'], {}).values()
+            )
 
             item_rows = []
             for item in raw_sub['items']:
@@ -2220,22 +2600,39 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
                         item_status = StatusEnum.ORANGE
 
                 item_assignment = sub_item_assignments.get(item['id'])
+                snapshot_item_user_set = snapshot_item_user_ids.get(raw_category['id'], {}).get(raw_sub['id'], {}).get(item['id'], set())
                 item_rows.append(ItemModel(
                     id=item['id'],
                     name=item['name'],
                     status=item_status,
                     is_final=is_final,
                     assigned_to=(item_assignment.user_full_name_snapshot if item_assignment else snapshot_item_owner_names.get(raw_category['id'], {}).get(raw_sub['id'], {}).get(item['id'])),
-                    assigned_to_current_user=bool((item_assignment and item_assignment.user_id == user.id) or user.id in snapshot_item_user_ids.get(raw_category['id'], {}).get(raw_sub['id'], {}).get(item['id'], set())),
-                    can_take=diagnostic_sub and category_assignment is None and sub_assignments.get(raw_sub['id']) is None and item_assignment is None,
-                    is_blocked_by_other=bool(item_assignment and item_assignment.user_id != user.id),
+                    assigned_to_current_user=bool((item_assignment and item_assignment.user_id == user.id) or user.id in snapshot_item_user_set),
+                    can_take=(
+                        diagnostic_sub
+                        and category_assignment is None
+                        and not snapshot_category_user_set
+                        and sub_assignments.get(raw_sub['id']) is None
+                        and not snapshot_sub_user_set
+                        and item_assignment is None
+                        and not snapshot_item_user_set
+                    ),
+                    is_blocked_by_other=bool((item_assignment and item_assignment.user_id != user.id) or any(owner_id != user.id for owner_id in snapshot_item_user_set)),
                     is_diagnostic=diagnostic_sub,
                 ))
 
             sub_assignment = sub_assignments.get(raw_sub['id'])
             sub_assigned_to_current_user = bool((sub_assignment and sub_assignment.user_id == user.id) or snapshot_sub_taken_by_user)
-            sub_assigned_to_other = bool(sub_assignment and sub_assignment.user_id != user.id)
-            can_take_sub = (not diagnostic_sub) and category_assignment is None and sub_assignment is None and not sub_item_assignments
+            sub_assigned_to_other = bool((sub_assignment and sub_assignment.user_id != user.id) or snapshot_sub_taken_by_other)
+            can_take_sub = (
+                (not diagnostic_sub)
+                and category_assignment is None
+                and not snapshot_category_user_set
+                and sub_assignment is None
+                and not snapshot_sub_user_set
+                and not sub_item_assignments
+                and not snapshot_item_user_ids.get(raw_category['id'], {}).get(raw_sub['id'], {})
+            )
 
             is_locked = True
             is_expanded = False
@@ -2261,6 +2658,8 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
                 sub_assigned_to = snapshot_category_owner_names.get(raw_category['id']) or user.full_name
             elif sub_owner_names:
                 sub_assigned_to = next(iter(sub_owner_names)) if len(sub_owner_names) == 1 else 'Несколько сотрудников'
+            elif snapshot_sub_taken_by_other:
+                sub_assigned_to = snapshot_subcategory_owner_names.get(raw_category['id'], {}).get(raw_sub['id']) or 'Другой сотрудник'
 
             subcategories.append(
                 SubcategoryModel(
@@ -2306,20 +2705,113 @@ async def get_inventory_data(location: str, db: AsyncSession, user: User) -> Inv
             )
         )
 
-    days_left = max(0, SELECTION_CYCLE_DAYS - (date.today() - cycle.started_at).days)
+    can_finish_report, _, _, finish_block_message = _evaluate_finish_readiness(categories)
+
+    resolved_cycle_started_at = cycle_started_at or report.report_date
+    resolved_cycle_days_left = cycle_days_left if cycle_days_left is not None else max(0, SELECTION_CYCLE_DAYS - (date.today() - report.report_date).days)
+
     return InventoryStructureResponse(
         report_id=report.id,
         location=normalized,
         report_date=report.report_date.strftime('%d.%m.%Y'),
         categories=categories,
-        cycle_version=cycle.cycle_version,
-        cycle_started_at=cycle.started_at.strftime('%d.%m.%Y'),
-        cycle_days_left=days_left,
+        cycle_version=cycle_version,
+        cycle_started_at=resolved_cycle_started_at.strftime('%d.%m.%Y'),
+        cycle_days_left=resolved_cycle_days_left,
         report_status=report.status,
         employee_started=employee_started,
         employee_finished=employee_finished,
         report_started=report_started,
         report_completed=report_completed,
+        can_finish_report=can_finish_report,
+        finish_block_message=finish_block_message,
+        start_block_message=start_block_message,
+    )
+
+
+async def _has_user_activity_in_report(report_id: int, user_id: int, db: AsyncSession) -> bool:
+    if await _is_employee_started_report(report_id, user_id, db):
+        return True
+    result = await db.scalar(
+        select(CheckResult.id)
+        .where(CheckResult.report_id == report_id)
+        .where(CheckResult.checked_by_user_id == user_id)
+        .limit(1)
+    )
+    return result is not None
+
+
+async def _complete_employee_report_access_if_ready(report: Report, user: User, db: AsyncSession) -> bool:
+    if await _is_employee_finished_report(report.id, user.id, db):
+        return True
+
+    state = await _build_inventory_structure_for_report(report, db=db, user=user)
+    if not state.can_finish_report:
+        return False
+
+    db.add(ReportEmployeeCompletion(
+        report_id=report.id,
+        user_id=user.id,
+        user_full_name_snapshot=user.full_name,
+        finished_at=datetime.utcnow(),
+    ))
+    await db.flush()
+    await _sync_report_status(report, db)
+    return True
+
+
+async def _get_previous_unfinished_report_block_message(
+    current_report: Report,
+    user: User,
+    db: AsyncSession,
+    *,
+    auto_complete_ready: bool,
+) -> str | None:
+    previous_reports = (
+        await db.scalars(
+            select(Report)
+            .where(Report.location == current_report.location)
+            .where(Report.report_type == DAILY_REPORT_TYPE)
+            .where(Report.report_date < current_report.report_date)
+            .order_by(Report.report_date.desc(), Report.id.desc())
+        )
+    ).all()
+
+    for previous_report in previous_reports:
+        if not await _has_user_activity_in_report(previous_report.id, user.id, db):
+            continue
+        if await _is_employee_finished_report(previous_report.id, user.id, db):
+            continue
+
+        if auto_complete_ready and await _complete_employee_report_access_if_ready(previous_report, user, db):
+            continue
+
+        previous_state = await _build_inventory_structure_for_report(previous_report, db=db, user=user)
+        if previous_state.can_finish_report:
+            continue
+
+        blocking_reason = previous_state.finish_block_message or 'прошлая ревизия ещё не доведена до конца'
+        return (
+            f'Предыдущая ревизия за {previous_report.report_date.strftime("%d.%m.%Y")} не завершена. '
+            f'{blocking_reason} Сначала завершите прошлую ревизию.'
+        )
+
+    return None
+
+
+async def get_inventory_data(location: str, db: AsyncSession, user: User) -> InventoryStructureResponse:
+    normalized = _normalize_location(location)
+    cycle = await _get_or_create_selection_cycle(normalized, db)
+    report = await get_or_create_daily_report(normalized, cycle.cycle_version, db)
+    days_left = max(0, SELECTION_CYCLE_DAYS - (date.today() - cycle.started_at).days)
+    start_block_message = await _get_previous_unfinished_report_block_message(report, user, db, auto_complete_ready=False)
+    return await _build_inventory_structure_for_report(
+        report,
+        db=db,
+        user=user,
+        cycle_started_at=cycle.started_at,
+        cycle_days_left=days_left,
+        start_block_message=start_block_message,
     )
 
 
@@ -2340,7 +2832,7 @@ async def assign_selection_to_user(report_id: int, category_id: str, target_type
 
     cycle = await _get_or_create_selection_cycle(report.location, db)
     assignments = await _load_assignments(report.location, cycle.cycle_version, db)
-    targets = await _load_selection_targets(report.location, cycle.cycle_version, db)
+    targets = await _resolve_selection_targets_for_date(report.location, cycle.cycle_version, report.report_date, db)
     inventory = await _get_inventory_for(report.location)
     completed_subcategory_ids = await _load_completed_subcategory_ids_for_cycle(
         report.location,
@@ -2793,6 +3285,11 @@ async def start_report(report_id: int, db: AsyncSession, user: User) -> StartRep
     if report.status == 'completed':
         return StartReportResponse(success=True, message='Ревизия по этой точке уже завершена на сегодня.')
 
+    previous_block_message = await _get_previous_unfinished_report_block_message(report, user, db, auto_complete_ready=True)
+    if previous_block_message:
+        await db.commit()
+        raise HTTPException(status_code=409, detail=previous_block_message)
+
     existing = await db.scalar(
         select(ReportEmployeeStart)
         .where(ReportEmployeeStart.report_id == report.id)
@@ -2800,6 +3297,7 @@ async def start_report(report_id: int, db: AsyncSession, user: User) -> StartRep
         .limit(1)
     )
     if existing:
+        await db.commit()
         return StartReportResponse(success=True, message='Ревизия уже начата. Можно продолжать работу.')
 
     db.add(ReportEmployeeStart(
@@ -2836,6 +3334,10 @@ async def finish_report(report_id: int, db: AsyncSession, user: User) -> tuple[b
     )
     if existing:
         return True, 'Вы уже завершили свою ревизию на сегодня.'
+
+    state = await _build_inventory_structure_for_report(report, db=db, user=user)
+    if not state.can_finish_report:
+        raise HTTPException(status_code=409, detail=state.finish_block_message or 'Сначала завершите все свои выборы и разберите свободные подкатегории.')
 
     db.add(ReportEmployeeCompletion(
         report_id=report.id,
@@ -3325,6 +3827,7 @@ async def get_admin_period_report(location: str, date_from: date, date_to: date,
 
     categories: list[CategoryResult] = []
     full_inventory_by_category_id = {category['id']: category for category in inventory['categories']}
+    full_inventory_by_category_name = {category['name']: category for category in inventory['categories']}
     inventory = _filter_inventory_by_targets(
         inventory,
         selected_category_ids,
@@ -3462,6 +3965,11 @@ async def get_admin_period_report(location: str, date_from: date, date_to: date,
     total_cost = sum(float(item.cost_total or 0.0) for items in grouped_problem_items.values() for item in items)
     total_retail = sum(float(item.retail_total or 0.0) for items in grouped_problem_items.values() for item in items)
     total_lost_profit = sum(float(item.lost_profit or 0.0) for items in grouped_problem_items.values() for item in items)
+    total_subcategories, completed_subcategories_count, discrepancy_subcategories_count, no_discrepancy_subcategories_count = _admin_report_subcategory_stats(
+        categories,
+        full_inventory_by_category_name,
+        report_type=PERIOD_REPORT_TYPE,
+    )
 
     return AdminReport(
         report_id=None,
@@ -3473,6 +3981,10 @@ async def get_admin_period_report(location: str, date_from: date, date_to: date,
         categories=categories,
         selected_categories=target_category_names,
         selected_subcategories=target_subcategory_labels,
+        total_subcategories=total_subcategories,
+        completed_subcategories_count=completed_subcategories_count,
+        discrepancy_subcategories_count=discrepancy_subcategories_count,
+        no_discrepancy_subcategories_count=no_discrepancy_subcategories_count,
         total_plus=float(total_plus),
         total_minus=float(total_minus),
         total_cost=float(round(total_cost, 2)),
@@ -3499,7 +4011,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
     await _sync_report_status(report, db)
     await db.commit()
 
-    targets = await _load_selection_targets(normalized, report.cycle_version, db)
+    targets = await _resolve_selection_targets_for_date(normalized, report.cycle_version, report.report_date, db)
     inventory = await _get_inventory_for(normalized)
 
     report_type = report.report_type or DAILY_REPORT_TYPE
@@ -3683,6 +4195,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
 
     categories: list[CategoryResult] = []
     full_inventory_by_category_id = {category['id']: category for category in inventory['categories']}
+    full_inventory_by_category_name = {category['name']: category for category in inventory['categories']}
     inventory = _filter_inventory_by_targets(
         inventory,
         selected_category_ids,
@@ -3943,6 +4456,12 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
     total_cost = sum(float(item.cost_total or 0.0) for items in grouped_problem_items.values() for item in items)
     total_retail = sum(float(item.retail_total or 0.0) for items in grouped_problem_items.values() for item in items)
     total_lost_profit = sum(float(item.lost_profit or 0.0) for items in grouped_problem_items.values() for item in items)
+    total_subcategories, completed_subcategories_count, discrepancy_subcategories_count, no_discrepancy_subcategories_count = _admin_report_subcategory_stats(
+        categories,
+        full_inventory_by_category_name,
+        completed_before_report=completed_before_report,
+        report_type=report_type,
+    )
 
     report_number = await _get_report_number(report, db)
 
@@ -3956,6 +4475,10 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
         categories=categories,
         selected_categories=target_category_names,
         selected_subcategories=target_subcategory_labels,
+        total_subcategories=total_subcategories,
+        completed_subcategories_count=completed_subcategories_count,
+        discrepancy_subcategories_count=discrepancy_subcategories_count,
+        no_discrepancy_subcategories_count=no_discrepancy_subcategories_count,
         total_plus=float(total_plus),
         total_minus=float(total_minus),
         total_cost=float(round(total_cost, 2)),
