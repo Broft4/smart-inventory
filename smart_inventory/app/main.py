@@ -176,7 +176,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260327-shifts-month-select-v3'
+templates.env.globals['asset_version'] = '20260325-payroll-collapse-v2'
 
 
 @app.middleware('http')
@@ -289,17 +289,6 @@ async def payroll_page(request: Request, user: User | None = Depends(get_current
     return templates.TemplateResponse(request, 'payroll.html', {'user': user, 'default_location': location})
 
 
-@app.get('/shifts')
-async def shifts_page(request: Request, user: User | None = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    if not user:
-        return RedirectResponse(url='/login', status_code=302)
-    if user.role not in {'admin', 'superadmin'}:
-        return RedirectResponse(url='/', status_code=302)
-    accessible_locations = await get_payroll_accessible_locations(user, db)
-    location = accessible_locations[0] if accessible_locations else (user.location if user.location else None)
-    return templates.TemplateResponse(request, 'shifts.html', {'user': user, 'default_location': location})
-
-
 @app.post('/api/login', response_model=LoginResponse)
 async def api_login(payload: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
     user = await authenticate_user(payload.username.strip(), payload.password, db)
@@ -358,9 +347,9 @@ async def api_delete_location(location_id: int, admin: User = Depends(require_su
 
 
 @app.get('/api/cycle-targets', response_model=AdminCycleTargetsResponse)
-async def api_get_cycle_targets(location: str, target_date: date | None = None, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+async def api_get_cycle_targets(location: str, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
     await ensure_user_can_access_location(admin, location, db)
-    return await get_cycle_targets(location, db, target_date=target_date)
+    return await get_cycle_targets(location, db)
 
 
 @app.post('/api/cycle-targets', response_model=SaveCycleTargetsResponse)

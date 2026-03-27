@@ -21,33 +21,21 @@
     </header>
 
     <section class="category-card payroll-filters-card">
-        <div class="payroll-filter-grid payroll-filter-grid--with-actions shift-page-filter-grid">
+        <div class="payroll-filter-grid payroll-filter-grid--with-actions payroll-filter-grid--shifts-top">
             <label>
                 Точка
                 <select id="shift-location-select"></select>
             </label>
             <label>
                 Год
-                <input type="number" id="shift-year-input" min="2020" step="1" inputmode="numeric">
+                <input type="number" id="shift-year-input" inputmode="numeric" min="2020" step="1">
             </label>
             <label>
                 Месяц
                 <select id="shift-month-select"></select>
             </label>
-            <label>
-                Дата смены
-                <input type="date" id="shift-date-input">
-            </label>
-            <label>
-                Сотрудник
-                <select id="shift-employee-select"></select>
-            </label>
-            <div class="payroll-filter-actions-inline shift-page-filter-actions">
+            <div class="payroll-filter-actions-inline">
                 <button id="shift-load-btn" type="button" class="btn secondary btn-inline">Показать месяц</button>
-                <button id="add-shift-btn" type="button" class="btn primary btn-inline btn-with-loader">
-                    <span class="btn-loader hidden" aria-hidden="true"></span>
-                    <span class="btn-label">Назначить смену</span>
-                </button>
             </div>
         </div>
         <div id="shift-status" class="inventory-status hidden"></div>
@@ -69,6 +57,26 @@
                     </div>
                     <div id="shift-calendar-grid" class="shift-calendar-grid"></div>
                 </div>
+                <div class="shift-days-filter-bar">
+                    <div class="shift-days-filter-buttons" role="group" aria-label="Фильтр смен по датам">
+                        <button type="button" id="shift-view-all-btn" class="btn secondary btn-inline active">Все даты за месяц</button>
+                        <button type="button" id="shift-view-date-btn" class="btn secondary btn-inline">Конкретная дата</button>
+                    </div>
+                    <div class="shift-date-picker-wrap hidden" id="shift-date-picker-wrap">
+                        <button type="button" id="shift-date-picker-btn" class="btn secondary btn-inline">Выбрать дату</button>
+                        <div class="shift-date-picker-popover hidden" id="shift-date-picker-popover">
+                            <div class="shift-date-picker-head">
+                                <strong id="shift-date-picker-title"></strong>
+                                <span class="muted-text">Доступны только даты со сменами, которые уже прошли или закрыты.</span>
+                            </div>
+                            <div class="shift-date-picker-weekdays" aria-hidden="true">
+                                <span>Пн</span><span>Вт</span><span>Ср</span><span>Чт</span><span>Пт</span><span>Сб</span><span>Вс</span>
+                            </div>
+                            <div id="shift-date-picker-grid" class="shift-date-picker-grid"></div>
+                        </div>
+                    </div>
+                    <div class="muted-text" id="shift-filter-caption">Показаны все даты за выбранный месяц.</div>
+                </div>
             </div>
         </details>
     </section>
@@ -84,27 +92,6 @@
                 <span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span>
             </summary>
             <div class="payroll-collapse-body">
-                <div class="shift-list-filter-bar">
-                    <div class="shift-filter-mode" role="group" aria-label="Фильтр дат смен">
-                        <button type="button" id="shift-filter-all-btn" class="btn secondary btn-inline active">Все даты за месяц</button>
-                        <button type="button" id="shift-filter-date-mode-btn" class="btn secondary btn-inline">Конкретная дата</button>
-                    </div>
-                    <div id="shift-filter-date-picker-wrap" class="shift-filter-date-picker hidden">
-                        <button type="button" id="shift-filter-date-btn" class="btn secondary btn-inline">Выбрать дату</button>
-                        <div id="shift-filter-calendar-popover" class="shift-mini-calendar hidden" role="dialog" aria-modal="false" aria-label="Выбор даты со сменами">
-                            <div class="shift-mini-calendar-head">
-                                <strong id="shift-filter-calendar-title"></strong>
-                                <button type="button" id="shift-filter-calendar-close-btn" class="modal-close-btn" aria-label="Закрыть">×</button>
-                            </div>
-                            <div class="shift-mini-calendar-note">Доступны только даты со сменами, которые уже прошли или закрыты.</div>
-                            <div class="shift-mini-calendar-weekdays" aria-hidden="true">
-                                <span>Пн</span><span>Вт</span><span>Ср</span><span>Чт</span><span>Пт</span><span>Сб</span><span>Вс</span>
-                            </div>
-                            <div id="shift-filter-calendar-grid" class="shift-mini-calendar-grid"></div>
-                        </div>
-                    </div>
-                </div>
-                <div id="shift-filter-hint" class="muted-text shift-filter-note"></div>
                 <div id="shift-payroll-days-container" class="payroll-days-container"></div>
             </div>
         </details>

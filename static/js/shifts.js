@@ -5,22 +5,22 @@ const shiftsState = {
     shiftDays: [],
     payrollDays: [],
     filterMode: 'month',
-    selectedFilterDate: '',
+    selectedDate: '',
 };
 
-const SHIFT_MONTH_NAMES = [
-    'Январь',
-    'Февраль',
-    'Март',
-    'Апрель',
-    'Май',
-    'Июнь',
-    'Июль',
-    'Август',
-    'Сентябрь',
-    'Октябрь',
-    'Ноябрь',
-    'Декабрь',
+const MONTH_OPTIONS = [
+    { value: '01', label: 'Январь' },
+    { value: '02', label: 'Февраль' },
+    { value: '03', label: 'Март' },
+    { value: '04', label: 'Апрель' },
+    { value: '05', label: 'Май' },
+    { value: '06', label: 'Июнь' },
+    { value: '07', label: 'Июль' },
+    { value: '08', label: 'Август' },
+    { value: '09', label: 'Сентябрь' },
+    { value: '10', label: 'Октябрь' },
+    { value: '11', label: 'Ноябрь' },
+    { value: '12', label: 'Декабрь' },
 ];
 
 function qs(id) {
@@ -45,19 +45,31 @@ function todayIso() {
     return new Date().toISOString().slice(0, 10);
 }
 
+function monthIso() {
+    return todayIso().slice(0, 7);
+}
+
 function currentYear() {
     return Number(todayIso().slice(0, 4));
 }
 
-function currentMonthNumber() {
-    return Number(todayIso().slice(5, 7));
+function selectedYear() {
+    const raw = String(qs('shift-year-input')?.value || currentYear()).trim();
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed >= 2020 ? parsed : currentYear();
 }
 
-function monthIso() {
-    return `${currentYear()}-${String(currentMonthNumber()).padStart(2, '0')}`;
+function selectedMonthNumber() {
+    const raw = qs('shift-month-select')?.value || monthIso().slice(5, 7);
+    return /^[0-1]\d$/.test(raw) ? Number(raw) : Number(monthIso().slice(5, 7));
 }
 
-function monthLabel(year, month) {
+function selectedMonthValue() {
+    return `${selectedYear()}-${String(selectedMonthNumber()).padStart(2, '0')}`;
+}
+
+function monthLabel(monthValue) {
+    const [year, month] = String(monthValue || monthIso()).split('-').map(Number);
     if (!year || !month) return '';
     return new Intl.DateTimeFormat('ru-RU', { month: 'long', year: 'numeric' }).format(new Date(year, month - 1, 1));
 }
@@ -123,38 +135,15 @@ function selectedLocation() {
     return qs('shift-location-select')?.value || '';
 }
 
-function selectedYear() {
-    const value = Number(qs('shift-year-input')?.value || currentYear());
-    return Number.isFinite(value) && value >= 2020 ? value : currentYear();
-}
-
-function selectedMonthNumber() {
-    const value = Number(qs('shift-month-select')?.value || currentMonthNumber());
-    return Number.isFinite(value) && value >= 1 && value <= 12 ? value : currentMonthNumber();
-}
-
-function selectedMonthIso() {
-    return `${selectedYear()}-${String(selectedMonthNumber()).padStart(2, '0')}`;
-}
-
-function monthDateRange() {
-    const year = selectedYear();
-    const month = selectedMonthNumber();
-    const dateFrom = `${year}-${String(month).padStart(2, '0')}-01`;
-    const dateTo = new Date(year, month, 0).toISOString().slice(0, 10);
-    return { year, month, monthIso: selectedMonthIso(), dateFrom, dateTo };
-}
-
 function setDefaults() {
     if (qs('shift-year-input')) qs('shift-year-input').value = String(currentYear());
-    if (qs('shift-date-input')) qs('shift-date-input').value = todayIso();
+    if (qs('shift-month-select')) qs('shift-month-select').value = monthIso().slice(5, 7);
 }
 
 function renderMonthOptions() {
     const select = qs('shift-month-select');
     if (!select) return;
-    select.innerHTML = SHIFT_MONTH_NAMES.map((name, index) => `<option value="${index + 1}">${name}</option>`).join('');
-    select.value = String(currentMonthNumber());
+    select.innerHTML = MONTH_OPTIONS.map(item => `<option value="${item.value}">${item.label}</option>`).join('');
 }
 
 function renderLocations() {
@@ -169,7 +158,6 @@ function renderLocations() {
 
 function renderEmployees() {
     const options = shiftsState.employees.map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}</option>`).join('');
-    if (qs('shift-employee-select')) qs('shift-employee-select').innerHTML = options;
     if (qs('shift-modal-employee-select')) qs('shift-modal-employee-select').innerHTML = options;
 }
 
@@ -180,85 +168,48 @@ function syncCollapseToggleText(details) {
     text.textContent = details.open ? 'Свернуть' : 'Развернуть';
 }
 
-function dateHasPassedOrClosed(dateValue) {
-    if (!dateValue) return false;
-    if (dateValue < todayIso()) return true;
-    return (shiftsState.payrollDays || []).some(day => day.shift_date === dateValue && day.is_closed);
+function monthDateRange() {
+    const year = selectedYear();
+    const mon = selectedMonthNumber();
+    const month = `${year}-${String(mon).padStart(2, '0')}`;
+    const dateFrom = `${month}-01`;
+    const dateTo = new Date(year, mon, 0).toISOString().slice(0, 10);
+    return { month, dateFrom, dateTo };
 }
 
-function availableFilterDates() {
-    const allowed = new Set();
-    for (const day of shiftsState.payrollDays || []) {
-        if (dateHasPassedOrClosed(day.shift_date)) {
-            allowed.add(day.shift_date);
-        }
-    }
-    return [...allowed].sort();
+function isShiftDaySelectable(day) {
+    const shifts = Array.isArray(day?.shifts) ? day.shifts : [];
+    if (!shifts.length) return false;
+    return day.date <= todayIso() || shifts.some(shift => shift.is_closed);
 }
 
-function ensureValidDateFilterSelection() {
-    const available = availableFilterDates();
-    if (!available.length) {
-        shiftsState.filterMode = 'month';
-        shiftsState.selectedFilterDate = '';
+function renderShiftFilterControls() {
+    const isDateMode = shiftsState.filterMode === 'date';
+    qs('shift-view-all-btn')?.classList.toggle('active', !isDateMode);
+    qs('shift-view-date-btn')?.classList.toggle('active', isDateMode);
+    qs('shift-date-picker-wrap')?.classList.toggle('hidden', !isDateMode);
+
+    const caption = qs('shift-filter-caption');
+    if (!caption) return;
+    if (!isDateMode) {
+        caption.textContent = 'Показаны все даты за выбранный месяц.';
         return;
     }
-    const [firstAvailable] = available;
-    const currentMonthPrefix = `${selectedYear()}-${String(selectedMonthNumber()).padStart(2, '0')}-`;
-    if (!shiftsState.selectedFilterDate || !available.includes(shiftsState.selectedFilterDate) || !shiftsState.selectedFilterDate.startsWith(currentMonthPrefix)) {
-        shiftsState.selectedFilterDate = firstAvailable;
-    }
-    if (shiftsState.filterMode === 'date' && !available.includes(shiftsState.selectedFilterDate)) {
-        shiftsState.filterMode = 'month';
-    }
-}
-
-function updateFilterControls() {
-    ensureValidDateFilterSelection();
-    const allBtn = qs('shift-filter-all-btn');
-    const dateModeBtn = qs('shift-filter-date-mode-btn');
-    const pickerWrap = qs('shift-filter-date-picker-wrap');
-    const pickerBtn = qs('shift-filter-date-btn');
-    const hint = qs('shift-filter-hint');
-    const available = availableFilterDates();
-    const inDateMode = shiftsState.filterMode === 'date';
-
-    if (allBtn) allBtn.classList.toggle('active', !inDateMode);
-    if (dateModeBtn) {
-        dateModeBtn.classList.toggle('active', inDateMode);
-        dateModeBtn.disabled = !available.length;
-    }
-    if (pickerWrap) pickerWrap.classList.toggle('hidden', !inDateMode);
-    if (pickerBtn) {
-        pickerBtn.disabled = !available.length;
-        pickerBtn.textContent = shiftsState.selectedFilterDate ? formatDateRu(shiftsState.selectedFilterDate) : 'Выбрать дату';
-    }
-    if (hint) {
-        if (!available.length) {
-            hint.textContent = 'За выбранный месяц нет доступных завершённых дат со сменами для точечного просмотра.';
-        } else if (inDateMode && shiftsState.selectedFilterDate) {
-            hint.textContent = `Показана только дата ${formatDateRu(shiftsState.selectedFilterDate)}.`;
-        } else {
-            hint.textContent = `Показаны все даты за ${monthLabel(selectedYear(), selectedMonthNumber())}.`;
-        }
-    }
-}
-
-function filteredPayrollDays() {
-    if (shiftsState.filterMode !== 'date' || !shiftsState.selectedFilterDate) {
-        return shiftsState.payrollDays || [];
-    }
-    return (shiftsState.payrollDays || []).filter(day => day.shift_date === shiftsState.selectedFilterDate);
+    caption.textContent = shiftsState.selectedDate
+        ? `Показана дата ${formatDateRu(shiftsState.selectedDate)}.`
+        : 'Выбери конкретную дату в маленьком календаре ниже.';
 }
 
 function renderPayrollDays() {
     const container = qs('shift-payroll-days-container');
     if (!container) return;
-    updateFilterControls();
-    const days = filteredPayrollDays();
+    let days = [...(shiftsState.payrollDays || [])];
+    if (shiftsState.filterMode === 'date') {
+        days = shiftsState.selectedDate ? days.filter(day => day.shift_date === shiftsState.selectedDate) : [];
+    }
     if (!days.length) {
         container.innerHTML = shiftsState.filterMode === 'date'
-            ? '<div class="muted-text">На выбранную дату смены не найдены.</div>'
+            ? '<div class="muted-text">За выбранную дату смен не найдено.</div>'
             : '<div class="muted-text">За выбранный месяц смен не найдено.</div>';
         return;
     }
@@ -280,20 +231,85 @@ function renderPayrollDays() {
     `).join('');
 }
 
+function renderShiftDatePicker() {
+    const grid = qs('shift-date-picker-grid');
+    const title = qs('shift-date-picker-title');
+    if (!grid || !title) return;
+
+    const { month } = monthDateRange();
+    const [year, mon] = month.split('-').map(Number);
+    title.textContent = monthLabel(month);
+    const totalDays = new Date(year, mon, 0).getDate();
+    const firstWeekday = (new Date(year, mon - 1, 1).getDay() + 6) % 7;
+    const daysByDate = new Map((shiftsState.shiftDays || []).map(day => [day.date, day]));
+    const cells = [];
+
+    for (let i = 0; i < firstWeekday; i += 1) {
+        cells.push('<span class="shift-date-picker-cell shift-date-picker-cell--empty" aria-hidden="true"></span>');
+    }
+
+    for (let d = 1; d <= totalDays; d += 1) {
+        const iso = `${year}-${String(mon).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+        const day = daysByDate.get(iso) || { date: iso, shifts: [] };
+        const selectable = isShiftDaySelectable(day);
+        const active = shiftsState.selectedDate === iso;
+        cells.push(`
+            <button
+                type="button"
+                class="shift-date-picker-cell${selectable ? '' : ' is-disabled'}${active ? ' is-active' : ''}"
+                data-shift-picker-date="${iso}"
+                ${selectable ? '' : 'disabled'}
+                title="${selectable ? formatDateRu(iso) : 'Недоступно для выбора'}"
+            >
+                ${d}
+            </button>
+        `);
+    }
+
+    grid.innerHTML = cells.join('');
+}
+
+function toggleShiftDatePicker(forceOpen = null) {
+    const popover = qs('shift-date-picker-popover');
+    if (!popover) return;
+    const shouldOpen = forceOpen == null ? popover.classList.contains('hidden') : Boolean(forceOpen);
+    popover.classList.toggle('hidden', !shouldOpen);
+    if (shouldOpen) renderShiftDatePicker();
+}
+
+function setShiftFilterMode(mode) {
+    shiftsState.filterMode = mode === 'date' ? 'date' : 'month';
+    if (shiftsState.filterMode === 'month') {
+        shiftsState.selectedDate = '';
+        toggleShiftDatePicker(false);
+    }
+    renderShiftFilterControls();
+    renderPayrollDays();
+}
+
+function selectShiftDate(dateValue) {
+    shiftsState.selectedDate = dateValue;
+    renderShiftFilterControls();
+    renderShiftDatePicker();
+    renderPayrollDays();
+    toggleShiftDatePicker(false);
+}
+
 function renderShiftCalendar() {
     const grid = qs('shift-calendar-grid');
     if (!grid) return;
 
     const days = shiftsState.shiftDays || [];
-    const { year, month } = monthDateRange();
-    const firstWeekday = (new Date(year, month - 1, 1).getDay() + 6) % 7;
+    const { month } = monthDateRange();
+    const [year, mon] = month.split('-').map(Number);
+    const firstWeekday = (new Date(year, mon - 1, 1).getDay() + 6) % 7;
     const cells = [];
     for (let i = 0; i < firstWeekday; i += 1) {
         cells.push('<div class="shift-calendar-cell shift-calendar-cell--empty" aria-hidden="true"></div>');
     }
 
     if (!days.length) {
-        grid.innerHTML = `<div class="shift-calendar-empty muted-text">В ${monthLabel(year, month)} смен пока нет.</div>`;
+        grid.innerHTML = `<div class="shift-calendar-empty muted-text">В ${monthLabel(month)} смен пока нет.</div>`;
         return;
     }
 
@@ -337,52 +353,6 @@ function renderShiftCalendar() {
     grid.innerHTML = cells.join('');
 }
 
-function renderFilterCalendarPopover() {
-    const grid = qs('shift-filter-calendar-grid');
-    const title = qs('shift-filter-calendar-title');
-    if (!grid || !title) return;
-
-    const { year, month, dateTo } = monthDateRange();
-    const allowed = new Set(availableFilterDates());
-    title.textContent = monthLabel(year, month);
-    const firstWeekday = (new Date(year, month - 1, 1).getDay() + 6) % 7;
-    const daysInMonth = Number(dateTo.slice(8, 10));
-    const cells = [];
-
-    for (let i = 0; i < firstWeekday; i += 1) {
-        cells.push('<div class="shift-mini-calendar-empty" aria-hidden="true"></div>');
-    }
-
-    for (let day = 1; day <= daysInMonth; day += 1) {
-        const iso = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-        const isAvailable = allowed.has(iso);
-        const isSelected = shiftsState.selectedFilterDate === iso;
-        const isToday = iso === todayIso();
-        cells.push(`
-            <button
-                type="button"
-                class="shift-mini-calendar-day ${isAvailable ? 'available' : 'disabled'} ${isSelected ? 'selected' : ''} ${isToday ? 'today' : ''}"
-                data-shift-filter-date="${iso}"
-                ${isAvailable ? '' : 'disabled'}
-            >
-                <span>${day}</span>
-            </button>
-        `);
-    }
-
-    grid.innerHTML = cells.join('');
-}
-
-function openFilterCalendarPopover() {
-    if (!availableFilterDates().length) return;
-    renderFilterCalendarPopover();
-    qs('shift-filter-calendar-popover')?.classList.remove('hidden');
-}
-
-function closeFilterCalendarPopover() {
-    qs('shift-filter-calendar-popover')?.classList.add('hidden');
-}
-
 async function loadSetupForLocation() {
     const location = selectedLocation();
     if (!location) return;
@@ -393,17 +363,19 @@ async function loadSetupForLocation() {
 
 async function loadShiftCalendar() {
     const location = selectedLocation();
-    const { year, month, dateFrom, dateTo } = monthDateRange();
-    if (!location || !dateFrom || !dateTo) return;
+    const { month, dateFrom, dateTo } = monthDateRange();
+    if (!location || !month) return;
+    const [year, mon] = month.split('-').map(Number);
     const payload = await api(`/api/payroll/shifts?location=${encodeURIComponent(location)}&date_from=${dateFrom}&date_to=${dateTo}`);
     const daysByDate = new Map((payload.days || []).map(day => [day.date, day]));
     const rendered = [];
     for (let d = 1; d <= Number(dateTo.slice(8, 10)); d += 1) {
-        const iso = `${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+        const iso = `${year}-${String(mon).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
         rendered.push(daysByDate.get(iso) || { date: iso, shifts: [] });
     }
     shiftsState.shiftDays = rendered;
     renderShiftCalendar();
+    renderShiftDatePicker();
 }
 
 async function loadPayrollDays() {
@@ -412,7 +384,14 @@ async function loadPayrollDays() {
     if (!location || !dateFrom || !dateTo) return;
     const payload = await api(`/api/payroll/employee-summary?location=${encodeURIComponent(location)}&date_from=${dateFrom}&date_to=${dateTo}`);
     shiftsState.payrollDays = payload.days || [];
-    ensureValidDateFilterSelection();
+    if (shiftsState.filterMode === 'date' && shiftsState.selectedDate) {
+        const day = shiftsState.shiftDays.find(item => item.date === shiftsState.selectedDate);
+        if (!day || !isShiftDaySelectable(day)) {
+            shiftsState.filterMode = 'month';
+            shiftsState.selectedDate = '';
+        }
+    }
+    renderShiftFilterControls();
     renderPayrollDays();
 }
 
@@ -433,31 +412,6 @@ async function refreshPageData(showSuccess = true) {
     } catch (error) {
         console.error(error);
         showStatus(error.message || 'Не удалось загрузить смены.', 'error');
-    }
-}
-
-async function addShift() {
-    const button = qs('add-shift-btn');
-    const payload = {
-        location: selectedLocation(),
-        shift_date: qs('shift-date-input')?.value,
-        employee_user_id: Number(qs('shift-employee-select')?.value || 0),
-    };
-    if (!payload.location || !payload.shift_date || !payload.employee_user_id) {
-        showStatus('Выберите точку, дату и сотрудника.', 'error');
-        return;
-    }
-    try {
-        setButtonLoading(button, true, 'Назначаем...');
-        await api('/api/payroll/shifts', { method: 'POST', body: JSON.stringify(payload) });
-        await refreshPageData(false);
-        showStatus('Смена назначена.', 'success');
-        setTimeout(hideStatus, 1200);
-    } catch (error) {
-        console.error(error);
-        showStatus(error.message || 'Не удалось назначить смену.', 'error');
-    } finally {
-        setButtonLoading(button, false);
     }
 }
 
@@ -485,7 +439,7 @@ window.closeAdminShift = async function closeAdminShift(id) {
 };
 
 window.openShiftModal = function openShiftModal(dateValue) {
-    if (qs('shift-modal-date-input')) qs('shift-modal-date-input').value = dateValue || qs('shift-date-input')?.value || todayIso();
+    if (qs('shift-modal-date-input')) qs('shift-modal-date-input').value = dateValue || todayIso();
     qs('shift-modal')?.classList.remove('hidden');
 };
 
@@ -519,43 +473,21 @@ async function saveShiftFromModal() {
     }
 }
 
-function setShiftMonthMode() {
-    shiftsState.filterMode = 'month';
-    closeFilterCalendarPopover();
-    renderPayrollDays();
-}
-
-function setShiftSpecificDateMode() {
-    const available = availableFilterDates();
-    if (!available.length) {
-        shiftsState.filterMode = 'month';
-        renderPayrollDays();
-        return;
-    }
-    shiftsState.filterMode = 'date';
-    shiftsState.selectedFilterDate = shiftsState.selectedFilterDate && available.includes(shiftsState.selectedFilterDate)
-        ? shiftsState.selectedFilterDate
-        : available[0];
-    renderPayrollDays();
-}
-
-function handleFilterCalendarClick(event) {
-    const button = event.target.closest('[data-shift-filter-date]');
-    if (!button) return;
-    shiftsState.filterMode = 'date';
-    shiftsState.selectedFilterDate = button.dataset.shiftFilterDate || '';
-    closeFilterCalendarPopover();
-    renderPayrollDays();
-}
-
 async function logout() {
     await api('/api/logout', { method: 'POST' });
     window.location.href = '/login';
 }
 
+function handleShiftDatePickerClick(event) {
+    const target = event.target.closest('[data-shift-picker-date]');
+    if (!target || target.disabled) return;
+    selectShiftDate(target.dataset.shiftPickerDate || '');
+}
+
 async function bootstrap() {
-    setDefaults();
     renderMonthOptions();
+    setDefaults();
+    renderShiftFilterControls();
     document.querySelectorAll('.payroll-collapse').forEach((details) => {
         syncCollapseToggleText(details);
         details.addEventListener('toggle', () => syncCollapseToggleText(details));
@@ -571,46 +503,52 @@ async function bootstrap() {
     }
 }
 
-qs('shift-location-select')?.addEventListener('change', () => refreshPageData(false));
-qs('shift-load-btn')?.addEventListener('click', () => refreshPageData());
-qs('shift-year-input')?.addEventListener('change', () => refreshPageData(false));
-qs('shift-month-select')?.addEventListener('change', () => refreshPageData(false));
-qs('add-shift-btn')?.addEventListener('click', addShift);
+qs('shift-location-select')?.addEventListener('change', async () => {
+    shiftsState.filterMode = 'month';
+    shiftsState.selectedDate = '';
+    await refreshPageData();
+});
+qs('shift-load-btn')?.addEventListener('click', async () => {
+    shiftsState.filterMode = 'month';
+    shiftsState.selectedDate = '';
+    await refreshPageData();
+});
+qs('shift-year-input')?.addEventListener('change', async () => {
+    shiftsState.filterMode = 'month';
+    shiftsState.selectedDate = '';
+    await refreshPageData();
+});
+qs('shift-month-select')?.addEventListener('change', async () => {
+    shiftsState.filterMode = 'month';
+    shiftsState.selectedDate = '';
+    await refreshPageData();
+});
+qs('shift-view-all-btn')?.addEventListener('click', () => setShiftFilterMode('month'));
+qs('shift-view-date-btn')?.addEventListener('click', () => setShiftFilterMode('date'));
+qs('shift-date-picker-btn')?.addEventListener('click', () => toggleShiftDatePicker());
+qs('shift-date-picker-grid')?.addEventListener('click', handleShiftDatePickerClick);
 qs('logout-btn')?.addEventListener('click', logout);
 qs('shift-modal-save-btn')?.addEventListener('click', saveShiftFromModal);
 qs('shift-modal-close-btn')?.addEventListener('click', closeShiftModal);
 qs('shift-modal-cancel-btn')?.addEventListener('click', closeShiftModal);
-qs('shift-filter-all-btn')?.addEventListener('click', setShiftMonthMode);
-qs('shift-filter-date-mode-btn')?.addEventListener('click', setShiftSpecificDateMode);
-qs('shift-filter-date-btn')?.addEventListener('click', (event) => {
-    event.stopPropagation();
-    const popover = qs('shift-filter-calendar-popover');
-    if (!popover) return;
-    if (popover.classList.contains('hidden')) {
-        openFilterCalendarPopover();
-    } else {
-        closeFilterCalendarPopover();
-    }
-});
-qs('shift-filter-calendar-close-btn')?.addEventListener('click', closeFilterCalendarPopover);
-qs('shift-filter-calendar-grid')?.addEventListener('click', handleFilterCalendarClick);
 qs('shift-modal')?.addEventListener('click', (event) => {
     if (event.target === qs('shift-modal')) closeShiftModal();
 });
 document.addEventListener('click', (event) => {
-    const popover = qs('shift-filter-calendar-popover');
-    const wrap = qs('shift-filter-date-picker-wrap');
-    if (!popover || popover.classList.contains('hidden')) return;
-    if (wrap && !wrap.contains(event.target)) {
-        closeFilterCalendarPopover();
+    const wrap = qs('shift-date-picker-wrap');
+    const popover = qs('shift-date-picker-popover');
+    if (!wrap || !popover || popover.classList.contains('hidden')) return;
+    if (!wrap.contains(event.target)) {
+        toggleShiftDatePicker(false);
     }
 });
 document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
         if (!qs('shift-modal')?.classList.contains('hidden')) {
             closeShiftModal();
+            return;
         }
-        closeFilterCalendarPopover();
+        toggleShiftDatePicker(false);
     }
 });
 

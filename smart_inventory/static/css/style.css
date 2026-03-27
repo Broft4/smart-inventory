@@ -367,14 +367,6 @@ body.modal-open {
     opacity: 0.6;
     cursor: not-allowed;
 }
-
-#save-cycle-targets-btn[disabled] {
-    background: #cbd5e1;
-    color: #475569;
-    cursor: not-allowed;
-    opacity: 1;
-}
-
 .admin-filter-checkbox {
     background: #f3f6fb;
     padding: 11px 12px;
@@ -2180,114 +2172,5 @@ body.modal-open {
     .shift-calendar-scroller .shift-calendar-empty,
     .shift-calendar-scroller .employee-shift-line {
         font-size: 11px;
-    }
-}
-
-.payroll-filter-grid--shifts-top {
-    align-items: end;
-}
-
-.shift-days-filter-bar {
-    margin-top: 18px;
-    padding-top: 18px;
-    border-top: 1px solid #e1e7f0;
-    display: grid;
-    gap: 12px;
-}
-
-.shift-days-filter-buttons {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-}
-
-.shift-days-filter-buttons .btn.active {
-    background: #2f6ae5;
-    color: #fff;
-    border-color: #2f6ae5;
-}
-
-.shift-date-picker-wrap {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    gap: 12px;
-}
-
-.shift-date-picker-popover {
-    position: absolute;
-    top: calc(100% + 8px);
-    left: 0;
-    z-index: 30;
-    width: min(360px, 92vw);
-    padding: 16px;
-    border-radius: 18px;
-    border: 1px solid #d7dfed;
-    background: #fff;
-    box-shadow: 0 18px 48px rgba(17, 31, 60, 0.16);
-}
-
-.shift-date-picker-head {
-    display: grid;
-    gap: 4px;
-    margin-bottom: 12px;
-}
-
-.shift-date-picker-weekdays,
-.shift-date-picker-grid {
-    display: grid;
-    grid-template-columns: repeat(7, minmax(0, 1fr));
-    gap: 8px;
-}
-
-.shift-date-picker-weekdays {
-    margin-bottom: 8px;
-}
-
-.shift-date-picker-weekdays span {
-    text-align: center;
-    font-size: 12px;
-    font-weight: 700;
-    color: #6f7c91;
-}
-
-.shift-date-picker-cell {
-    min-height: 40px;
-    border-radius: 12px;
-    border: 1px solid #d7dfed;
-    background: #f7f9fd;
-    font: inherit;
-    font-weight: 700;
-    color: #19345d;
-    cursor: pointer;
-}
-
-.shift-date-picker-cell:hover:not(:disabled) {
-    border-color: #2f6ae5;
-}
-
-.shift-date-picker-cell.is-active {
-    background: #2f6ae5;
-    border-color: #2f6ae5;
-    color: #fff;
-}
-
-.shift-date-picker-cell.is-disabled,
-.shift-date-picker-cell:disabled {
-    background: #f1f3f7;
-    border-color: #e2e7ef;
-    color: #a0a9b7;
-    cursor: not-allowed;
-}
-
-.shift-date-picker-cell--empty {
-    visibility: hidden;
-}
-
-@media (max-width: 768px) {
-    .shift-date-picker-popover {
-        width: min(320px, 92vw);
-        left: 50%;
-        transform: translateX(-50%);
     }
 }
