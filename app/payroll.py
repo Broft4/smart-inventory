@@ -53,13 +53,16 @@ _sales_metrics_cache: dict[tuple[int, str, str], tuple[float, dict[date, dict[st
 _category_lookup_cache: dict[str, tuple[float, dict[str, dict[str, str]]]] = {}
 
 
-def _ms_client_enabled(token: str | None = None) -> bool:
+def _ms_client_enabled(token: str | None = None, location: str | None = None) -> bool:
     enabled_attr = getattr(ms_client, "enabled", None)
     if callable(enabled_attr):
         try:
-            return bool(enabled_attr(token))
+            return bool(enabled_attr(token, location=location))
         except TypeError:
-            return bool(enabled_attr())
+            try:
+                return bool(enabled_attr(token))
+            except TypeError:
+                return bool(enabled_attr())
     return bool(enabled_attr)
 
 
@@ -489,8 +492,8 @@ async def get_payroll_category_catalog(location: str, db: AsyncSession, current_
     point = await _get_location_point_by_name(location, db)
     normalized = _normalize_location(location)
     categories: list[dict[str, Any]] = []
-    if _ms_client_enabled():
-        inventory = await ms_client.get_inventory(normalized)
+    if _ms_client_enabled(location=normalized):
+        inventory = await ms_client.get_inventory(normalized, **_point_ms_kwargs(point))
         for category in inventory.get('categories', []):
             if category.get('name') == DEFAULT_CATEGORY_NAME:
                 continue
@@ -965,8 +968,8 @@ async def _build_top_category_lookup(point: LocationPoint) -> dict[str, dict[str
         return dict(cached[1])
 
     lookup: dict[str, dict[str, str]] = {}
-    if _ms_client_enabled():
-        inventory = await ms_client.get_inventory(normalized)
+    if _ms_client_enabled(location=normalized):
+        inventory = await ms_client.get_inventory(normalized, **_point_ms_kwargs(point))
     else:
         from app.logic import MOCK_INVENTORY
         inventory = MOCK_INVENTORY.get(normalized, {'categories': []})
@@ -981,19 +984,27 @@ async def _build_top_category_lookup(point: LocationPoint) -> dict[str, dict[str
     return lookup
 
 
-async def _fetch_document_rows(endpoint: str, date_from: date, date_to: date, point: LocationPoint, *, expand: str | None = None) -> list[dict[str, Any]]:
-    if not _ms_client_enabled():
+async def _fetch_document_rows(
+    endpoint: str,
+    date_from: date,
+    date_to: date,
+    point: LocationPoint,
+    *,
+    expand: str | None = None,
+    include_positions: bool = False,
+    positions_expand: str | None = None,
+) -> list[dict[str, Any]]:
+    if not _ms_client_enabled(token=_point_ms_token(point), location=point.name):
         return []
-    filter_parts = [
-        f'moment>={date_from.isoformat()} 00:00:00',
-        f'moment<={date_to.isoformat()} 23:59:59',
-    ]
-    params = {'filter': ';'.join(filter_parts)}
-    if expand:
-        params['expand'] = expand
-    return await ms_client.get_all_pages(
-        f'entity/{endpoint}',
-        params=params,
+    return await ms_client.get_documents_by_period(
+        endpoint,
+        date_from,
+        date_to,
+        expand=expand,
+        include_positions=include_positions,
+        positions_expand=positions_expand,
+        token=_point_ms_token(point),
+        location=point.name,
     )
 
 
@@ -1023,10 +1034,17 @@ def _extract_document_day(doc: dict[str, Any]) -> date | None:
 
 
 def _extract_shift_sales_amount(doc: dict[str, Any]) -> float:
+    proceeds_fields = ('proceedsCash', 'proceedsNoCash')
+    if any(doc.get(field) is not None for field in proceeds_fields):
+        amount = round(sum(_money(doc.get(field)) for field in proceeds_fields if doc.get(field) is not None), 2)
+        if amount > 0:
+            return amount
+
     for field in ('saleSum', 'retailSum', 'sum'):
         amount = _money(doc.get(field))
         if amount > 0:
             return amount
+
     payment_fields = (
         'cashSum',
         'noCashSum',
@@ -1036,6 +1054,8 @@ def _extract_shift_sales_amount(doc: dict[str, Any]) -> float:
         'prepaymentNoCashSum',
         'prepaymentElectronicSum',
         'prepaymentQrSum',
+        'receivedCash',
+        'receivedNoCash',
     )
     amount = round(sum(_money(doc.get(field)) for field in payment_fields if doc.get(field) is not None), 2)
     return max(amount, 0.0)
@@ -1110,14 +1130,18 @@ async def _load_point_sales_metrics(point: LocationPoint, date_from: date, date_
                 date_from,
                 date_to,
                 point,
-                expand='positions.assortment,positions.assortment.productFolder,store,retailStore',
+                expand='store,retailStore,retailShift',
+                include_positions=True,
+                positions_expand='assortment,assortment.productFolder',
             ),
             _fetch_document_rows(
                 'retailsalesreturn',
                 date_from,
                 date_to,
                 point,
-                expand='positions.assortment,positions.assortment.productFolder,store,retailStore',
+                expand='store,retailStore',
+                include_positions=True,
+                positions_expand='assortment,assortment.productFolder',
             ),
             _fetch_retail_shift_rows(date_from, date_to, point),
         )
@@ -1133,9 +1157,9 @@ async def _load_point_sales_metrics(point: LocationPoint, date_from: date, date_
                 if item_id:
                     unique_item_ids.add(item_id)
 
-        if _ms_client_enabled() and unique_item_ids:
+        if _ms_client_enabled(token=_point_ms_token(point), location=point.name) and unique_item_ids:
             async def load_cost(item_id: str) -> tuple[str, float]:
-                financials = await ms_client.get_item_financials(point.name, item_id)
+                financials = await ms_client.get_item_financials(point.name, item_id, **_point_ms_kwargs(point))
                 return item_id, float(financials.get('cost_price') or 0)
 
             results = await asyncio.gather(*(load_cost(item_id) for item_id in unique_item_ids))

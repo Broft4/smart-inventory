@@ -1567,6 +1567,31 @@ async def _load_completed_subcategory_ids_for_cycle(
         report_query = report_query.where(Report.report_date < before_report_date)
 
     reports = (await db.scalars(report_query.order_by(Report.report_date.asc(), Report.id.asc()))).all()
+    return await _load_completed_subcategory_ids_for_reports(reports, inventory, db)
+
+
+async def _load_completed_subcategory_ids_before_date(
+    location: str,
+    inventory: dict[str, Any],
+    db: AsyncSession,
+    before_report_date: date | None = None,
+) -> dict[str, set[str]]:
+    report_query = select(Report).where(
+        Report.location == location,
+        Report.report_type == DAILY_REPORT_TYPE,
+    )
+    if before_report_date is not None:
+        report_query = report_query.where(Report.report_date < before_report_date)
+
+    reports = (await db.scalars(report_query.order_by(Report.report_date.asc(), Report.id.asc()))).all()
+    return await _load_completed_subcategory_ids_for_reports(reports, inventory, db)
+
+
+async def _load_completed_subcategory_ids_for_reports(
+    reports: list[Report],
+    inventory: dict[str, Any],
+    db: AsyncSession,
+) -> dict[str, set[str]]:
     if not reports:
         return {}
 
@@ -2033,9 +2058,8 @@ async def get_cycle_targets(location: str, db: AsyncSession, target_date: date |
     )
     selected_category_ids, selected_subcategory_ids = _selection_target_maps(targets)
     previous_category_ids, previous_subcategory_ids = _selection_target_maps(previous_targets)
-    completed_subcategory_ids = await _load_completed_subcategory_ids_for_cycle(
+    completed_subcategory_ids = await _load_completed_subcategory_ids_before_date(
         normalized,
-        cycle.cycle_version,
         inventory,
         db,
         before_report_date=resolved_target_date,

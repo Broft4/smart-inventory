@@ -5,6 +5,7 @@ import logging
 import os
 import sqlite3
 from dataclasses import dataclass
+from datetime import date
 from time import monotonic
 from typing import Any
 from urllib.parse import urlparse
@@ -317,9 +318,18 @@ class MoySkladClient:
     async def get_absolute(self, url: str, params: dict[str, Any] | None = None, token: str | None = None, location: str | None = None) -> dict[str, Any]:
         return await self._request_json(url, params=params, absolute=True, token=token, location=location)
 
-    async def get_all_pages(self, endpoint: str, params: dict[str, Any] | None = None, token: str | None = None, location: str | None = None) -> list[dict[str, Any]]:
+    async def get_all_pages(
+        self,
+        endpoint: str,
+        params: dict[str, Any] | None = None,
+        token: str | None = None,
+        location: str | None = None,
+        *,
+        page_limit: int | None = None,
+    ) -> list[dict[str, Any]]:
         params = dict(params or {})
-        params['limit'] = 1000
+        normalized_limit = max(1, min(1000, int(page_limit or 1000)))
+        params['limit'] = normalized_limit
         params['offset'] = 0
         all_rows: list[dict[str, Any]] = []
 
@@ -327,12 +337,124 @@ class MoySkladClient:
             data = await self.get(endpoint, params=params, token=token, location=location)
             rows = data.get('rows', [])
             all_rows.extend(rows)
-            if len(rows) < 1000:
+            if len(rows) < normalized_limit:
                 break
-            params['offset'] += 1000
+            params['offset'] += normalized_limit
 
-        logger.info('Получено %s записей из %s', len(all_rows), endpoint)
+        logger.info('Получено %s записей из %s (page_limit=%s)', len(all_rows), endpoint, normalized_limit)
         return all_rows
+
+    async def get_document_positions(
+        self,
+        entity_name: str,
+        document_id: str,
+        *,
+        expand: str | None = None,
+        token: str | None = None,
+        location: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {}
+        if expand:
+            params['expand'] = expand
+        page_limit = 100 if expand else 1000
+        return await self.get_all_pages(
+            f'entity/{entity_name}/{document_id}/positions',
+            params=params,
+            token=token,
+            location=location,
+            page_limit=page_limit,
+        )
+
+    async def populate_document_positions(
+        self,
+        entity_name: str,
+        rows: list[dict[str, Any]],
+        *,
+        expand: str | None = None,
+        token: str | None = None,
+        location: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if not rows:
+            return rows
+
+        semaphore = asyncio.Semaphore(self.max_concurrent_requests)
+
+        async def enrich(row: dict[str, Any]) -> None:
+            positions = row.get('positions')
+            if isinstance(positions, dict) and positions.get('rows'):
+                return
+
+            document_id = str(row.get('id') or '').strip() or self._extract_id_from_href(((row.get('meta') or {}).get('href') if isinstance(row.get('meta'), dict) else None))
+            if not document_id:
+                return
+
+            async with semaphore:
+                loaded_rows = await self.get_document_positions(
+                    entity_name,
+                    document_id,
+                    expand=expand,
+                    token=token,
+                    location=location,
+                )
+
+            meta = positions.get('meta') if isinstance(positions, dict) and isinstance(positions.get('meta'), dict) else {}
+            row['positions'] = {
+                'meta': {
+                    **meta,
+                    'size': len(loaded_rows),
+                    'limit': 1000,
+                    'offset': 0,
+                },
+                'rows': loaded_rows,
+            }
+
+        await asyncio.gather(*(enrich(row) for row in rows))
+        return rows
+
+    async def get_documents_by_period(
+        self,
+        entity_name: str,
+        date_from: date,
+        date_to: date,
+        *,
+        filters: list[str] | None = None,
+        expand: str | None = None,
+        include_positions: bool = False,
+        positions_expand: str | None = None,
+        token: str | None = None,
+        location: str | None = None,
+    ) -> list[dict[str, Any]]:
+        filter_parts = [
+            f'moment>={date_from.isoformat()} 00:00:00',
+            f'moment<={date_to.isoformat()} 23:59:59',
+        ]
+        for raw_filter in filters or []:
+            normalized_filter = str(raw_filter or '').strip()
+            if normalized_filter:
+                filter_parts.append(normalized_filter)
+
+        params: dict[str, Any] = {'filter': ';'.join(filter_parts)}
+        page_limit = 1000
+        if expand:
+            params['expand'] = expand
+            page_limit = 100
+
+        rows = await self.get_all_pages(
+            f'entity/{entity_name}',
+            params=params,
+            token=token,
+            location=location,
+            page_limit=page_limit,
+        )
+        if include_positions:
+            await self.populate_document_positions(
+                entity_name,
+                rows,
+                expand=positions_expand,
+                token=token,
+                location=location,
+            )
+        return rows
 
     async def get_stores_ids(self, token: str | None = None, location: str | None = None) -> dict[str, str]:
         if self._cache_alive(self._stores_cache):
