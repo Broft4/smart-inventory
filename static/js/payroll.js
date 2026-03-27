@@ -113,12 +113,12 @@ function monthIso() {
 }
 
 function setDefaultDates() {
-    qs('payroll-date-from').value = todayIso();
-    qs('payroll-date-to').value = todayIso();
-    qs('settings-effective-from').value = todayIso();
-    qs('shift-month-input').value = monthIso();
-    qs('expenses-month-input').value = monthIso();
-    qs('shift-date-input').value = todayIso();
+    if (qs('payroll-date-from')) qs('payroll-date-from').value = todayIso();
+    if (qs('payroll-date-to')) qs('payroll-date-to').value = todayIso();
+    if (qs('settings-effective-from')) qs('settings-effective-from').value = todayIso();
+    if (qs('shift-month-input')) qs('shift-month-input').value = monthIso();
+    if (qs('expenses-month-input')) qs('expenses-month-input').value = monthIso();
+    if (qs('shift-date-input')) qs('shift-date-input').value = todayIso();
 }
 
 function selectedLocation() {
@@ -177,29 +177,35 @@ function renderSummary(summary) {
     qs('kpi-employee-expenses').textContent = formatMoney(summary.employee_expenses_total || 0);
     qs('kpi-payout').textContent = formatMoney(summary.net_payout_amount || 0);
 
+    const shiftsCard = qs('payroll-shifts-card');
     const daysContainer = qs('payroll-days-container');
-    if (!summary.days?.length) {
-        daysContainer.innerHTML = '<div class="muted-text">За выбранный период смен не найдено.</div>';
-    } else {
-        daysContainer.innerHTML = summary.days.map(day => `
-            <article class="payroll-day-card">
-                <div class="payroll-day-header">
-                    <strong>${day.shift_date}</strong>
-                    <span class="payroll-chip ${day.is_closed ? 'green' : 'orange'}">${day.is_closed ? 'Закрыта' : 'Открыта'}</span>
-                    ${!day.is_closed && payrollState.user.role === 'employee' && Number(day.employee_user_id) === Number(payrollState.user.id)
-                        ? `<button class="btn secondary btn-inline" type="button" onclick="closeOwnShift(${day.id})">Закрыть смену</button>`
-                        : ''}
-                </div>
-                <div class="payroll-day-grid">
-                    <div><span class="summary-label">Выручка</span><strong>${formatMoney(day.gross_sales_amount)}</strong></div>
-                    <div><span class="summary-label">Возвраты</span><strong>${formatMoney(day.return_amount)}</strong></div>
-                    <div><span class="summary-label">Чистая выручка</span><strong>${formatMoney(day.net_sales_amount)}</strong></div>
-                    <div><span class="summary-label">Выход</span><strong>${formatMoney(day.exit_amount)}</strong></div>
-                    <div><span class="summary-label">Бонус</span><strong>${formatMoney(day.bonus_amount)}</strong></div>
-                    <div><span class="summary-label">Итого</span><strong>${formatMoney(day.gross_salary_amount)}</strong></div>
-                </div>
-            </article>
-        `).join('');
+    if (shiftsCard) {
+        shiftsCard.classList.toggle('hidden', isAdminRole());
+    }
+    if (daysContainer && !isAdminRole()) {
+        if (!summary.days?.length) {
+            daysContainer.innerHTML = '<div class="muted-text">За выбранный период смен не найдено.</div>';
+        } else {
+            daysContainer.innerHTML = summary.days.map(day => `
+                <article class="payroll-day-card">
+                    <div class="payroll-day-header">
+                        <strong>${day.shift_date}</strong>
+                        <span class="payroll-chip ${day.is_closed ? 'green' : 'orange'}">${day.is_closed ? 'Закрыта' : 'Открыта'}</span>
+                        ${!day.is_closed && payrollState.user.role === 'employee' && Number(day.employee_user_id) === Number(payrollState.user.id)
+                            ? `<button class="btn secondary btn-inline" type="button" onclick="closeOwnShift(${day.id})">Закрыть смену</button>`
+                            : ''}
+                    </div>
+                    <div class="payroll-day-grid">
+                        <div><span class="summary-label">Выручка</span><strong>${formatMoney(day.gross_sales_amount)}</strong></div>
+                        <div><span class="summary-label">Возвраты</span><strong>${formatMoney(day.return_amount)}</strong></div>
+                        <div><span class="summary-label">Выручка после возвратов</span><strong>${formatMoney(day.net_sales_amount)}</strong></div>
+                        <div><span class="summary-label">Выход</span><strong>${formatMoney(day.exit_amount)}</strong></div>
+                        <div><span class="summary-label">Бонус</span><strong>${formatMoney(day.bonus_amount)}</strong></div>
+                        <div><span class="summary-label">Итого</span><strong>${formatMoney(day.gross_salary_amount)}</strong></div>
+                    </div>
+                </article>
+            `).join('');
+        }
     }
 
     renderEmployeeShiftCalendar(summary);
@@ -317,11 +323,13 @@ function renderManagerSummary(summary) {
     }
     card.classList.remove('hidden');
     qs('manager-net-sales').textContent = formatMoney(summary.net_sales_amount || 0);
+    if (qs('manager-returns')) qs('manager-returns').textContent = formatMoney(summary.return_amount || 0);
     qs('manager-cost').textContent = formatMoney(summary.cost_amount || 0);
     qs('manager-employee-salary').textContent = formatMoney(summary.employee_salary_total || 0);
     qs('manager-expenses').textContent = formatMoney(summary.expenses_total || 0);
     qs('manager-profit').textContent = formatMoney(summary.operating_profit_before_manager_salary || 0);
     qs('manager-salary').textContent = `${formatMoney(summary.manager_salary_amount || 0)} (${Number(summary.manager_rate_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%)`;
+    if (qs('manager-profit-after-manager')) qs('manager-profit-after-manager').textContent = formatMoney(summary.net_profit_after_manager_salary || 0);
     qs('manager-responsible-line').textContent = summary.responsible_admin_name
         ? `Ответственный администратор точки: ${summary.responsible_admin_name}`
         : 'Ответственный администратор для точки пока не назначен.';
@@ -361,14 +369,16 @@ function renderSettings() {
 
 function renderShiftCalendar() {
     const card = qs('admin-shifts-card');
+    const grid = qs('shift-calendar-grid');
+    const monthInput = qs('shift-month-input');
+    if (!card || !grid || !monthInput) return;
     if (!isAdminRole()) {
         card.classList.add('hidden');
         return;
     }
     card.classList.remove('hidden');
     const days = payrollState.shiftDays || [];
-    const grid = qs('shift-calendar-grid');
-    const month = qs('shift-month-input').value || monthIso();
+    const month = monthInput.value || monthIso();
     if (!days.length) {
         grid.innerHTML = `<div class="shift-calendar-empty muted-text">В ${monthLabel(month)} смен пока нет.</div>`;
         return;
@@ -631,7 +641,7 @@ async function loadSummary() {
 }
 
 async function loadShiftCalendar() {
-    if (!isAdminRole()) return;
+    if (!isAdminRole() || !qs('shift-month-input') || !qs('shift-calendar-grid')) return;
     const location = selectedLocation();
     const month = selectedMonthStart('shift-month-input');
     const [year, mon] = month.split('-').map(Number);

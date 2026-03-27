@@ -16,6 +16,7 @@ from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 
+from app.config import settings
 from app.models import (
     AdminLocationAccess,
     ExpenseTemplate,
@@ -50,6 +51,16 @@ TOBACCO_KEYWORDS = ('сигарет', 'сигарилл', 'стик')
 SALES_METRICS_TTL_SECONDS = 90
 _sales_metrics_cache: dict[tuple[int, str, str], tuple[float, dict[date, dict[str, Any]]]] = {}
 _category_lookup_cache: dict[str, tuple[float, dict[str, dict[str, str]]]] = {}
+
+
+def _ms_client_enabled(token: str | None = None) -> bool:
+    enabled_attr = getattr(ms_client, "enabled", None)
+    if callable(enabled_attr):
+        try:
+            return bool(enabled_attr(token))
+        except TypeError:
+            return bool(enabled_attr())
+    return bool(enabled_attr)
 
 
 class PayrollSettingsUpdateRequest(BaseModel):
@@ -236,6 +247,34 @@ def _manager_rate_for_profit(net_profit: float) -> float:
 def _cache_is_fresh(created_at: float, ttl: float) -> bool:
     return (asyncio.get_running_loop().time() - created_at) <= ttl
 
+
+
+
+def _point_ms_token(point: LocationPoint | None) -> str | None:
+    token = str((point.ms_token if point else '') or '').strip()
+    if token:
+        return token
+    fallback = str(settings.moysklad_token or '').strip()
+    return fallback or None
+
+
+def _point_store_id(point: LocationPoint | None) -> str | None:
+    store_id = str((point.ms_store_id if point else '') or '').strip()
+    if store_id:
+        return store_id
+    normalized = _normalize_location(point.name) if point and point.name else ''
+    if normalized.lower() == (settings.store_dmitrov or '').strip().lower():
+        return (settings.store_dmitrov_id or '').strip() or None
+    if normalized.lower() == (settings.store_dubna or '').strip().lower():
+        return (settings.store_dubna_id or '').strip() or None
+    return None
+
+
+def _point_ms_kwargs(point: LocationPoint | None) -> dict[str, str | None]:
+    return {
+        'token': _point_ms_token(point),
+        'store_id': _point_store_id(point),
+    }
 
 def _clean_text(value: str | None) -> str:
     return ' '.join(str(value or '').strip().lower().replace('ё', 'е').split())
@@ -447,9 +486,10 @@ async def get_location_payroll_setup(location: str, db: AsyncSession, current_us
 
 async def get_payroll_category_catalog(location: str, db: AsyncSession, current_user: User) -> dict[str, Any]:
     await ensure_user_can_access_location(current_user, location, db)
+    point = await _get_location_point_by_name(location, db)
     normalized = _normalize_location(location)
     categories: list[dict[str, Any]] = []
-    if ms_client.enabled:
+    if _ms_client_enabled():
         inventory = await ms_client.get_inventory(normalized)
         for category in inventory.get('categories', []):
             if category.get('name') == DEFAULT_CATEGORY_NAME:
@@ -917,14 +957,15 @@ async def update_monthly_expense_entry(entry_id: int, payload: MonthlyExpenseEnt
     return await list_monthly_expenses(point.name, entry.month_start, db, current_user)
 
 
-async def _build_top_category_lookup(location: str) -> dict[str, dict[str, str]]:
-    normalized = _normalize_location(location)
-    cached = _category_lookup_cache.get(normalized)
+async def _build_top_category_lookup(point: LocationPoint) -> dict[str, dict[str, str]]:
+    normalized = _normalize_location(point.name)
+    cache_key = f"{point.id}"
+    cached = _category_lookup_cache.get(cache_key)
     if cached and _cache_is_fresh(cached[0], SALES_METRICS_TTL_SECONDS):
         return dict(cached[1])
 
     lookup: dict[str, dict[str, str]] = {}
-    if ms_client.enabled:
+    if _ms_client_enabled():
         inventory = await ms_client.get_inventory(normalized)
     else:
         from app.logic import MOCK_INVENTORY
@@ -936,25 +977,83 @@ async def _build_top_category_lookup(location: str) -> dict[str, dict[str, str]]
         for subcategory in category.get('subcategories', []):
             for item in subcategory.get('items', []):
                 lookup[str(item['id'])] = {'category_id': str(category['id']), 'category_name': category_name}
-    _category_lookup_cache[normalized] = (asyncio.get_running_loop().time(), dict(lookup))
+    _category_lookup_cache[cache_key] = (asyncio.get_running_loop().time(), dict(lookup))
     return lookup
 
 
-async def _fetch_document_rows(endpoint: str, date_from: date, date_to: date) -> list[dict[str, Any]]:
-    if not ms_client.enabled:
+async def _fetch_document_rows(endpoint: str, date_from: date, date_to: date, point: LocationPoint, *, expand: str | None = None) -> list[dict[str, Any]]:
+    if not _ms_client_enabled():
         return []
     filter_parts = [
         f'moment>={date_from.isoformat()} 00:00:00',
         f'moment<={date_to.isoformat()} 23:59:59',
     ]
+    params = {'filter': ';'.join(filter_parts)}
+    if expand:
+        params['expand'] = expand
     return await ms_client.get_all_pages(
         f'entity/{endpoint}',
-        params={
-            'filter': ';'.join(filter_parts),
-            'expand': 'positions.assortment,positions.assortment.productFolder,store,retailStore',
-        },
+        params=params,
     )
 
+
+async def _fetch_retail_shift_rows(date_from: date, date_to: date, point: LocationPoint) -> list[dict[str, Any]]:
+    return await _fetch_document_rows('retailshift', date_from, date_to, point, expand='store,retailStore')
+
+
+
+def _iter_positions(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    positions = doc.get('positions')
+    if isinstance(positions, dict):
+        return positions.get('rows', []) or []
+    if isinstance(positions, list):
+        return positions
+    return []
+
+
+def _extract_document_day(doc: dict[str, Any]) -> date | None:
+    for field in ('moment', 'openMoment', 'closeMoment', 'created', 'updated'):
+        raw = str(doc.get(field) or '').strip()
+        if len(raw) >= 10:
+            try:
+                return date.fromisoformat(raw[:10])
+            except Exception:
+                continue
+    return None
+
+
+def _extract_shift_sales_amount(doc: dict[str, Any]) -> float:
+    for field in ('saleSum', 'retailSum', 'sum'):
+        amount = _money(doc.get(field))
+        if amount > 0:
+            return amount
+    payment_fields = (
+        'cashSum',
+        'noCashSum',
+        'electronicSum',
+        'qrSum',
+        'prepaymentCashSum',
+        'prepaymentNoCashSum',
+        'prepaymentElectronicSum',
+        'prepaymentQrSum',
+    )
+    amount = round(sum(_money(doc.get(field)) for field in payment_fields if doc.get(field) is not None), 2)
+    return max(amount, 0.0)
+
+
+def _extract_shift_return_amount(doc: dict[str, Any]) -> float:
+    for field in ('returnSum', 'salesReturnSum'):
+        amount = _money(doc.get(field))
+        if amount > 0:
+            return amount
+    return 0.0
+
+
+def _ensure_other_category_bucket(category_rows: dict[str, CategoryDocMetrics]) -> CategoryDocMetrics:
+    return category_rows.setdefault(
+        '__other__',
+        CategoryDocMetrics(),
+    )
 
 
 def _doc_matches_point(doc: dict[str, Any], point: LocationPoint) -> bool:
@@ -998,58 +1097,76 @@ def _doc_matches_point(doc: dict[str, Any], point: LocationPoint) -> bool:
 
 
 async def _load_point_sales_metrics(point: LocationPoint, date_from: date, date_to: date) -> dict[str, Any]:
+    cache_key = (point.id, date_from.isoformat(), date_to.isoformat())
+    cached = _sales_metrics_cache.get(cache_key)
+    if cached and _cache_is_fresh(cached[0], SALES_METRICS_TTL_SECONDS):
+        return cached[1]
+
     try:
-        category_lookup = await _build_top_category_lookup(point.name)
-        sales_rows, return_rows = await asyncio.gather(
-            _fetch_document_rows('retaildemand', date_from, date_to),
-            _fetch_document_rows('retailsalesreturn', date_from, date_to),
+        category_lookup = await _build_top_category_lookup(point)
+        sales_rows, return_rows, shift_rows = await asyncio.gather(
+            _fetch_document_rows(
+                'retaildemand',
+                date_from,
+                date_to,
+                point,
+                expand='positions.assortment,positions.assortment.productFolder,store,retailStore',
+            ),
+            _fetch_document_rows(
+                'retailsalesreturn',
+                date_from,
+                date_to,
+                point,
+                expand='positions.assortment,positions.assortment.productFolder,store,retailStore',
+            ),
+            _fetch_retail_shift_rows(date_from, date_to, point),
         )
         sales_rows = [row for row in sales_rows if _doc_matches_point(row, point)]
         return_rows = [row for row in return_rows if _doc_matches_point(row, point)]
+        shift_rows = [row for row in shift_rows if _doc_matches_point(row, point)]
 
         cost_cache: dict[str, float] = {}
         unique_item_ids: set[str] = set()
         for row in sales_rows + return_rows:
-            for position in row.get('positions', {}).get('rows', []) if isinstance(row.get('positions'), dict) else row.get('positions', []) or []:
+            for position in _iter_positions(row):
                 item_id = _extract_id(position.get('assortment'))
-                if item_id and item_id in category_lookup:
+                if item_id:
                     unique_item_ids.add(item_id)
 
-        if ms_client.enabled and unique_item_ids:
+        if _ms_client_enabled() and unique_item_ids:
             async def load_cost(item_id: str) -> tuple[str, float]:
                 financials = await ms_client.get_item_financials(point.name, item_id)
                 return item_id, float(financials.get('cost_price') or 0)
+
             results = await asyncio.gather(*(load_cost(item_id) for item_id in unique_item_ids))
             cost_cache = {item_id: cost for item_id, cost in results}
 
-        by_day: dict[date, dict[str, CategoryDocMetrics]] = defaultdict(lambda: defaultdict(CategoryDocMetrics))
+        by_day: dict[date, dict[str, CategoryDocMetrics]] = defaultdict(dict)
         totals_by_day: dict[date, dict[str, float]] = defaultdict(lambda: {'gross_sales': 0.0, 'returns': 0.0, 'cost': 0.0})
-
-        def iter_positions(doc: dict[str, Any]) -> list[dict[str, Any]]:
-            positions = doc.get('positions')
-            if isinstance(positions, dict):
-                return positions.get('rows', []) or []
-            if isinstance(positions, list):
-                return positions
-            return []
+        shift_sales_by_day: dict[date, float] = defaultdict(float)
+        shift_returns_by_day: dict[date, float] = defaultdict(float)
+        category_names_by_id: dict[str, str] = {}
 
         for doc, is_return in [(row, False) for row in sales_rows] + [(row, True) for row in return_rows]:
-            moment_raw = str(doc.get('moment') or '')
-            try:
-                doc_date = date.fromisoformat(moment_raw[:10])
-            except Exception:
+            doc_date = _extract_document_day(doc)
+            if doc_date is None:
                 continue
-            for position in iter_positions(doc):
+            for position in _iter_positions(doc):
                 item_id = _extract_id(position.get('assortment'))
-                category = category_lookup.get(item_id)
-                if not category:
-                    continue
+                category = category_lookup.get(item_id or '')
+                if category:
+                    category_id = category['category_id']
+                    category_name = category['category_name']
+                else:
+                    category_id = '__other__'
+                    category_name = DEFAULT_CATEGORY_NAME
+                category_names_by_id[category_id] = category_name
                 quantity = _quantity(position.get('quantity'))
                 amount = _money(position.get('sum'))
                 if amount <= 0:
                     amount = round(_money(position.get('price')) * quantity, 2)
-                cost_amount = round(float(cost_cache.get(item_id, 0.0)) * quantity, 2)
-                bucket = by_day[doc_date][category['category_id']]
+                cost_amount = round(float(cost_cache.get(item_id or '', 0.0)) * quantity, 2)
+                bucket = by_day[doc_date].setdefault(category_id, CategoryDocMetrics())
                 if is_return:
                     bucket.returns += amount
                     totals_by_day[doc_date]['returns'] += amount
@@ -1059,16 +1176,26 @@ async def _load_point_sales_metrics(point: LocationPoint, date_from: date, date_
                 bucket.cost += cost_amount
                 totals_by_day[doc_date]['cost'] += cost_amount
 
-        category_names_by_id = {}
-        for item in category_lookup.values():
-            category_names_by_id[item['category_id']] = item['category_name']
+        for shift_row in shift_rows:
+            shift_day = _extract_document_day(shift_row)
+            if shift_day is None:
+                continue
+            shift_sales_by_day[shift_day] += _extract_shift_sales_amount(shift_row)
+            shift_returns_by_day[shift_day] += _extract_shift_return_amount(shift_row)
 
         output: dict[date, dict[str, Any]] = {}
-        for day, category_rows in by_day.items():
+        all_days = set(totals_by_day) | set(shift_sales_by_day) | set(shift_returns_by_day)
+        for day in sorted(all_days):
+            category_rows = by_day.get(day, {})
+            doc_totals = totals_by_day.get(day, {'gross_sales': 0.0, 'returns': 0.0, 'cost': 0.0})
+            shift_sales_amount = round(float(shift_sales_by_day.get(day, 0.0) or 0.0), 2)
+            shift_return_amount = round(float(shift_returns_by_day.get(day, 0.0) or 0.0), 2)
+            gross_sales_amount = shift_sales_amount if shift_sales_amount > 0 else round(doc_totals['gross_sales'], 2)
+            return_amount = shift_return_amount if shift_return_amount > 0 else round(doc_totals['returns'], 2)
             categories = []
             non_tobacco_net = 0.0
             for category_id, metrics in category_rows.items():
-                category_name = category_names_by_id.get(category_id, category_id)
+                category_name = category_names_by_id.get(category_id, DEFAULT_CATEGORY_NAME)
                 net_sales = round(metrics.sales - metrics.returns, 2)
                 if not _is_tobacco_category(category_name):
                     non_tobacco_net += net_sales
@@ -1080,17 +1207,34 @@ async def _load_point_sales_metrics(point: LocationPoint, date_from: date, date_
                     'net_sales_amount': net_sales,
                     'cost_amount': round(metrics.cost, 2),
                 })
+
+            if not categories and (gross_sales_amount > 0 or return_amount > 0):
+                synthetic_net = round(gross_sales_amount - return_amount, 2)
+                if not _is_tobacco_category(DEFAULT_CATEGORY_NAME):
+                    non_tobacco_net += synthetic_net
+                categories.append({
+                    'category_id': '__other__',
+                    'category_name': DEFAULT_CATEGORY_NAME,
+                    'sales_amount': gross_sales_amount,
+                    'return_amount': return_amount,
+                    'net_sales_amount': synthetic_net,
+                    'cost_amount': 0.0,
+                })
+
             categories.sort(key=lambda item: item['category_name'].lower())
-            totals = totals_by_day[day]
+            cost_amount = round(doc_totals['cost'], 2)
+            net_sales_amount = round(gross_sales_amount - return_amount, 2)
             output[day] = {
                 'categories': categories,
-                'gross_sales_amount': round(totals['gross_sales'], 2),
-                'return_amount': round(totals['returns'], 2),
-                'net_sales_amount': round(totals['gross_sales'] - totals['returns'], 2),
-                'cost_amount': round(totals['cost'], 2),
-                'gross_profit_amount': round((totals['gross_sales'] - totals['returns']) - totals['cost'], 2),
+                'gross_sales_amount': gross_sales_amount,
+                'return_amount': return_amount,
+                'net_sales_amount': net_sales_amount,
+                'cost_amount': cost_amount,
+                'gross_profit_amount': round(net_sales_amount - cost_amount, 2),
                 'non_tobacco_net_sales_for_bonus': round(non_tobacco_net, 2),
             }
+
+        _sales_metrics_cache[cache_key] = (asyncio.get_running_loop().time(), output)
         return output
     except Exception:
         logger.exception(
@@ -1100,6 +1244,7 @@ async def _load_point_sales_metrics(point: LocationPoint, date_from: date, date_
             date_to.isoformat(),
         )
         return {}
+
 
 
 async def _get_active_shift_count(point: LocationPoint, shift_date: date, db: AsyncSession) -> int:
@@ -1636,6 +1781,7 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
         'date_from': date_from.isoformat(),
         'date_to': date_to.isoformat(),
         'gross_sales_amount': round(gross_sales_amount, 2),
+        'revenue_amount': round(gross_sales_amount, 2),
         'return_amount': round(return_amount, 2),
         'net_sales_amount': round(net_sales_amount, 2),
         'cost_amount': round(cost_amount, 2),
@@ -1645,6 +1791,7 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
         'manager_rate_percent': manager_rate_percent,
         'manager_salary_amount': manager_salary_amount,
         'net_profit_after_manager_salary': net_profit_after_manager_salary,
+        'profit_after_manager_salary': net_profit_after_manager_salary,
         'responsible_admin_user_id': responsible_admin.id if responsible_admin else None,
         'responsible_admin_name': responsible_admin.full_name if responsible_admin else None,
     }
@@ -1692,7 +1839,7 @@ async def export_employee_payroll_xlsx(location: str, date_from: date, date_to: 
     ws.append(['Точка', summary['location']])
     ws.append(['Период', f"{summary['date_from']} — {summary['date_to']}"])
     ws.append([])
-    ws.append(['Дата', 'Выручка', 'Возвраты', 'Чистая выручка', 'Выход', 'Бонус', 'Категории', 'Итого'])
+    ws.append(['Дата', 'Выручка', 'Возвраты', 'Выручка после возвратов', 'Выход', 'Бонус', 'Категории', 'Итого'])
     for cell in ws[5]:
         cell.font = Font(bold=True)
     for day in summary['days']:

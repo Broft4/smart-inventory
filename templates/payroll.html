@@ -98,19 +98,22 @@
             </summary>
             <div class="payroll-collapse-body">
                 <div class="summary-kpi-grid payroll-kpi-grid">
-                    <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Чистая выручка</span><strong id="manager-net-sales">0 ₽</strong></div>
+                    <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Выручка</span><strong id="manager-net-sales">0 ₽</strong></div>
+                    <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Возвраты</span><strong id="manager-returns">0 ₽</strong></div>
                     <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Себестоимость</span><strong id="manager-cost">0 ₽</strong></div>
                     <div class="summary-kpi-card warning"><span class="summary-kpi-label">Зарплаты сотрудников</span><strong id="manager-employee-salary">0 ₽</strong></div>
                     <div class="summary-kpi-card warning"><span class="summary-kpi-label">Расходы точки</span><strong id="manager-expenses">0 ₽</strong></div>
                     <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Прибыль до зарплаты админа</span><strong id="manager-profit">0 ₽</strong></div>
                     <div class="summary-kpi-card plus"><span class="summary-kpi-label">Зарплата админа</span><strong id="manager-salary">0 ₽</strong></div>
+                    <div class="summary-kpi-card plus"><span class="summary-kpi-label">Прибыль после зарплаты админа</span><strong id="manager-profit-after-manager">0 ₽</strong></div>
                 </div>
                 <div class="muted-text" id="manager-responsible-line"></div>
             </div>
         </details>
     </section>
 
-    <section class="category-card">
+    {% if user.role not in ['admin', 'superadmin'] %}
+    <section class="category-card" id="payroll-shifts-card">
         <details class="payroll-collapse" open>
             <summary class="report-summary-header payroll-collapse-summary"><div><h2>Смены</h2><p class="muted-text">По каждой смене — выручка, бонус и итог.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span></summary>
             <div class="payroll-collapse-body">
@@ -118,6 +121,7 @@
             </div>
         </details>
     </section>
+    {% endif %}
 
     <section class="category-card">
         <details class="payroll-collapse" open>
@@ -166,54 +170,6 @@
                 <div class="admin-toolbar-actions"><button id="save-settings-btn" type="button" class="btn primary btn-inline">Сохранить версию правил</button></div>
             </div>
         </details>
-    </section>
-
-    <section class="category-card hidden" id="admin-shifts-card">
-        <details class="payroll-collapse" open>
-            <summary class="report-summary-header payroll-collapse-summary"><div><h2>Календарь смен</h2><p class="muted-text">Админ и главный админ могут назначать смены по точке и дате.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span></summary>
-            <div class="payroll-collapse-body">
-                <div class="payroll-filter-grid shift-toolbar-grid">
-                    <label>Месяц<input type="month" id="shift-month-input"></label>
-                    <label>Дата смены<input type="date" id="shift-date-input"></label>
-                    <label>Сотрудник<select id="shift-employee-select"></select></label>
-                    <div class="shift-toolbar-action">
-                        <button id="add-shift-btn" type="button" class="btn primary btn-inline btn-with-loader">
-                            <span class="btn-loader hidden" aria-hidden="true"></span>
-                            <span class="btn-label">Назначить смену</span>
-                        </button>
-                        <p class="muted-text">Во время сохранения кнопка блокируется, чтобы не создать дубликат смены.</p>
-                    </div>
-                </div>
-                <div class="shift-calendar-scroller">
-                    <div class="shift-calendar-weekdays" aria-hidden="true">
-                        <span>Пн</span><span>Вт</span><span>Ср</span><span>Чт</span><span>Пт</span><span>Сб</span><span>Вс</span>
-                    </div>
-                    <div id="shift-calendar-grid" class="shift-calendar-grid"></div>
-                </div>
-            </div>
-        </details>
-        <div id="shift-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="shift-modal-title">
-            <div class="modal-card shift-modal-card">
-                <div class="modal-header">
-                    <div>
-                        <h3 id="shift-modal-title">Назначить смену</h3>
-                        <p class="muted-text">Быстрое добавление сотрудника прямо из календаря.</p>
-                    </div>
-                    <button type="button" class="modal-close-btn" id="shift-modal-close-btn" aria-label="Закрыть">×</button>
-                </div>
-                <div class="payroll-filter-grid shift-modal-grid">
-                    <label>Дата смены<input type="date" id="shift-modal-date-input"></label>
-                    <label>Сотрудник<select id="shift-modal-employee-select"></select></label>
-                </div>
-                <div class="modal-actions shift-modal-actions">
-                    <button type="button" class="btn secondary btn-inline" id="shift-modal-cancel-btn">Отмена</button>
-                    <button id="shift-modal-save-btn" type="button" class="btn primary btn-inline btn-with-loader">
-                        <span class="btn-loader hidden" aria-hidden="true"></span>
-                        <span class="btn-label">Назначить смену</span>
-                    </button>
-                </div>
-            </div>
-        </div>
     </section>
 
     <section class="category-card hidden" id="expenses-card">

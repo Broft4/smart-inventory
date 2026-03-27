@@ -93,6 +93,34 @@ FINAL_REPORT_TYPE = 'final'
 PERIOD_REPORT_TYPE = 'period'
 
 
+def _ms_client_enabled(token: str | None = None, *, location: str | None = None) -> bool:
+    enabled_attr = getattr(ms_client, "enabled", None)
+    if callable(enabled_attr):
+        for args, kwargs in (
+            ((token,), {'location': location}),
+            ((token,), {}),
+            ((), {'location': location}),
+            ((), {}),
+        ):
+            try:
+                return bool(enabled_attr(*args, **kwargs))
+            except TypeError:
+                continue
+    return bool(enabled_attr)
+
+
+async def _get_location_ms_credentials(location: str, db: AsyncSession | None = None) -> tuple[str | None, str | None]:
+    normalized = _normalize_location(location)
+    if db is None:
+        return None, None
+    point = await db.scalar(select(LocationPoint).where(LocationPoint.name == normalized).limit(1))
+    if not point:
+        return None, None
+    token = (point.ms_token or '').strip() or None
+    store_id = (point.ms_store_id or '').strip() or None
+    return token, store_id
+
+
 def _get_cached_stripped_inventory(location: str, raw_inventory: dict[str, Any]) -> dict[str, Any]:
     cache_key = _normalize_location(location)
     inventory_identity = id(raw_inventory)
@@ -307,20 +335,78 @@ def _strip_ignored_inventory_branches(inventory: dict[str, Any]) -> dict[str, An
     return {'location': inventory.get('location'), 'categories': categories}
 
 
+def _env_integration_rows() -> list[dict[str, str | None]]:
+    rows: list[dict[str, str | None]] = []
+    seen: set[str] = set()
+    shared_token = (settings.moysklad_token or '').strip() or None
+    for raw_name, raw_store_id in [
+        (settings.store_dubna, settings.store_dubna_id),
+        (settings.store_dmitrov, settings.store_dmitrov_id),
+    ]:
+        normalized = _normalize_location(raw_name or '') if raw_name else ''
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        rows.append({
+            'name': normalized,
+            'ms_token': shared_token,
+            'ms_store_id': (str(raw_store_id or '').strip() or None),
+            'ms_store_name': normalized,
+        })
+    return rows
+
+
+async def _sync_location_points_from_env(db: AsyncSession) -> None:
+    env_rows = _env_integration_rows()
+    if not env_rows:
+        return
+
+    existing_rows = (await db.scalars(select(LocationPoint).order_by(LocationPoint.id.asc()))).all()
+    existing_by_name = {_normalize_location(row.name): row for row in existing_rows}
+    dirty = False
+
+    for payload in env_rows:
+        point = existing_by_name.get(payload['name'])
+        if point is None:
+            db.add(LocationPoint(
+                name=payload['name'],
+                ms_token=payload['ms_token'],
+                ms_store_id=payload['ms_store_id'],
+                ms_store_name=payload['ms_store_name'],
+            ))
+            dirty = True
+            continue
+
+        next_token = payload['ms_token']
+        next_store_id = payload['ms_store_id']
+        next_store_name = payload['ms_store_name']
+        if (point.ms_token or None) != next_token:
+            point.ms_token = next_token
+            dirty = True
+        if (point.ms_store_id or None) != next_store_id:
+            point.ms_store_id = next_store_id
+            dirty = True
+        if (point.ms_store_name or None) != next_store_name:
+            point.ms_store_name = next_store_name
+            dirty = True
+
+    if dirty:
+        await db.commit()
+
+
 async def _ensure_default_location_points(db: AsyncSession) -> None:
+    await _sync_location_points_from_env(db)
+
     existing_count = await db.scalar(select(func.count()).select_from(LocationPoint))
     if (existing_count or 0) > 0:
         return
 
     candidates: list[tuple[str, str | None]] = []
     seen: set[str] = set()
-    for name, store_id in [
-        (settings.store_dubna, settings.store_dubna_id),
-        (settings.store_dmitrov, settings.store_dmitrov_id),
-    ]:
-        normalized = _normalize_location(name or '') if name else ''
+    for row in _env_integration_rows():
+        normalized = row['name'] or ''
         if normalized and normalized not in seen:
-            candidates.append((normalized, store_id))
+            candidates.append((normalized, row['ms_store_id']))
             seen.add(normalized)
 
     if not candidates:
@@ -682,7 +768,7 @@ async def prewarm_inventory_cache(location: str | None) -> None:
     if not location:
         return
     normalized = _normalize_location(location)
-    if ms_client.enabled:
+    if _ms_client_enabled():
         await ms_client.prewarm_inventory(normalized)
 
 
@@ -877,13 +963,19 @@ async def delete_user(user_id: int, db: AsyncSession, current_user: User) -> Del
     return DeleteResponse(success=True, message='Пользователь удалён.')
 
 
-async def _get_inventory_for(location: str) -> dict[str, Any]:
+async def _get_inventory_for(location: str, db: AsyncSession | None = None) -> dict[str, Any]:
     normalized = _normalize_location(location)
     started = monotonic()
-    if ms_client.enabled:
-        logger.info('Загрузка inventory началась. location=%s source=moysklad', normalized)
+    token, store_id = await _get_location_ms_credentials(normalized, db)
+    if _ms_client_enabled(token, location=normalized):
+        logger.info(
+            'Загрузка inventory началась. location=%s source=moysklad token_source=%s store_source=%s',
+            normalized,
+            'db' if token else 'fallback',
+            'db' if store_id else 'fallback',
+        )
         try:
-            inventory = await ms_client.get_inventory(normalized)
+            inventory = await ms_client.get_inventory(normalized, token=token, store_id=store_id)
             stripped = _get_cached_stripped_inventory(normalized, inventory)
             duration_ms = round((monotonic() - started) * 1000, 1)
             logger.info(
@@ -921,32 +1013,32 @@ async def _get_inventory_for(location: str) -> dict[str, Any]:
     return stripped
 
 
-async def _find_category(location: str, category_id: str) -> dict[str, Any]:
-    inventory = await _get_inventory_for(location)
+async def _find_category(location: str, category_id: str, db: AsyncSession | None = None) -> dict[str, Any]:
+    inventory = await _get_inventory_for(location, db=db)
     for category in inventory['categories']:
         if category['id'] == category_id:
             return category
     raise HTTPException(status_code=404, detail='Категория не найдена.')
 
 
-async def _find_subcategory(location: str, category_id: str, subcategory_id: str) -> dict[str, Any]:
-    category = await _find_category(location, category_id)
+async def _find_subcategory(location: str, category_id: str, subcategory_id: str, db: AsyncSession | None = None) -> dict[str, Any]:
+    category = await _find_category(location, category_id, db=db)
     for sub in category['subcategories']:
         if sub['id'] == subcategory_id:
             return sub
     raise HTTPException(status_code=404, detail='Подкатегория не найдена.')
 
 
-async def _find_target(location: str, target_id: str) -> tuple[str, str, str | None, str | None, str, str, float]:
-    inventory = await _get_inventory_for(location)
+async def _find_target(location: str, target_id: str, db: AsyncSession | None = None) -> tuple[str, str, str | None, str | None, str, str, float]:
+    inventory = await _get_inventory_for(location, db=db)
     target = _get_target_lookup(location, inventory).get(target_id)
     if target is not None:
         return target
     raise HTTPException(status_code=404, detail='Цель проверки не найдена.')
 
 
-async def get_inventory_diagnostics_details(location: str) -> list[dict[str, Any]]:
-    inventory = await _get_inventory_for(location)
+async def get_inventory_diagnostics_details(location: str, db: AsyncSession | None = None) -> list[dict[str, Any]]:
+    inventory = await _get_inventory_for(location, db=db)
     rows: list[dict[str, Any]] = []
     normalized_location = inventory.get('location') or _normalize_location(location)
 
@@ -990,8 +1082,8 @@ async def get_inventory_diagnostics_details(location: str) -> list[dict[str, Any
     return rows
 
 
-async def get_inventory_diagnostics_rows(location: str) -> list[dict[str, Any]]:
-    rows = await get_inventory_diagnostics_details(location)
+async def get_inventory_diagnostics_rows(location: str, db: AsyncSession | None = None) -> list[dict[str, Any]]:
+    rows = await get_inventory_diagnostics_details(location, db=db)
     return [
         {
             'location': row['location'],
@@ -1931,7 +2023,7 @@ async def get_cycle_targets(location: str, db: AsyncSession, target_date: date |
     normalized = _normalize_location(location)
     cycle = await _get_or_create_selection_cycle(normalized, db)
     resolved_target_date = _resolve_cycle_target_date(cycle.started_at, target_date)
-    inventory = await _get_inventory_for(normalized)
+    inventory = await _get_inventory_for(normalized, db=db)
     targets = await _resolve_selection_targets_for_date(normalized, cycle.cycle_version, resolved_target_date, db)
     previous_targets, previous_target_date = await _resolve_previous_selection_targets_for_date(
         normalized,
@@ -2084,7 +2176,7 @@ async def save_cycle_targets(payload: SaveCycleTargetsRequest, db: AsyncSession)
             target_date=target_date.isoformat(),
         )
 
-    inventory = await _get_inventory_for(normalized)
+    inventory = await _get_inventory_for(normalized, db=db)
 
     completed_subcategory_ids = await _load_completed_subcategory_ids_for_cycle(
         normalized,
@@ -2457,7 +2549,7 @@ async def _build_inventory_structure_for_report(
         rows_by_category_target[row.category_id][row.target_id] = row
 
     categories: list[CategoryModel] = []
-    inventory = await _get_inventory_for(normalized)
+    inventory = await _get_inventory_for(normalized, db=db)
     completed_subcategory_ids = await _load_completed_subcategory_ids_for_cycle(
         normalized,
         cycle_version,
@@ -2833,7 +2925,7 @@ async def assign_selection_to_user(report_id: int, category_id: str, target_type
     cycle = await _get_or_create_selection_cycle(report.location, db)
     assignments = await _load_assignments(report.location, cycle.cycle_version, db)
     targets = await _resolve_selection_targets_for_date(report.location, cycle.cycle_version, report.report_date, db)
-    inventory = await _get_inventory_for(report.location)
+    inventory = await _get_inventory_for(report.location, db=db)
     completed_subcategory_ids = await _load_completed_subcategory_ids_for_cycle(
         report.location,
         cycle.cycle_version,
@@ -2844,7 +2936,7 @@ async def assign_selection_to_user(report_id: int, category_id: str, target_type
     category_map, sub_map, item_map = _category_assignments_map(assignments)
     selected_category_ids, selected_subcategory_ids = _selection_target_maps(targets)
 
-    category = await _find_category(report.location, category_id)
+    category = await _find_category(report.location, category_id, db=db)
     category_assignment = category_map.get(category_id)
     sub_assignments = sub_map.get(category_id, {})
     item_assignments_by_sub = item_map.get(category_id, {})
@@ -2917,7 +3009,7 @@ async def assign_selection_to_user(report_id: int, category_id: str, target_type
         if category_id not in selected_category_ids and subcategory_id not in selected_subcategory_ids.get(category_id, set()):
             raise HTTPException(status_code=400, detail='Эта подкатегория не выбрана администратором для текущего цикла.')
 
-        subcategory = await _find_subcategory(report.location, category_id, subcategory_id)
+        subcategory = await _find_subcategory(report.location, category_id, subcategory_id, db=db)
         diagnostic_sub = category_is_diagnostic or subcategory['name'] == DEFAULT_SUBCATEGORY_NAME
         if diagnostic_sub:
             raise HTTPException(status_code=400, detail='Служебные ветки «Без категории/Без подкатегории» нельзя брать целиком. Выберите конкретные товары.')
@@ -2971,7 +3063,7 @@ async def assign_selection_to_user(report_id: int, category_id: str, target_type
         if category_id not in selected_category_ids and subcategory_id not in selected_subcategory_ids.get(category_id, set()):
             raise HTTPException(status_code=400, detail='Эта подкатегория не выбрана администратором для текущего цикла.')
 
-        subcategory = await _find_subcategory(report.location, category_id, subcategory_id)
+        subcategory = await _find_subcategory(report.location, category_id, subcategory_id, db=db)
         diagnostic_sub = category_is_diagnostic or subcategory['name'] == DEFAULT_SUBCATEGORY_NAME
         if not diagnostic_sub:
             raise HTTPException(status_code=400, detail='Поштучный выбор доступен только для служебных веток «Без категории/Без подкатегории».')
@@ -3161,7 +3253,7 @@ async def verify_item_or_category(data: VerifyRequest, db: AsyncSession, checked
     if await _is_employee_finished_report(report.id, checked_by_user.id, db):
         raise HTTPException(status_code=409, detail='Вы уже завершили свою ревизию на сегодня. Продолжить работу нельзя.')
 
-    category_id, category_name, subcategory_id, subcategory_name, target_type, target_name, expected_qty = await _find_target(report.location, data.target_id)
+    category_id, category_name, subcategory_id, subcategory_name, target_type, target_name, expected_qty = await _find_target(report.location, data.target_id, db=db)
     assignments = await _load_assignments(report.location, report.cycle_version, db)
     if not _user_can_verify_target(checked_by_user, report, category_id, subcategory_id, data.target_id, target_type, assignments):
         raise HTTPException(status_code=403, detail='Эта категория, подкатегория или товар не закреплены за вами.')
@@ -3609,8 +3701,9 @@ async def _get_report_number(report: Report, db: AsyncSession) -> int:
     return int(result or 0)
 
 
-async def _load_discrepancy_financials(location: str, results: list[CheckResult]) -> dict[str, dict[str, float | None]]:
-    if not ms_client.enabled:
+async def _load_discrepancy_financials(location: str, results: list[CheckResult], db: AsyncSession | None = None) -> dict[str, dict[str, float | None]]:
+    token, store_id = await _get_location_ms_credentials(location, db)
+    if not _ms_client_enabled(token, location=location):
         return {}
 
     unique_item_ids = sorted({
@@ -3626,7 +3719,7 @@ async def _load_discrepancy_financials(location: str, results: list[CheckResult]
     async def fetch(item_id: str) -> tuple[str, dict[str, float | None]]:
         async with semaphore:
             try:
-                values = await ms_client.get_item_financials(location, item_id)
+                values = await ms_client.get_item_financials(location, item_id, token=token, store_id=store_id)
             except Exception:
                 return item_id, {'cost_price': None, 'retail_price': None}
             return item_id, values
@@ -3676,7 +3769,7 @@ async def get_admin_period_report(location: str, date_from: date, date_to: date,
             employees=[],
         )
 
-    inventory = await _get_inventory_for(normalized)
+    inventory = await _get_inventory_for(normalized, db=db)
     report_ids = [row.id for row in reports]
     report_snapshots = await _load_report_target_snapshots_for_report_ids(report_ids, db)
     raw_results = [
@@ -3701,7 +3794,7 @@ async def get_admin_period_report(location: str, date_from: date, date_to: date,
         if row.checked_by_user_id is not None
     )
 
-    discrepancy_financials = await _load_discrepancy_financials(normalized, results)
+    discrepancy_financials = await _load_discrepancy_financials(normalized, results, db=db)
     historical_category_ids, historical_subcategory_ids, historical_item_ids = _report_history_target_maps(report_snapshots, results)
     report_scope_category_ids, report_scope_subcategory_ids, report_scope_category_names, report_scope_subcategory_labels = _report_selection_scope(
         report_snapshots,
@@ -4012,7 +4105,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
     await db.commit()
 
     targets = await _resolve_selection_targets_for_date(normalized, report.cycle_version, report.report_date, db)
-    inventory = await _get_inventory_for(normalized)
+    inventory = await _get_inventory_for(normalized, db=db)
 
     report_type = report.report_type or DAILY_REPORT_TYPE
     assignments: list[CategoryAssignment] = []
@@ -4061,7 +4154,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
                 results,
             )
 
-    discrepancy_financials = await _load_discrepancy_financials(normalized, results)
+    discrepancy_financials = await _load_discrepancy_financials(normalized, results, db=db)
     completed_before_report: dict[str, set[str]] = {}
     if report_type == DAILY_REPORT_TYPE:
         completed_before_report = await _load_completed_subcategory_ids_for_cycle(

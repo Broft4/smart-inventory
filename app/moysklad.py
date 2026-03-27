@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import sqlite3
 from dataclasses import dataclass
 from time import monotonic
 from typing import Any
@@ -24,6 +26,23 @@ class CacheEntry:
     expires_at: float
 
 
+def _normalize_location(value: str | None) -> str:
+    return str(value or '').strip().title()
+
+
+def _sqlite_db_path() -> str | None:
+    database_url = str(settings.database_url or '').strip()
+    prefix = 'sqlite+aiosqlite:///'
+    if not database_url.startswith(prefix):
+        return None
+    raw_path = database_url[len(prefix):]
+    if not raw_path:
+        return None
+    if raw_path.startswith('./'):
+        raw_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), raw_path[2:])
+    return os.path.abspath(raw_path)
+
+
 class MoySkladClient:
     def __init__(self) -> None:
         self.base_url = settings.ms_api_base_url.rstrip('/')
@@ -40,8 +59,8 @@ class MoySkladClient:
         self.folder_cache_ttl = max(1800, self.inventory_cache_ttl)
         self.assortment_item_cache_ttl = max(900, self.inventory_cache_ttl)
 
-        self._inventory_cache: dict[str, CacheEntry] = {}
-        self._inventory_locks: dict[str, asyncio.Lock] = {}
+        self._inventory_cache: dict[tuple[str, str | None], CacheEntry] = {}
+        self._inventory_locks: dict[tuple[str, str | None], asyncio.Lock] = {}
 
         self._folders_cache: CacheEntry | None = None
         self._folders_lock = asyncio.Lock()
@@ -55,7 +74,7 @@ class MoySkladClient:
         self._product_cache: dict[str, CacheEntry] = {}
         self._product_locks: dict[str, asyncio.Lock] = {}
 
-        self._financials_by_location_cache: dict[str, CacheEntry] = {}
+        self._financials_by_location_cache: dict[tuple[str, str | None], CacheEntry] = {}
         self._financial_result_cache: dict[str, CacheEntry] = {}
         self._financial_result_locks: dict[str, asyncio.Lock] = {}
 
@@ -66,20 +85,80 @@ class MoySkladClient:
         self.financial_cache_ttl = max(120, int(settings.ms_financial_cache_ttl_seconds or 900))
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
+        self._location_config_cache: dict[str, CacheEntry] = {}
 
-    @property
-    def enabled(self) -> bool:
-        return bool(settings.moysklad_token)
+    def _load_location_config_from_db(self, location: str) -> dict[str, str | None] | None:
+        db_path = _sqlite_db_path()
+        normalized = _normalize_location(location)
+        if not db_path or not normalized or not os.path.exists(db_path):
+            return None
 
-    @property
-    def headers(self) -> dict[str, str]:
-        if not self.enabled:
-            raise RuntimeError('MOYSKLAD_TOKEN не задан. Клиент МоегоСклада недоступен.')
+        conn = None
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                'SELECT name, ms_token, ms_store_id, ms_store_name FROM location_points WHERE lower(name) = lower(?) LIMIT 1',
+                (normalized,),
+            ).fetchone()
+        except Exception:
+            logger.exception('Не удалось прочитать настройки интеграции точки %s из БД.', normalized)
+            return None
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        if row is None:
+            return None
         return {
-            'Authorization': f'Bearer {settings.moysklad_token}',
+            'name': _normalize_location(row['name']),
+            'token': (str(row['ms_token'] or '').strip() or None),
+            'store_id': (str(row['ms_store_id'] or '').strip() or None),
+            'store_name': (str(row['ms_store_name'] or '').strip() or None),
+        }
+
+    def _get_location_config(self, location: str) -> dict[str, str | None] | None:
+        normalized = _normalize_location(location)
+        cached = self._location_config_cache.get(normalized)
+        if self._cache_alive(cached):
+            return cached.value
+        value = self._load_location_config_from_db(normalized)
+        self._location_config_cache[normalized] = CacheEntry(value=value, expires_at=monotonic() + 120)
+        return value
+
+    def _resolve_token(self, token: str | None = None, *, location: str | None = None) -> str | None:
+        explicit = str(token or '').strip()
+        if explicit:
+            return explicit
+        if location:
+            db_token = str((self._get_location_config(location) or {}).get('token') or '').strip()
+            if db_token:
+                return db_token
+        normalized = str(settings.moysklad_token or '').strip()
+        return normalized or None
+
+    def enabled(self, token: str | None = None, *, location: str | None = None) -> bool:
+        return bool(self._resolve_token(token, location=location))
+
+    def headers(self, token: str | None = None, *, location: str | None = None) -> dict[str, str]:
+        resolved_token = self._resolve_token(token, location=location)
+        if not resolved_token:
+            raise RuntimeError('Токен МоегоСклада не задан. Клиент МоегоСклада недоступен.')
+        return {
+            'Authorization': f'Bearer {resolved_token}',
             'Accept-Encoding': 'gzip',
             'Content-Type': 'application/json',
         }
+
+    def _inventory_cache_key(self, location: str, store_id: str | None = None) -> tuple[str, str | None]:
+        return _normalize_location(location), (str(store_id).strip() or None)
+
+    def _financial_cache_prefix(self, location: str, store_id: str | None = None) -> str:
+        normalized, normalized_store_id = self._inventory_cache_key(location, store_id)
+        return f"{normalized.lower()}::{normalized_store_id or '-'}"
 
     def _build_timeout(self) -> httpx.Timeout:
         connect_timeout = min(10.0, self.request_timeout)
@@ -142,6 +221,8 @@ class MoySkladClient:
         *,
         params: dict[str, Any] | None = None,
         absolute: bool = False,
+        token: str | None = None,
+        location: str | None = None,
     ) -> dict[str, Any]:
         url = url_or_endpoint if absolute else f"{self.base_url}/{url_or_endpoint.lstrip('/')}"
         client = await self._get_client()
@@ -150,7 +231,7 @@ class MoySkladClient:
 
         for attempt in range(1, self.retry_attempts + 1):
             try:
-                response = await client.get(url, headers=self.headers, params=params)
+                response = await client.get(url, headers=self.headers(token, location=location), params=params)
 
                 if response.status_code == 429:
                     delay = self._get_retry_delay(response, attempt)
@@ -230,20 +311,20 @@ class MoySkladClient:
             raise last_error
         raise RuntimeError('Не удалось выполнить запрос к МойСклад.')
 
-    async def get(self, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return await self._request_json(endpoint, params=params, absolute=False)
+    async def get(self, endpoint: str, params: dict[str, Any] | None = None, token: str | None = None, location: str | None = None) -> dict[str, Any]:
+        return await self._request_json(endpoint, params=params, absolute=False, token=token, location=location)
 
-    async def get_absolute(self, url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return await self._request_json(url, params=params, absolute=True)
+    async def get_absolute(self, url: str, params: dict[str, Any] | None = None, token: str | None = None, location: str | None = None) -> dict[str, Any]:
+        return await self._request_json(url, params=params, absolute=True, token=token, location=location)
 
-    async def get_all_pages(self, endpoint: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    async def get_all_pages(self, endpoint: str, params: dict[str, Any] | None = None, token: str | None = None, location: str | None = None) -> list[dict[str, Any]]:
         params = dict(params or {})
         params['limit'] = 1000
         params['offset'] = 0
         all_rows: list[dict[str, Any]] = []
 
         while True:
-            data = await self.get(endpoint, params=params)
+            data = await self.get(endpoint, params=params, token=token, location=location)
             rows = data.get('rows', [])
             all_rows.extend(rows)
             if len(rows) < 1000:
@@ -253,7 +334,7 @@ class MoySkladClient:
         logger.info('Получено %s записей из %s', len(all_rows), endpoint)
         return all_rows
 
-    async def get_stores_ids(self) -> dict[str, str]:
+    async def get_stores_ids(self, token: str | None = None, location: str | None = None) -> dict[str, str]:
         if self._cache_alive(self._stores_cache):
             return self._stores_cache.value
 
@@ -261,19 +342,14 @@ class MoySkladClient:
             if self._cache_alive(self._stores_cache):
                 return self._stores_cache.value
 
-            data = await self.get('entity/store')
+            data = await self.get('entity/store', token=token, location=location)
             stores_mapping: dict[str, str] = {}
-            target_names = {
-                (settings.store_dmitrov or '').strip().lower(),
-                (settings.store_dubna or '').strip().lower(),
-            }
 
             for store in data.get('rows', []):
                 store_name = (store.get('name') or '').strip()
-                if store_name.lower() in target_names:
-                    store_id = store.get('id')
-                    if store_id:
-                        stores_mapping[store_name] = store_id
+                store_id = store.get('id')
+                if store_name and store_id:
+                    stores_mapping[store_name] = store_id
 
             self._stores_cache = CacheEntry(
                 value=stores_mapping,
@@ -281,26 +357,37 @@ class MoySkladClient:
             )
             return stores_mapping
 
-    async def _resolve_store(self, location: str) -> tuple[str, str]:
-        normalized = location.strip().title()
+    async def _resolve_store(self, location: str, *, token: str | None = None, store_id: str | None = None) -> tuple[str, str]:
+        normalized = _normalize_location(location)
+        normalized_store_id = str(store_id or '').strip() or None
+        if normalized_store_id:
+            return normalized, normalized_store_id
 
-        if normalized.lower() == (settings.store_dmitrov or '').lower():
+        config = self._get_location_config(normalized) or {}
+        db_store_id = str(config.get('store_id') or '').strip() or None
+        if db_store_id:
+            return normalized, db_store_id
+
+        if normalized.lower() == (settings.store_dmitrov or '').strip().lower():
             if settings.store_dmitrov_id:
                 return normalized, settings.store_dmitrov_id
-        elif normalized.lower() == (settings.store_dubna or '').lower():
+        elif normalized.lower() == (settings.store_dubna or '').strip().lower():
             if settings.store_dubna_id:
                 return normalized, settings.store_dubna_id
-        else:
-            raise ValueError(f'Неизвестная точка: {location}')
 
-        stores = await self.get_stores_ids()
-        for name, store_id in stores.items():
-            if name.lower() == normalized.lower():
-                return normalized, store_id
+        lookup_names = {normalized.lower()}
+        db_store_name = str(config.get('store_name') or '').strip().lower()
+        if db_store_name:
+            lookup_names.add(db_store_name)
+
+        stores = await self.get_stores_ids(token=token, location=normalized)
+        for name, resolved_store_id in stores.items():
+            if str(name or '').strip().lower() in lookup_names:
+                return normalized, resolved_store_id
 
         raise ValueError(f'Для точки {location} не найден склад в МойСклад.')
 
-    async def _get_folder_map(self) -> dict[str, dict[str, Any]]:
+    async def _get_folder_map(self, token: str | None = None, location: str | None = None) -> dict[str, dict[str, Any]]:
         if self._cache_alive(self._folders_cache):
             return self._folders_cache.value
 
@@ -308,7 +395,7 @@ class MoySkladClient:
             if self._cache_alive(self._folders_cache):
                 return self._folders_cache.value
 
-            rows = await self.get_all_pages('entity/productfolder')
+            rows = await self.get_all_pages('entity/productfolder', token=token, location=location)
             folder_by_id: dict[str, dict[str, Any]] = {}
 
             for folder in rows:
@@ -323,7 +410,7 @@ class MoySkladClient:
             logger.info('Закешировано %s папок МоегоСклада', len(folder_by_id))
             return folder_by_id
 
-    async def _get_assortment_row_by_meta(self, assortment_meta: dict[str, Any] | None) -> tuple[dict[str, Any] | None, str | None]:
+    async def _get_assortment_row_by_meta(self, assortment_meta: dict[str, Any] | None, *, token: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
         if not assortment_meta:
             return None, None
 
@@ -345,10 +432,10 @@ class MoySkladClient:
 
             try:
                 if href:
-                    row = await self.get_absolute(href)
+                    row = await self.get_absolute(href, token=token)
                     source = 'assortment.meta.href'
                 elif assortment_id:
-                    row = await self.get(f'entity/assortment/{assortment_id}')
+                    row = await self.get(f'entity/assortment/{assortment_id}', token=token)
                     source = 'assortment.id'
                 else:
                     return None, None
@@ -393,6 +480,8 @@ class MoySkladClient:
         self,
         stock_row: dict[str, Any],
         folder_by_id: dict[str, dict[str, Any]],
+        *,
+        token: str | None = None,
     ) -> tuple[str | None, dict[str, Any]]:
         diagnostics: dict[str, Any] = {
             'folder_source': None,
@@ -411,7 +500,7 @@ class MoySkladClient:
                     return folder_id, diagnostics
 
         assortment_meta = (stock_row.get('assortment') or {}).get('meta') or {}
-        assortment_row, lookup_source = await self._get_assortment_row_by_meta(assortment_meta)
+        assortment_row, lookup_source = await self._get_assortment_row_by_meta(assortment_meta, token=token)
         diagnostics['assortment_lookup'] = lookup_source or 'не найдено'
         diagnostics['assortment_found'] = bool(assortment_row)
 
@@ -524,10 +613,10 @@ class MoySkladClient:
 
             try:
                 if href:
-                    row = await self.get_absolute(href)
+                    row = await self.get_absolute(href, token=token)
                     source = f'{entity_name}.meta.href'
                 elif entity_id:
-                    row = await self.get(f'entity/{entity_name}/{entity_id}')
+                    row = await self.get(f'entity/{entity_name}/{entity_id}', token=token)
                     source = f'{entity_name}.id'
                 else:
                     return None, None
@@ -541,10 +630,10 @@ class MoySkladClient:
             )
             return row, source
 
-    async def _get_product_row_by_meta(self, product_meta: dict[str, Any] | None) -> tuple[dict[str, Any] | None, str | None]:
-        return await self._get_entity_by_meta(product_meta, cache=self._product_cache, locks=self._product_locks, entity_name='product')
+    async def _get_product_row_by_meta(self, product_meta: dict[str, Any] | None, *, token: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
+        return await self._get_entity_by_meta(product_meta, cache=self._product_cache, locks=self._product_locks, entity_name='product', token=token)
 
-    async def _search_assortment_row_by_code(self, code: str | None) -> tuple[dict[str, Any] | None, str | None]:
+    async def _search_assortment_row_by_code(self, code: str | None, *, token: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
         normalized_code = (code or '').strip()
         if not normalized_code:
             return None, None
@@ -568,6 +657,7 @@ class MoySkladClient:
                         'filter': f'code={normalized_code}',
                         'limit': 100,
                     },
+                    token=token,
                 )
                 rows = data.get('rows') or []
                 normalized_code_lower = normalized_code.lower()
@@ -602,9 +692,9 @@ class MoySkladClient:
             'assortment_href': assortment_meta.get('href'),
         }
 
-    def _get_financial_seed(self, location: str, item_id: str) -> dict[str, Any] | None:
-        normalized = location.strip().title()
-        cached = self._financials_by_location_cache.get(normalized)
+    def _get_financial_seed(self, location: str, item_id: str, *, store_id: str | None = None) -> dict[str, Any] | None:
+        cache_key = self._inventory_cache_key(location, store_id)
+        cached = self._financials_by_location_cache.get(cache_key)
         if self._cache_alive(cached):
             return (cached.value or {}).get(item_id)
         return None
@@ -660,12 +750,12 @@ class MoySkladClient:
                 break
         return cost_price, retail_price
 
-    async def get_item_financials(self, location: str, item_id: str) -> dict[str, float | None]:
+    async def get_item_financials(self, location: str, item_id: str, *, token: str | None = None, store_id: str | None = None) -> dict[str, float | None]:
         if not item_id:
             return {'cost_price': None, 'retail_price': None}
 
-        normalized_location = location.strip().title()
-        cache_key = f"{normalized_location.lower()}::{item_id}"
+        normalized_location, normalized_store_id = self._inventory_cache_key(location, store_id)
+        cache_key = f"{self._financial_cache_prefix(normalized_location, normalized_store_id)}::{item_id}"
         cached = self._financial_result_cache.get(cache_key)
         if self._cache_alive(cached):
             return cached.value
@@ -676,13 +766,13 @@ class MoySkladClient:
             if self._cache_alive(cached):
                 return cached.value
 
-            seed = self._get_financial_seed(normalized_location, item_id)
+            seed = self._get_financial_seed(normalized_location, item_id, store_id=normalized_store_id)
             if seed is None:
                 try:
-                    await self.get_inventory(normalized_location)
+                    await self.get_inventory(normalized_location, token=token, store_id=normalized_store_id)
                 except Exception:
                     logger.exception('Не удалось прогреть инвентарь для финансов товара %s (%s)', item_id, normalized_location)
-                seed = self._get_financial_seed(normalized_location, item_id)
+                seed = self._get_financial_seed(normalized_location, item_id, store_id=normalized_store_id)
 
             retail_price = seed.get('retail_price') if seed else None
             code = (seed or {}).get('code')
@@ -696,16 +786,16 @@ class MoySkladClient:
             elif item_id:
                 assortment_meta = {'id': item_id}
 
-            assortment_row, assortment_source = await self._get_assortment_row_by_meta(assortment_meta)
+            assortment_row, assortment_source = await self._get_assortment_row_by_meta(assortment_meta, token=token)
             product_meta = assortment_row.get('product') if isinstance((assortment_row or {}).get('product'), dict) else None
-            product_row, _ = await self._get_product_row_by_meta((product_meta or {}).get('meta') if isinstance(product_meta, dict) else None)
+            product_row, _ = await self._get_product_row_by_meta((product_meta or {}).get('meta') if isinstance(product_meta, dict) else None, token=token)
 
             cost_price, fallback_retail_price = self._extract_financials_from_sources(assortment_row, product_row, product_meta)
 
             if cost_price is None and code:
-                search_row, search_source = await self._search_assortment_row_by_code(code)
+                search_row, search_source = await self._search_assortment_row_by_code(code, token=token)
                 search_product_meta = search_row.get('product') if isinstance((search_row or {}).get('product'), dict) else None
-                search_product_row, _ = await self._get_product_row_by_meta((search_product_meta or {}).get('meta') if isinstance(search_product_meta, dict) else None)
+                search_product_row, _ = await self._get_product_row_by_meta((search_product_meta or {}).get('meta') if isinstance(search_product_meta, dict) else None, token=token)
                 searched_cost_price, searched_retail_price = self._extract_financials_from_sources(search_row, search_product_row, search_product_meta)
                 if searched_cost_price is not None:
                     cost_price = searched_cost_price
@@ -736,15 +826,16 @@ class MoySkladClient:
             )
             return result
 
-    async def _build_inventory(self, location: str) -> dict[str, Any]:
-        normalized, store_id = await self._resolve_store(location)
-        store_href = f'{self.base_url}/entity/store/{store_id}'
+    async def _build_inventory(self, location: str, *, token: str | None = None, store_id: str | None = None) -> dict[str, Any]:
+        normalized, resolved_store_id = await self._resolve_store(location, token=token, store_id=store_id)
+        store_href = f'{self.base_url}/entity/store/{resolved_store_id}'
 
         folder_by_id, stock_rows = await asyncio.gather(
-            self._get_folder_map(),
+            self._get_folder_map(token=token, location=normalized),
             self.get_all_pages(
                 'report/stock/all',
                 params={'filter': f'stockMode=all;quantityMode=all;store={store_href}'},
+                token=token,
             ),
         )
 
@@ -757,7 +848,7 @@ class MoySkladClient:
             expected_qty = self._extract_expected_qty(stock_row)
 
             async with semaphore:
-                folder_id, diagnostics = await self._extract_folder_id(stock_row, folder_by_id)
+                folder_id, diagnostics = await self._extract_folder_id(stock_row, folder_by_id, token=token)
 
             folder_chain = self._resolve_folder_chain(folder_id, folder_by_id)
             item_diagnostics = self._build_item_diagnostics(stock_row, diagnostics, folder_id, folder_chain)
@@ -829,7 +920,8 @@ class MoySkladClient:
                 'subcategories': subcategories,
             })
 
-        self._financials_by_location_cache[normalized] = CacheEntry(
+        financial_cache_key = self._inventory_cache_key(normalized, resolved_store_id)
+        self._financials_by_location_cache[financial_cache_key] = CacheEntry(
             value=financial_index,
             expires_at=monotonic() + self.inventory_cache_ttl,
         )
@@ -837,24 +929,25 @@ class MoySkladClient:
         logger.info('Для точки %s собрано %s категорий и %s товаров', normalized, len(categories), len(stock_rows))
         return {'location': normalized, 'categories': categories}
 
-    async def get_inventory(self, location: str) -> dict[str, Any]:
-        normalized = location.strip().title()
-        cached = self._inventory_cache.get(normalized)
+    async def get_inventory(self, location: str, *, token: str | None = None, store_id: str | None = None) -> dict[str, Any]:
+        normalized, normalized_store_id = self._inventory_cache_key(location, store_id)
+        cache_key = self._inventory_cache_key(normalized, normalized_store_id)
+        cached = self._inventory_cache.get(cache_key)
         if self._cache_alive(cached):
             logger.debug('Inventory cache hit. location=%s', normalized)
             return cached.value
 
-        lock = self._inventory_locks.setdefault(normalized, asyncio.Lock())
+        lock = self._inventory_locks.setdefault(cache_key, asyncio.Lock())
         async with lock:
-            cached = self._inventory_cache.get(normalized)
+            cached = self._inventory_cache.get(cache_key)
             if self._cache_alive(cached):
                 logger.debug('Inventory cache hit after lock. location=%s', normalized)
                 return cached.value
 
             started = monotonic()
             logger.info('Inventory cache miss. Начинаем полную сборку. location=%s ttl_seconds=%s', normalized, self.inventory_cache_ttl)
-            inventory = await self._build_inventory(normalized)
-            self._inventory_cache[normalized] = CacheEntry(
+            inventory = await self._build_inventory(normalized, token=token, store_id=normalized_store_id)
+            self._inventory_cache[cache_key] = CacheEntry(
                 value=inventory,
                 expires_at=monotonic() + self.inventory_cache_ttl,
             )
@@ -875,22 +968,26 @@ class MoySkladClient:
             self._financials_by_location_cache.clear()
             self._financial_result_cache.clear()
             self._financial_result_locks.clear()
+            self._location_config_cache.clear()
             return
 
-        normalized = location.strip().title()
+        normalized = _normalize_location(location)
         normalized_prefix = f"{normalized.lower()}::"
-        self._inventory_cache.pop(normalized, None)
-        self._inventory_locks.pop(normalized, None)
-        self._financials_by_location_cache.pop(normalized, None)
+        for key in [key for key in self._inventory_cache if isinstance(key, tuple) and key[0] == normalized]:
+            self._inventory_cache.pop(key, None)
+            self._inventory_locks.pop(key, None)
+        for key in [key for key in self._financials_by_location_cache if isinstance(key, tuple) and key[0] == normalized]:
+            self._financials_by_location_cache.pop(key, None)
         for key in [key for key in self._financial_result_cache if key.startswith(normalized_prefix)]:
             self._financial_result_cache.pop(key, None)
             self._financial_result_locks.pop(key, None)
+        self._location_config_cache.pop(normalized, None)
 
-    async def prewarm_inventory(self, location: str) -> None:
-        if not self.enabled or not location:
+    async def prewarm_inventory(self, location: str, *, token: str | None = None, store_id: str | None = None) -> None:
+        if not self.enabled(token, location=location) or not location:
             return
         try:
-            await self.get_inventory(location)
+            await self.get_inventory(location, token=token, store_id=store_id)
         except Exception:
             logger.exception('Не удалось прогреть кеш МоегоСклада для точки %s', location)
 
