@@ -1076,6 +1076,43 @@ def _ensure_other_category_bucket(category_rows: dict[str, CategoryDocMetrics]) 
     )
 
 
+def _iter_point_reference_candidates(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    collected: list[dict[str, Any]] = []
+    seen: set[int] = set()
+
+    def add(candidate: Any) -> None:
+        if not isinstance(candidate, dict):
+            return
+        marker = id(candidate)
+        if marker in seen:
+            return
+        seen.add(marker)
+        collected.append(candidate)
+
+    def add_store_refs(container: dict[str, Any] | None) -> None:
+        if not isinstance(container, dict):
+            return
+        add(container.get('store'))
+        add(container.get('retailStore'))
+        add(container.get('retailstore'))
+
+    add_store_refs(doc)
+
+    retail_shift = doc.get('retailShift')
+    add(retail_shift)
+    add_store_refs(retail_shift if isinstance(retail_shift, dict) else None)
+
+    demand = doc.get('demand')
+    add(demand)
+    if isinstance(demand, dict):
+        add_store_refs(demand)
+        demand_shift = demand.get('retailShift')
+        add(demand_shift)
+        add_store_refs(demand_shift if isinstance(demand_shift, dict) else None)
+
+    return collected
+
+
 def _doc_matches_point(doc: dict[str, Any], point: LocationPoint) -> bool:
     if doc.get('applicable') is False:
         return False
@@ -1088,12 +1125,9 @@ def _doc_matches_point(doc: dict[str, Any], point: LocationPoint) -> bool:
     if not point_ids and not point_names:
         return True
 
-    candidates = [doc.get('store'), doc.get('retailStore')]
     candidate_names: set[str] = set()
     candidate_ids: set[str] = set()
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            continue
+    for candidate in _iter_point_reference_candidates(doc):
         candidate_id = _extract_id(candidate)
         if candidate_id:
             candidate_ids.add(candidate_id)
@@ -1130,7 +1164,7 @@ async def _load_point_sales_metrics(point: LocationPoint, date_from: date, date_
                 date_from,
                 date_to,
                 point,
-                expand='store,retailStore,retailShift',
+                expand='store,retailStore,retailShift,retailShift.store,retailShift.retailStore',
                 include_positions=True,
                 positions_expand='assortment,assortment.productFolder',
             ),
@@ -1139,7 +1173,7 @@ async def _load_point_sales_metrics(point: LocationPoint, date_from: date, date_
                 date_from,
                 date_to,
                 point,
-                expand='store,retailStore',
+                expand='store,retailStore,retailShift,retailShift.store,retailShift.retailStore,demand,demand.store,demand.retailStore,demand.retailShift,demand.retailShift.store,demand.retailShift.retailStore',
                 include_positions=True,
                 positions_expand='assortment,assortment.productFolder',
             ),

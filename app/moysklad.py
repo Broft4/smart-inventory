@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import date
 from time import monotonic
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 
@@ -202,7 +202,21 @@ class MoySkladClient:
         path = urlparse(href).path.rstrip('/')
         if not path:
             return None
-        return path.split('/')[-1]
+        return self._normalize_entity_id(path.split('/')[-1])
+
+    def _normalize_entity_id(self, value: Any) -> str | None:
+        raw = str(value or '').strip()
+        if not raw:
+            return None
+        raw = raw.split('?', 1)[0].split('#', 1)[0].strip().rstrip('/')
+        return raw or None
+
+    def _sanitize_meta_href(self, href: str | None) -> str | None:
+        if not href:
+            return None
+        parsed = urlparse(href)
+        sanitized = parsed._replace(query='', fragment='')
+        return urlunparse(sanitized)
 
     def _get_retry_delay(self, response: httpx.Response, attempt: int) -> float:
         retry_after = response.headers.get('X-Lognex-Retry-TimeInterval') or response.headers.get('X-Lognex-Retry-After')
@@ -284,13 +298,22 @@ class MoySkladClient:
             except httpx.HTTPStatusError as exc:
                 last_error = exc
                 status_code = exc.response.status_code if exc.response is not None else 'unknown'
-                logger.exception(
-                    'HTTP-ошибка МойСклад %s для %s на попытке %s/%s.',
-                    status_code,
-                    url,
-                    attempt,
-                    self.retry_attempts,
-                )
+                if status_code == 404:
+                    logger.warning(
+                        'HTTP-ошибка МойСклад %s для %s на попытке %s/%s.',
+                        status_code,
+                        url,
+                        attempt,
+                        self.retry_attempts,
+                    )
+                else:
+                    logger.exception(
+                        'HTTP-ошибка МойСклад %s для %s на попытке %s/%s.',
+                        status_code,
+                        url,
+                        attempt,
+                        self.retry_attempts,
+                    )
                 raise
 
             except httpx.RequestError as exc:
@@ -537,8 +560,8 @@ class MoySkladClient:
             return None, None
 
         href = assortment_meta.get('href')
-        assortment_id = assortment_meta.get('id') or self._extract_id_from_href(href)
-        cache_key = href or assortment_id
+        assortment_id = self._normalize_entity_id(assortment_meta.get('id')) or self._extract_id_from_href(href)
+        cache_key = self._sanitize_meta_href(href) or assortment_id
         if not cache_key:
             return None, None
 
@@ -554,11 +577,36 @@ class MoySkladClient:
 
             try:
                 if href:
-                    row = await self.get_absolute(href, token=token)
-                    source = 'assortment.meta.href'
+                    sanitized_href = self._sanitize_meta_href(href)
+                    try:
+                        row = await self.get_absolute(sanitized_href or href, token=token)
+                        source = 'assortment.meta.href'
+                    except httpx.HTTPStatusError as exc:
+                        if exc.response is None or exc.response.status_code not in {400, 404}:
+                            raise
+                        if not assortment_id:
+                            raise
+                        data = await self.get(
+                            'entity/assortment',
+                            params={'filter': f'id={assortment_id}', 'limit': 1},
+                            token=token,
+                        )
+                        rows = data.get('rows') or []
+                        row = rows[0] if rows else None
+                        if row is None:
+                            return None, None
+                        source = 'assortment.filter.id'
                 elif assortment_id:
-                    row = await self.get(f'entity/assortment/{assortment_id}', token=token)
-                    source = 'assortment.id'
+                    data = await self.get(
+                        'entity/assortment',
+                        params={'filter': f'id={assortment_id}', 'limit': 1},
+                        token=token,
+                    )
+                    rows = data.get('rows') or []
+                    row = rows[0] if rows else None
+                    if row is None:
+                        return None, None
+                    source = 'assortment.filter.id'
                 else:
                     return None, None
             except httpx.HTTPError:
@@ -700,7 +748,7 @@ class MoySkladClient:
 
     def _extract_item_identity(self, location: str, stock_row: dict[str, Any]) -> tuple[str, str]:
         assortment_meta = (stock_row.get('assortment') or {}).get('meta') or {}
-        assortment_id = assortment_meta.get('id') or self._extract_id_from_href(assortment_meta.get('href'))
+        assortment_id = self._normalize_entity_id(assortment_meta.get('id')) or self._extract_id_from_href(assortment_meta.get('href'))
         code = (stock_row.get('code') or '').strip()
         item_name = (stock_row.get('name') or code or 'Без названия').strip()
         item_id = assortment_id or code or f"{location.lower()}-{item_name.lower().replace(' ', '-')}"
@@ -713,13 +761,13 @@ class MoySkladClient:
         except (TypeError, ValueError):
             return 0.0
 
-    async def _get_entity_by_meta(self, meta: dict[str, Any] | None, *, cache: dict[str, CacheEntry], locks: dict[str, asyncio.Lock], entity_name: str) -> tuple[dict[str, Any] | None, str | None]:
+    async def _get_entity_by_meta(self, meta: dict[str, Any] | None, *, cache: dict[str, CacheEntry], locks: dict[str, asyncio.Lock], entity_name: str, token: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
         if not meta:
             return None, None
 
         href = meta.get('href')
-        entity_id = meta.get('id') or self._extract_id_from_href(href)
-        cache_key = href or entity_id
+        entity_id = self._normalize_entity_id(meta.get('id')) or self._extract_id_from_href(href)
+        cache_key = self._sanitize_meta_href(href) or entity_id
         if not cache_key:
             return None, None
 
@@ -735,7 +783,7 @@ class MoySkladClient:
 
             try:
                 if href:
-                    row = await self.get_absolute(href, token=token)
+                    row = await self.get_absolute(self._sanitize_meta_href(href) or href, token=token)
                     source = f'{entity_name}.meta.href'
                 elif entity_id:
                     row = await self.get(f'entity/{entity_name}/{entity_id}', token=token)
@@ -810,7 +858,7 @@ class MoySkladClient:
             'item_id': item_id,
             'code': code,
             'retail_price': self._extract_stock_retail_price(stock_row),
-            'assortment_id': assortment_meta.get('id') or self._extract_id_from_href(assortment_meta.get('href')),
+            'assortment_id': self._normalize_entity_id(assortment_meta.get('id')) or self._extract_id_from_href(assortment_meta.get('href')),
             'assortment_href': assortment_meta.get('href'),
         }
 
@@ -832,6 +880,12 @@ class MoySkladClient:
             return None
         return round(amount / 100.0, 2)
 
+    def _extract_price_type_name(self, entry: dict[str, Any]) -> str:
+        price_type = entry.get('priceType')
+        if isinstance(price_type, dict):
+            return str(price_type.get('name') or price_type.get('meta', {}).get('name') or '').strip().lower()
+        return str(price_type or entry.get('priceTypeName') or entry.get('name') or '').strip().lower()
+
     def _extract_sale_price_from_source(self, source: dict[str, Any] | None) -> float | None:
         if not source:
             return None
@@ -841,18 +895,23 @@ class MoySkladClient:
             sale_prices = sale_prices.get('rows') or []
 
         entries: list[dict[str, Any]] = [entry for entry in sale_prices if isinstance(entry, dict)]
+        direct_price = self._normalize_money_value(source.get('salePrice') or source.get('price'))
         if not entries:
-            direct_price = self._normalize_money_value(source.get('salePrice') or source.get('price'))
             return direct_price
 
+        preferred_keywords = ('цена продажи', 'продаж', 'рознич', 'retail', 'sale')
         preferred = None
         for entry in entries:
-            price_type = str(entry.get('priceType') or '').lower()
-            if 'продаж' in price_type:
+            if self._normalize_money_value(entry) in {None, 0.0}:
+                continue
+            price_type = self._extract_price_type_name(entry)
+            if any(keyword in price_type for keyword in preferred_keywords):
                 preferred = entry
                 break
 
-        candidate = preferred or next((entry for entry in entries if self._normalize_money_value(entry) not in {None, 0.0}), None) or entries[0]
+        candidate = preferred or next((entry for entry in entries if self._normalize_money_value(entry) not in {None, 0.0}), None)
+        if candidate is None:
+            return direct_price if direct_price is not None else self._normalize_money_value(entries[0])
         return self._normalize_money_value(candidate)
 
     def _extract_buy_price_from_source(self, source: dict[str, Any] | None) -> float | None:
@@ -938,9 +997,13 @@ class MoySkladClient:
                     code,
                 )
 
+            resolved_retail_price = retail_price
+            if resolved_retail_price in {None, 0.0}:
+                resolved_retail_price = fallback_retail_price
+
             result = {
                 'cost_price': cost_price,
-                'retail_price': retail_price if retail_price is not None else fallback_retail_price,
+                'retail_price': resolved_retail_price,
             }
             self._financial_result_cache[cache_key] = CacheEntry(
                 value=result,
