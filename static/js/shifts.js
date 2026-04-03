@@ -74,6 +74,16 @@ function monthLabel(monthValue) {
     return new Intl.DateTimeFormat('ru-RU', { month: 'long', year: 'numeric' }).format(new Date(year, month - 1, 1));
 }
 
+function isMobileCompactMode() {
+    return window.matchMedia('(max-width: 640px)').matches;
+}
+
+function initialsFromName(value) {
+    const parts = String(value || '').trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return '—';
+    return parts.slice(0, 2).map(part => part[0]?.toUpperCase() || '').join('');
+}
+
 function formatDateRu(iso) {
     if (!iso) return '';
     const date = new Date(`${iso}T00:00:00`);
@@ -216,7 +226,10 @@ function renderPayrollDays() {
     container.innerHTML = days.map(day => `
         <article class="payroll-day-card">
             <div class="payroll-day-header">
-                <strong>${escapeHtml(day.shift_date || '')}</strong>
+                <div>
+                    <strong>${escapeHtml(day.shift_date || '')}</strong>
+                    ${day.employee_name ? `<div class="muted-text">${escapeHtml(day.employee_name)}</div>` : ''}
+                </div>
                 <span class="payroll-chip ${day.is_closed ? 'green' : 'orange'}">${day.is_closed ? 'Закрыта' : 'Открыта'}</span>
             </div>
             <div class="payroll-day-grid">
@@ -227,6 +240,12 @@ function renderPayrollDays() {
                 <div><span class="summary-label">Бонус</span><strong>${formatMoney(day.bonus_amount)}</strong></div>
                 <div><span class="summary-label">Итого</span><strong>${formatMoney(day.gross_salary_amount)}</strong></div>
             </div>
+            ${(day.id && !day.is_closed) ? `
+                <div class="shift-detail-actions">
+                    <button type="button" class="btn secondary btn-inline" onclick="closeAdminShift(${day.id})">Закрыть</button>
+                    <button type="button" class="btn danger btn-inline" onclick="deleteShift(${day.id})">Убрать</button>
+                </div>
+            ` : ''}
         </article>
     `).join('');
 }
@@ -415,6 +434,16 @@ async function refreshPageData(showSuccess = true) {
     }
 }
 
+window.openShiftDay = function openShiftDay(dateValue) {
+    if (!dateValue) return;
+    shiftsState.filterMode = 'date';
+    shiftsState.selectedDate = dateValue;
+    renderShiftFilterControls();
+    renderPayrollDays();
+    toggleShiftDatePicker(false);
+    qs('shift-payroll-days-container')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+};
+
 window.deleteShift = async function deleteShift(id) {
     if (!confirm('Убрать эту смену из активного календаря?')) return;
     try {
@@ -550,6 +579,12 @@ document.addEventListener('keydown', (event) => {
         }
         toggleShiftDatePicker(false);
     }
+});
+
+window.addEventListener('resize', () => {
+    renderShiftCalendar();
+    renderShiftDatePicker();
+    renderPayrollDays();
 });
 
 bootstrap();

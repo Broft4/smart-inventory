@@ -52,6 +52,7 @@ const adminState = {
     locationModalTab: 'create',
     editingLocationId: null,
     editingDiscrepancy: null,
+    editingCostOverride: null,
     cycleTargetsPreviousCategoryIds: new Set(),
     cycleTargetsPreviousSubcategoryIds: new Set(),
     cycleTargetsTargetDate: '',
@@ -186,14 +187,21 @@ async function reopenEmployeeRevisionAccess(employeeUserId, employeeName) {
     }
 }
 
-function renderMoneyBreakdown(unitValue, totalValue, quantity, { highlight = false } = {}) {
+function renderMoneyBreakdown(unitValue, totalValue, quantity, { highlight = false, source = null, note = null } = {}) {
     const totalHtml = totalValue != null ? formatMoney(totalValue) : '—';
     const unitHtml = unitValue != null ? `${formatMoney(unitValue)}/шт` : '—';
     const qtyHtml = quantity != null ? `× ${formatQty(quantity)}` : '';
+    const badgeTitle = source === 'override'
+        ? escapeHtml(note ? `Локальная себестоимость: ${note}` : 'Локальная себестоимость для этой точки')
+        : '';
+    const badgeHtml = source === 'override'
+        ? `<span class="money-badge money-badge-manual" title="${badgeTitle}">локально</span>`
+        : '';
     return `
         <div class="money-cell${highlight ? ' emphasis' : ''}">
             <strong>${totalHtml}</strong>
             <span class="muted-text">${unitHtml}${qtyHtml ? ` ${qtyHtml}` : ''}</span>
+            ${badgeHtml}
         </div>
     `;
 }
@@ -374,12 +382,6 @@ function extractIsoDateFromRuDate(value) {
 }
 
 function getDefaultCycleTargetDate() {
-    const targetDateInput = document.getElementById('cycle-target-date');
-    if (targetDateInput?.value) return targetDateInput.value;
-    if (adminState.report?.report_type === 'daily') {
-        const reportDate = extractIsoDateFromRuDate(adminState.report.date);
-        if (reportDate) return reportDate;
-    }
     return getTodayIsoDate();
 }
 
@@ -1249,7 +1251,7 @@ function updateCycleTargetDependencyState() {
             const wasChecked = subCheckbox.checked;
             const baseDisabled = subCheckbox.dataset.baseDisabled === 'true';
             subCheckbox.disabled = adminState.cycleTargetsLocked || baseDisabled || categorySelected;
-            if (categorySelected && wasChecked) {
+            if (categorySelected && wasChecked && !adminState.cycleTargetsLocked) {
                 subCheckbox.checked = false;
             }
         });
@@ -1267,13 +1269,15 @@ function renderCycleTargetsSelectionSummary() {
 
     if (selectedCountNode) {
         const selectedCategoryCount = categoryCheckboxes.filter(node => node.checked).length;
-        const selectedSubcategoryCount = subcategoryCheckboxes.filter(node => node.checked && !node.disabled).length;
-        selectedCountNode.textContent = `Новый выбор: категорий ${selectedCategoryCount}. Подкатегорий ${selectedSubcategoryCount}.`;
+        const selectedSubcategoryCount = subcategoryCheckboxes.filter(node => node.checked).length;
+        selectedCountNode.textContent = adminState.cycleTargetsLocked
+            ? `Выбрано на дату: категорий ${selectedCategoryCount}. Подкатегорий ${selectedSubcategoryCount}.`
+            : `Новый выбор: категорий ${selectedCategoryCount}. Подкатегорий ${selectedSubcategoryCount}.`;
     }
 
     if (filteredCountNode) {
-        const availableSubcategories = subcategoryCheckboxes.length;
-        filteredCountNode.textContent = `Показано категорий: ${categoryCheckboxes.length}. Доступно подкатегорий: ${availableSubcategories}. Уже пройдено до выбранной даты: ${completedSubcategoryNodes.length}.`;
+        const availableSubcategories = subcategoryCheckboxes.filter(node => !node.disabled || node.checked).length;
+        filteredCountNode.textContent = `Показано категорий: ${categoryCheckboxes.length}. Видно подкатегорий: ${availableSubcategories}. Уже пройдено до выбранной даты: ${completedSubcategoryNodes.length}.`;
     }
 }
 
@@ -1499,14 +1503,18 @@ function renderCycleTargets(data) {
         const previousLabel = data?.previous_target_date
             ? ` · прошлый сохранённый выбор: ${data.previous_target_date}`
             : '';
-        const lockLabel = data?.is_locked
-            ? ` · ${data?.report_status || 'Завершена'} · только просмотр`
+        const cycleRangeLabel = data?.min_target_date && data?.max_target_date
+            ? ` · цикл: ${data.min_target_date} — ${data.max_target_date}`
             : '';
-        meta.textContent = `Точка: ${data?.location || '-'} · Версия цикла: ${data?.cycle_version || '-'} · Старт цикла: ${data?.cycle_started_at || '-'} · Дата ревизии: ${data?.target_date || '-'}${previousLabel}${lockLabel}`;
+        const lockLabel = data?.is_locked
+            ? ` · ${data?.report_status || 'Только просмотр'}`
+            : '';
+        meta.textContent = `Точка: ${data?.location || '-'} · Версия цикла: ${data?.cycle_version || '-'} · Старт цикла: ${data?.cycle_started_at || '-'} · Дата ревизии: ${data?.target_date || '-'}${cycleRangeLabel}${previousLabel}${lockLabel}`;
     }
     if (cycleStartInput) {
         cycleStartInput.value = parseRuDateToIso(data?.cycle_started_at || '');
-        cycleStartInput.disabled = Boolean(data?.is_locked);
+        cycleStartInput.disabled = true;
+        cycleStartInput.readOnly = true;
     }
     if (targetDateInput) {
         targetDateInput.value = data?.target_date || '';
@@ -1540,18 +1548,18 @@ function renderCycleTargets(data) {
         return `
             <article class="category-card admin-category-card status-grey">
                 <div class="admin-category-header">
-                    <label class="checkbox-row" style="display:flex;align-items:flex-start;gap:10px;flex:1;cursor:${category.disabled ? 'not-allowed' : 'pointer'};opacity:${category.disabled ? '0.68' : '1'};">
+                    <label class="checkbox-row" style="display:flex;align-items:flex-start;gap:10px;flex:1;cursor:${(category.disabled || adminState.cycleTargetsLocked) ? 'not-allowed' : 'pointer'};opacity:${(category.disabled || adminState.cycleTargetsLocked) ? '0.68' : '1'};">
                         <input
                             type="checkbox"
                             data-cycle-category-id="${escapeHtml(category.id)}"
                             data-base-disabled="${category.disabled ? 'true' : 'false'}"
                             ${category.selected ? 'checked' : ''}
-                            ${category.disabled ? 'disabled' : ''}
+                            ${(category.disabled || adminState.cycleTargetsLocked) ? 'disabled' : ''}
                         >
                         <div>
                             <strong>${escapeHtml(category.name)}</strong>
                             <div class="muted-text">
-                                ${category.disabled && !category.selected
+                                ${(category.disabled || adminState.cycleTargetsLocked) && !category.selected
                                     ? 'Всю категорию на эту дату выбрать нельзя: часть подкатегорий уже занята в других ревизиях цикла или дата закрыта.'
                                     : 'Выбрать всю категорию на выбранную дату. Сотрудники увидят только подкатегории, актуальные для этой даты.'}
                             </div>
@@ -1647,23 +1655,29 @@ async function openCycleTargetsModal(targetDate = getDefaultCycleTargetDate()) {
     setCycleTargetsSaveButtonState(false);
     showModal('cycle-targets-modal');
 
-    const params = new URLSearchParams({ location });
-    if (targetDate) {
-        params.set('target_date', targetDate);
-    }
-    const response = await fetch(`/api/cycle-targets?${params.toString()}`);
-    let data = null;
     try {
-        data = await response.json();
-    } catch {
-        data = null;
-    }
+        const params = new URLSearchParams({ location });
+        if (targetDate) {
+            params.set('target_date', targetDate);
+        }
+        const response = await fetch(`/api/cycle-targets?${params.toString()}`);
+        let data = null;
+        try {
+            data = await response.json();
+        } catch {
+            data = null;
+        }
 
-    if (!response.ok) {
-        throw new Error(data?.detail || data?.message || 'Не удалось загрузить категории цикла.');
-    }
+        if (!response.ok) {
+            throw new Error(data?.detail || data?.message || 'Не удалось загрузить категории цикла.');
+        }
 
-    renderCycleTargets(data);
+        renderCycleTargets(data);
+    } catch (error) {
+        if (container) container.innerHTML = '<p class="empty-text">Не удалось загрузить категории цикла.</p>';
+        if (meta) meta.textContent = '';
+        setMessage(message, error?.message || 'Не удалось загрузить категории цикла.', '#b00020');
+    }
 }
 
 async function saveCycleTargetsSelection() {
@@ -1701,7 +1715,7 @@ async function saveCycleTargetsSelection() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 location,
-                cycle_started_at: cycleStartInput?.value || null,
+                cycle_started_at: null,
                 target_date: targetDate || null,
                 category_ids: categoryIds,
                 subcategory_ids: subcategoryIds,
@@ -1964,6 +1978,9 @@ function buildEmployeeDetailGroups(report) {
                 cost_total: item.cost_total,
                 retail_total: item.retail_total,
                 lost_profit: item.lost_profit,
+                cost_price_source: item.cost_price_source || null,
+                cost_price_note: item.cost_price_note || null,
+                cost_price_updated_at: item.cost_price_updated_at || null,
             });
         });
     });
@@ -2121,6 +2138,7 @@ function renderEmployeeDetails(report) {
                                 const diffSign = item.diff > 0 ? '+' : '';
                                 const diffClass = item.diff > 0 ? 'diff-plus' : 'diff-minus';
                                 const canEditDiscrepancy = item.check_result_id && report?.report_type === 'daily';
+                                const canEditCostOverride = Boolean(item.check_result_id);
                                 return `
                                     <tr>
                                         <td>${highlightMatch(item.category_name, adminState.searchQuery)}</td>
@@ -2129,7 +2147,7 @@ function renderEmployeeDetails(report) {
                                         <td class="num-cell">${item.expected}</td>
                                         <td class="num-cell">${item.actual}</td>
                                         <td class="num-cell ${diffClass}">${diffSign}${item.diff}</td>
-                                        <td class="num-cell">${renderMoneyBreakdown(item.cost_price, item.cost_total, item.diff)}</td>
+                                        <td class="num-cell">${renderMoneyBreakdown(item.cost_price, item.cost_total, item.diff, { source: item.cost_price_source, note: item.cost_price_note })}</td>
                                         <td class="num-cell">${renderMoneyBreakdown(item.retail_price, item.retail_total, item.diff)}</td>
                                         <td class="num-cell">${renderMoneyBreakdown((item.retail_price !== null && item.retail_price !== undefined && item.cost_price !== null && item.cost_price !== undefined) ? Number(item.retail_price) - Number(item.cost_price) : null, item.lost_profit, item.diff, { highlight: true })}</td>
                                         <td><span class="employee-pill">${highlightMatch(item.checked_by, adminState.searchQuery)}</span></td>
@@ -2148,6 +2166,22 @@ function renderEmployeeDetails(report) {
                                                     aria-label="Изменить факт по товару ${escapeHtml(item.name)}"
                                                     title="Изменить факт"
                                                 >✏️</button>
+                                            ` : ''}
+                                            ${canEditCostOverride ? `
+                                                <button
+                                                    type="button"
+                                                    class="icon-action-btn"
+                                                    data-edit-cost-override
+                                                    data-check-result-id="${item.check_result_id}"
+                                                    data-category-name="${escapeHtml(item.category_name)}"
+                                                    data-subcategory-name="${escapeHtml(item.subcategory_name || '')}"
+                                                    data-item-name="${escapeHtml(item.name)}"
+                                                    data-cost-price="${item.cost_price ?? ''}"
+                                                    data-cost-note="${escapeHtml(item.cost_price_note || '')}"
+                                                    data-cost-source="${escapeHtml(item.cost_price_source || '')}"
+                                                    aria-label="Задать локальную себестоимость для ${escapeHtml(item.name)}"
+                                                    title="Локальная себестоимость"
+                                                >₽</button>
                                             ` : ''}
                                         </td>
                                     </tr>
@@ -2444,6 +2478,7 @@ function renderCategories(report) {
                                         const diffSign = item.diff > 0 ? '+' : '';
                                         const diffClass = item.diff > 0 ? 'diff-plus' : 'diff-minus';
                                         const canEditDiscrepancy = item.check_result_id && report?.report_type === 'daily';
+                                        const canEditCostOverride = Boolean(item.check_result_id);
                                         return `
                                             <tr>
                                                 <td>${highlightMatch(item.subcategory_name || '-', adminState.searchQuery)}</td>
@@ -2451,7 +2486,7 @@ function renderCategories(report) {
                                                 <td class="num-cell">${item.expected}</td>
                                                 <td class="num-cell">${item.actual}</td>
                                                 <td class="num-cell ${diffClass}">${diffSign}${item.diff}</td>
-                                                <td class="num-cell">${renderMoneyBreakdown(item.cost_price, item.cost_total, item.diff)}</td>
+                                                <td class="num-cell">${renderMoneyBreakdown(item.cost_price, item.cost_total, item.diff, { source: item.cost_price_source, note: item.cost_price_note })}</td>
                                                 <td class="num-cell">${renderMoneyBreakdown(item.retail_price, item.retail_total, item.diff)}</td>
                                                 <td class="num-cell">${renderMoneyBreakdown((item.retail_price !== null && item.retail_price !== undefined && item.cost_price !== null && item.cost_price !== undefined) ? Number(item.retail_price) - Number(item.cost_price) : null, item.lost_profit, item.diff, { highlight: true })}</td>
                                                 <td><span class="employee-pill">${highlightMatch(item.checked_by || '-', adminState.searchQuery)}</span></td>
@@ -2470,6 +2505,22 @@ function renderCategories(report) {
                                                             aria-label="Изменить факт по товару ${escapeHtml(item.name)}"
                                                             title="Изменить факт"
                                                         >✏️</button>
+                                                    ` : ''}
+                                                    ${canEditCostOverride ? `
+                                                        <button
+                                                            type="button"
+                                                            class="icon-action-btn"
+                                                            data-edit-cost-override
+                                                            data-check-result-id="${item.check_result_id}"
+                                                            data-category-name="${escapeHtml(cat.name)}"
+                                                            data-subcategory-name="${escapeHtml(item.subcategory_name || '')}"
+                                                            data-item-name="${escapeHtml(item.name)}"
+                                                            data-cost-price="${item.cost_price ?? ''}"
+                                                            data-cost-note="${escapeHtml(item.cost_price_note || '')}"
+                                                            data-cost-source="${escapeHtml(item.cost_price_source || '')}"
+                                                            aria-label="Задать локальную себестоимость для ${escapeHtml(item.name)}"
+                                                            title="Локальная себестоимость"
+                                                        >₽</button>
                                                     ` : ''}
                                                 </td>
                                             </tr>
@@ -2881,6 +2932,119 @@ async function submitDiscrepancyEditForm(event) {
     }
 }
 
+function openCostOverrideModal(item) {
+    adminState.editingCostOverride = item;
+
+    const itemName = document.getElementById('edit-cost-override-item-name');
+    const itemMeta = document.getElementById('edit-cost-override-item-meta');
+    const costInput = document.getElementById('edit-cost-override-value');
+    const noteInput = document.getElementById('edit-cost-override-note');
+    const message = document.getElementById('edit-cost-override-message');
+
+    if (itemName) itemName.textContent = item.name || 'Товар';
+    if (itemMeta) {
+        const sourceLabel = item.cost_price_source === 'override' ? 'Локальная себестоимость уже задана для этой точки.' : 'Сейчас используется общий кеш точки.';
+        itemMeta.textContent = `${item.category_name || 'Без категории'}${item.subcategory_name ? ` → ${item.subcategory_name}` : ''} · ${sourceLabel}`;
+    }
+    if (costInput) costInput.value = item.cost_price != null && Number.isFinite(Number(item.cost_price)) ? String(Number(item.cost_price)) : '';
+    if (noteInput) noteInput.value = item.cost_price_note || '';
+    if (message) {
+        message.textContent = '';
+        message.className = 'message';
+    }
+
+    showModal('edit-cost-override-modal');
+    setTimeout(() => costInput?.focus(), 0);
+}
+
+function closeCostOverrideModal() {
+    adminState.editingCostOverride = null;
+    hideModal('edit-cost-override-modal');
+
+    const form = document.getElementById('edit-cost-override-form');
+    const message = document.getElementById('edit-cost-override-message');
+    if (form) form.reset();
+    if (message) {
+        message.textContent = '';
+        message.className = 'message';
+    }
+}
+
+async function submitCostOverrideForm(event) {
+    event.preventDefault();
+    const item = adminState.editingCostOverride;
+    if (!item?.check_result_id) return;
+
+    const costInput = document.getElementById('edit-cost-override-value');
+    const noteInput = document.getElementById('edit-cost-override-note');
+    const submitButton = document.getElementById('save-cost-override-btn');
+    const clearButton = document.getElementById('clear-cost-override-btn');
+    const message = document.getElementById('edit-cost-override-message');
+
+    const rawCost = String(costInput?.value || '').trim().replace(',', '.');
+    const note = String(noteInput?.value || '').trim();
+    let costPrice = null;
+    if (rawCost !== '') {
+        costPrice = Number(rawCost);
+        if (!Number.isFinite(costPrice) || costPrice < 0) {
+            if (message) {
+                message.textContent = 'Введите корректную себестоимость или очистите поле, чтобы удалить локальное значение.';
+                message.className = 'message';
+            }
+            costInput?.focus();
+            return;
+        }
+    }
+
+    if (submitButton) submitButton.disabled = true;
+    if (clearButton) clearButton.disabled = true;
+    if (message) {
+        message.textContent = costPrice === null ? 'Удаляем локальную себестоимость...' : 'Сохраняем локальную себестоимость...';
+        message.className = 'message';
+    }
+
+    try {
+        const response = await fetch(`/api/report/discrepancy-cost/${item.check_result_id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                cost_price: costPrice,
+                note: note || null,
+            }),
+        });
+
+        let payload = null;
+        try {
+            payload = await response.json();
+        } catch {
+            payload = null;
+        }
+
+        if (!response.ok) {
+            throw new Error(payload?.detail || payload?.message || 'Не удалось сохранить локальную себестоимость.');
+        }
+
+        const location = getSelectedAdminLocation();
+        if (adminState.isPeriodMode && adminState.periodDateFrom && adminState.periodDateTo) {
+            await loadAdminPeriodReport(location, adminState.periodDateFrom, adminState.periodDateTo);
+        } else {
+            const currentReportId = getCurrentAdminReportId();
+            await loadAdminReport(location, currentReportId);
+        }
+        closeCostOverrideModal();
+        setAdminReportStatus(payload?.message || 'Локальная себестоимость сохранена.', 'success');
+    } catch (error) {
+        if (message) {
+            message.textContent = error?.message || 'Не удалось сохранить локальную себестоимость.';
+            message.className = 'message';
+        }
+    } finally {
+        if (submitButton) submitButton.disabled = false;
+        if (clearButton) clearButton.disabled = false;
+    }
+}
+
+
 async function logout() {
     await fetch('/api/logout', { method: 'POST' });
     location.href = '/login';
@@ -2914,7 +3078,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('open-create-location-btn')?.addEventListener('click', () => openLocationModal('create'));
     document.getElementById('open-cycle-targets-btn')?.addEventListener('click', async () => {
         try {
-            await openCycleTargetsModal();
+            await openCycleTargetsModal(getTodayIsoDate());
         } catch (error) {
             console.error(error);
             alert('Не удалось загрузить категории цикла.');
@@ -2995,6 +3159,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('close-edit-discrepancy-modal-btn')?.addEventListener('click', closeDiscrepancyEditModal);
     document.getElementById('edit-discrepancy-cancel-btn')?.addEventListener('click', closeDiscrepancyEditModal);
     document.getElementById('edit-discrepancy-form')?.addEventListener('submit', submitDiscrepancyEditForm);
+    document.getElementById('close-edit-cost-override-modal-btn')?.addEventListener('click', closeCostOverrideModal);
+    document.getElementById('edit-cost-override-cancel-btn')?.addEventListener('click', closeCostOverrideModal);
+    document.getElementById('clear-cost-override-btn')?.addEventListener('click', async () => {
+        const input = document.getElementById('edit-cost-override-value');
+        const note = document.getElementById('edit-cost-override-note');
+        if (input) input.value = '';
+        if (note) note.value = '';
+        const form = document.getElementById('edit-cost-override-form');
+        if (form) await submitCostOverrideForm(new Event('submit', { cancelable: true }));
+    });
+    document.getElementById('edit-cost-override-form')?.addEventListener('submit', submitCostOverrideForm);
 
     document.querySelectorAll('[data-view-mode]').forEach(button => {
         button.addEventListener('click', () => setViewMode(button.dataset.viewMode));
@@ -3010,6 +3185,20 @@ document.addEventListener('DOMContentLoaded', async () => {
                 name: editDiscrepancyButton.dataset.itemName || '',
                 expected: Number(editDiscrepancyButton.dataset.expected || 0),
                 actual: Number(editDiscrepancyButton.dataset.actual || 0),
+            });
+            return;
+        }
+
+        const editCostOverrideButton = event.target.closest('[data-edit-cost-override]');
+        if (editCostOverrideButton) {
+            openCostOverrideModal({
+                check_result_id: Number(editCostOverrideButton.dataset.checkResultId),
+                category_name: editCostOverrideButton.dataset.categoryName || '',
+                subcategory_name: editCostOverrideButton.dataset.subcategoryName || '',
+                name: editCostOverrideButton.dataset.itemName || '',
+                cost_price: editCostOverrideButton.dataset.costPrice === '' ? null : Number(editCostOverrideButton.dataset.costPrice),
+                cost_price_note: editCostOverrideButton.dataset.costNote || '',
+                cost_price_source: editCostOverrideButton.dataset.costSource || '',
             });
             return;
         }

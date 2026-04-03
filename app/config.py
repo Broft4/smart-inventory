@@ -23,7 +23,10 @@ class Settings(BaseSettings):
     ms_inventory_cache_ttl_seconds: int = 120
     ms_request_timeout_seconds: int = 30
     ms_retry_attempts: int = 4
-    ms_max_concurrent_requests: int = 4
+    ms_max_concurrent_requests: int = 2
+    ms_rate_limit_window_requests: int = 45
+    ms_rate_limit_window_seconds: float = 5.0
+    ms_rate_limit_remaining_threshold: int = 3
     ms_financial_cache_ttl_seconds: int = 900
     app_log_level: str = "INFO"
 

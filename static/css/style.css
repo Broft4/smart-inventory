@@ -563,6 +563,21 @@ body.modal-open {
     line-height: 1.25;
 }
 .money-cell.emphasis strong { color: #8a5300; }
+.money-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: fit-content;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+}
+.money-badge-manual {
+    background: #eef4ff;
+    color: #1d4ed8;
+    border: 1px solid #c7d7fe;
+}
 .num-cell { text-align: center; }
 .diff-plus { color: #1f9d55; font-weight: 800; }
 .diff-minus { color: #d32f2f; font-weight: 800; }
@@ -1293,12 +1308,16 @@ body.modal-open {
 }
 
 .actions-col {
-    width: 52px;
+    width: 88px;
 }
 
 .actions-cell {
     text-align: center;
     vertical-align: middle;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
 }
 
 .icon-action-btn {
@@ -1742,8 +1761,27 @@ body.modal-open {
     background: #fbfcff;
 }
 
-.expense-create-grid > label {
+.expense-create-grid > label,
+.expense-manual-grid > label {
     grid-column: span 3;
+}
+
+.expense-comment-field,
+.expense-entry-comment {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.expense-comment-field textarea,
+.expense-entry-comment textarea {
+    width: 100%;
+    min-height: 96px;
+    resize: vertical;
+}
+
+.expense-comment-field--full {
+    grid-column: 1 / -1;
 }
 
 .expense-checkbox-card {
@@ -1752,6 +1790,12 @@ body.modal-open {
     border-radius: 14px;
     background: #fff;
     padding: 12px 14px;
+}
+
+.expense-checkbox-card--inline {
+    display: flex;
+    align-items: center;
+    gap: 10px;
     margin-top: 30px;
 }
 
@@ -1793,6 +1837,30 @@ body.modal-open {
     gap: 8px;
     margin-bottom: 14px;
     color: #516174;
+}
+
+.expense-template-actions,
+.expense-entry-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.expense-entry-form {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px;
+    align-items: start;
+}
+
+.expense-entry-comment {
+    grid-column: 1 / -1;
+}
+
+.expense-entry-card.manual {
+    border-color: #dce7fb;
+    background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
 }
 
 .expense-template-actions {
@@ -1913,6 +1981,7 @@ body.modal-open {
     .payroll-settings-grid > label,
     .shift-toolbar-action,
     .expense-create-grid > label,
+    .expense-manual-grid > label,
     .audit-filter-bar > label,
     .audit-filter-actions {
         grid-column: span 4;
@@ -1946,6 +2015,7 @@ body.modal-open {
     .payroll-settings-grid > label,
     .shift-toolbar-action,
     .expense-create-grid > label,
+    .expense-manual-grid > label,
     .audit-filter-bar > label,
     .audit-filter-actions,
     .payroll-filter-actions-inline,
@@ -1978,6 +2048,7 @@ body.modal-open {
     .payroll-settings-grid > label,
     .shift-toolbar-action,
     .expense-create-grid > label,
+    .expense-manual-grid > label,
     .audit-filter-bar > label,
     .audit-filter-actions,
     .payroll-filter-actions-inline,
@@ -2289,5 +2360,308 @@ body.modal-open {
         width: min(320px, 92vw);
         left: 50%;
         transform: translateX(-50%);
+    }
+}
+
+.payroll-category-filters {
+    display: grid;
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    gap: 14px;
+    align-items: end;
+    margin-bottom: 16px;
+}
+
+.payroll-category-filters label {
+    grid-column: span 3;
+    margin-bottom: 0;
+}
+
+.payroll-category-filter-meta {
+    grid-column: span 3;
+    align-self: center;
+    padding-top: 12px;
+}
+
+.payroll-table-wrap {
+    width: 100%;
+    overflow-x: auto;
+}
+
+.payroll-table {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 720px;
+}
+
+.payroll-table th,
+.payroll-table td {
+    padding: 12px 14px;
+    border-bottom: 1px solid #e7edf4;
+    text-align: left;
+    vertical-align: top;
+}
+
+.payroll-table th {
+    background: #f7faff;
+    color: #425466;
+    font-size: 13px;
+    font-weight: 800;
+}
+
+.payroll-table td strong {
+    color: #19345d;
+}
+
+.shift-detail-actions {
+    margin-top: 14px;
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.shift-calendar-mini-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
+}
+
+.shift-calendar-mini-chip,
+.shift-calendar-mini-more {
+    min-width: 22px;
+    height: 22px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    font-weight: 800;
+}
+
+.shift-calendar-mini-chip.open {
+    background: #fff3d7;
+    color: #a15c00;
+}
+
+.shift-calendar-mini-chip.closed {
+    background: #dff4e5;
+    color: #0b6b2b;
+}
+
+.shift-calendar-mini-more {
+    background: #eef4ff;
+    color: #234a91;
+}
+
+.employee-shift-status--compact {
+    width: 100%;
+    justify-content: center;
+    padding: 5px 6px;
+    font-size: 10px;
+    margin-bottom: 6px;
+}
+
+.employee-shift-compact-total {
+    font-size: 11px;
+    font-weight: 800;
+    color: #1d2d44;
+    text-align: center;
+}
+
+@media (max-width: 900px) {
+    .payroll-category-filters {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .payroll-category-filters label,
+    .payroll-category-filter-meta {
+        grid-column: span 1;
+    }
+}
+
+@media (max-width: 640px) {
+    .header-actions {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .payroll-page .category-card,
+    .payroll-page .auth-card {
+        padding: 16px;
+    }
+
+    .payroll-category-filters {
+        grid-template-columns: 1fr;
+        gap: 10px;
+    }
+
+    .payroll-category-filters label,
+    .payroll-category-filter-meta {
+        grid-column: span 1;
+    }
+
+    .payroll-category-filter-meta {
+        padding-top: 0;
+    }
+
+    .payroll-table-wrap {
+        overflow: visible;
+    }
+
+    .payroll-category-table,
+    .payroll-category-table thead,
+    .payroll-category-table tbody,
+    .payroll-category-table tr,
+    .payroll-category-table th,
+    .payroll-category-table td {
+        display: block;
+        width: 100%;
+    }
+
+    .payroll-category-table {
+        min-width: 0;
+    }
+
+    .payroll-category-table thead {
+        display: none;
+    }
+
+    .payroll-category-table tbody {
+        display: grid;
+        gap: 12px;
+    }
+
+    .payroll-category-table tr {
+        border: 1px solid #e1e8f2;
+        border-radius: 16px;
+        padding: 12px;
+        background: #fff;
+        box-shadow: 0 8px 20px rgba(31, 42, 55, 0.04);
+    }
+
+    .payroll-category-table td {
+        border: none;
+        padding: 0;
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        font-size: 14px;
+    }
+
+    .payroll-category-table td + td {
+        margin-top: 8px;
+    }
+
+    .payroll-category-table td::before {
+        content: attr(data-label);
+        color: #6b7a96;
+        font-weight: 700;
+        flex: 0 0 auto;
+    }
+
+    .shift-detail-actions {
+        flex-direction: column;
+    }
+
+    .shift-detail-actions .btn {
+        width: 100%;
+    }
+
+    .shift-calendar-scroller {
+        overflow: visible;
+        padding-bottom: 0;
+    }
+
+    .shift-calendar-scroller .shift-calendar-weekdays,
+    .shift-calendar-scroller .shift-calendar-grid {
+        min-width: 0;
+        grid-template-columns: repeat(7, minmax(0, 1fr));
+        gap: 4px;
+    }
+
+    .shift-calendar-scroller .shift-calendar-weekdays span {
+        min-height: 24px;
+        border-radius: 8px;
+        font-size: 10px;
+        padding: 2px 0;
+    }
+
+    .shift-calendar-scroller .shift-calendar-cell {
+        min-height: 92px;
+        padding: 5px;
+        gap: 6px;
+        border-radius: 12px;
+    }
+
+    .shift-calendar-scroller .shift-calendar-cell--compact {
+        min-height: 76px;
+        cursor: pointer;
+    }
+
+    .shift-calendar-scroller .shift-calendar-cell-head {
+        gap: 4px;
+    }
+
+    .shift-calendar-scroller .shift-calendar-cell-head strong {
+        font-size: 15px;
+        margin-bottom: 0;
+    }
+
+    .shift-calendar-scroller .shift-calendar-cell-head span {
+        display: none;
+    }
+
+    .shift-calendar-scroller .shift-calendar-head-actions {
+        gap: 4px;
+    }
+
+    .shift-calendar-scroller .shift-calendar-count,
+    .shift-calendar-scroller .shift-calendar-add-btn {
+        width: 20px;
+        height: 20px;
+        min-width: 20px;
+        font-size: 12px;
+        box-shadow: none;
+    }
+
+    .shift-calendar-scroller .shift-calendar-cell-body {
+        gap: 4px;
+    }
+
+    .shift-calendar-scroller .shift-calendar-entry,
+    .shift-calendar-scroller .shift-calendar-entry-actions,
+    .shift-calendar-scroller .shift-calendar-entry-meta,
+    .shift-calendar-scroller .shift-calendar-empty,
+    .shift-calendar-scroller .shift-calendar-empty-day {
+        display: none;
+    }
+
+    .shift-calendar-scroller .shift-calendar-mini-list,
+    .shift-calendar-scroller .shift-calendar-empty-day {
+        display: flex;
+    }
+
+    .shift-calendar-scroller .shift-calendar-mini-chip,
+    .shift-calendar-scroller .shift-calendar-mini-more {
+        min-width: 18px;
+        height: 18px;
+        font-size: 9px;
+    }
+
+    .shift-calendar-scroller .employee-shift-calendar-cell {
+        min-height: 72px;
+    }
+
+    .shift-calendar-scroller .employee-shift-calendar-cell .shift-calendar-day-meta {
+        width: 100%;
+        text-align: left;
+    }
+
+    .shift-calendar-scroller .employee-shift-status {
+        margin-bottom: 0;
+    }
+
+    .shift-calendar-scroller .employee-shift-lines,
+    .shift-calendar-scroller .employee-shift-line {
+        display: none;
     }
 }

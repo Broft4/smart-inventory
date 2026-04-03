@@ -24,6 +24,7 @@ from app.models import (
     MonthlyExpenseEntry,
     PayrollAuditLog,
     PayrollCategoryRateVersion,
+    PayrollDailyMetricCache,
     PayrollSettingsVersion,
     ShiftPayrollCategorySnapshot,
     ShiftPayrollSnapshot,
@@ -49,6 +50,7 @@ ADMIN_SALARY_BRACKETS = [
 TOBACCO_KEYWORDS = ('сигарет', 'сигарилл', 'стик')
 
 SALES_METRICS_TTL_SECONDS = 90
+PAYROLL_DAILY_CACHE_RECENT_TTL_SECONDS = 900
 _sales_metrics_cache: dict[tuple[int, str, str], tuple[float, dict[date, dict[str, Any]]]] = {}
 _category_lookup_cache: dict[str, tuple[float, dict[str, dict[str, str]]]] = {}
 
@@ -126,7 +128,17 @@ class ManualMonthlyExpenseCreateRequest(BaseModel):
 class CategoryDocMetrics:
     sales: float = 0.0
     returns: float = 0.0
-    cost: float = 0.0
+    sales_cost: float = 0.0
+    return_cost: float = 0.0
+
+
+@dataclass(slots=True)
+class ProfitReportDayMetrics:
+    sales_amount: float = 0.0
+    return_amount: float = 0.0
+    cost_amount: float = 0.0
+    gross_profit_amount: float = 0.0
+    has_rows: bool = False
 
 
 @dataclass(slots=True)
@@ -222,6 +234,69 @@ def _quantity(value: Any) -> float:
 
 
 
+def _money_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return round(float(value) / 100.0, 2)
+    except (TypeError, ValueError):
+        return None
+
+
+
+def _first_money_value(container: dict[str, Any], fields: tuple[str, ...]) -> float | None:
+    for field in fields:
+        if field in container and container.get(field) is not None:
+            amount = _money_or_none(container.get(field))
+            if amount is not None:
+                return amount
+    return None
+
+
+
+def _extract_position_amount(position: dict[str, Any]) -> float:
+    quantity = _quantity(position.get('quantity'))
+    amount = _first_money_value(position, ('sum', 'amount', 'saleSum', 'retailSum'))
+    if amount is not None:
+        return round(amount, 2)
+    unit_price = _first_money_value(position, ('price', 'salePrice', 'sellingPrice'))
+    if unit_price is not None and quantity > 0:
+        return round(unit_price * quantity, 2)
+    return 0.0
+
+
+
+def _extract_position_cost_amount(position: dict[str, Any]) -> float | None:
+    quantity = _quantity(position.get('quantity'))
+    total_cost = _first_money_value(position, ('costSum', 'buySum', 'buyPriceSum', 'purchaseCostSum', 'costAmount', 'purchaseSum', 'cost'))
+    if total_cost is not None:
+        return round(max(total_cost, 0.0), 2)
+    unit_cost = _first_money_value(position, ('buyPrice', 'costPrice', 'purchasePrice', 'purchaseCost', 'costValue'))
+    if unit_cost is not None and quantity > 0:
+        return round(max(unit_cost, 0.0) * quantity, 2)
+    return None
+
+
+
+def _extract_position_unit_retail_price(position: dict[str, Any]) -> float | None:
+    quantity = _quantity(position.get('quantity'))
+    amount = _first_money_value(position, ('sum', 'amount', 'saleSum', 'retailSum'))
+    if amount is not None and quantity > 0:
+        return round(amount / quantity, 2)
+    return _first_money_value(position, ('price', 'salePrice', 'sellingPrice'))
+
+
+
+def _extract_shift_cost_amount(doc: dict[str, Any]) -> float | None:
+    return _first_money_value(doc, ('costSum', 'costPriceSum', 'purchaseCostSum', 'buySum', 'buyPriceSum', 'costAmount', 'purchaseSum', 'cost'))
+
+
+
+def _extract_shift_profit_amount(doc: dict[str, Any]) -> float | None:
+    return _first_money_value(doc, ('profit', 'profitSum', 'grossProfit', 'grossProfitSum', 'margin', 'marginSum', 'pnl', 'pnlSum'))
+
+
+
 def _datetime_to_str(value: datetime | None) -> str | None:
     if value is None:
         return None
@@ -253,23 +328,29 @@ def _cache_is_fresh(created_at: float, ttl: float) -> bool:
 
 
 
+def _normalize_optional_ms_value(value: Any) -> str | None:
+    raw = str(value or '').strip()
+    if not raw or raw.lower() in {'none', 'null', 'undefined'}:
+        return None
+    return raw
+
+
 def _point_ms_token(point: LocationPoint | None) -> str | None:
-    token = str((point.ms_token if point else '') or '').strip()
+    token = _normalize_optional_ms_value(point.ms_token if point else None)
     if token:
         return token
-    fallback = str(settings.moysklad_token or '').strip()
-    return fallback or None
+    return _normalize_optional_ms_value(settings.moysklad_token)
 
 
 def _point_store_id(point: LocationPoint | None) -> str | None:
-    store_id = str((point.ms_store_id if point else '') or '').strip()
+    store_id = _normalize_optional_ms_value(point.ms_store_id if point else None)
     if store_id:
         return store_id
     normalized = _normalize_location(point.name) if point and point.name else ''
     if normalized.lower() == (settings.store_dmitrov or '').strip().lower():
-        return (settings.store_dmitrov_id or '').strip() or None
+        return _normalize_optional_ms_value(settings.store_dmitrov_id)
     if normalized.lower() == (settings.store_dubna or '').strip().lower():
-        return (settings.store_dubna_id or '').strip() or None
+        return _normalize_optional_ms_value(settings.store_dubna_id)
     return None
 
 
@@ -433,6 +514,17 @@ async def _get_settings_rates(settings_version_id: int, db: AsyncSession) -> dic
     }
 
 
+def _resolve_category_rate_percent(rate_info: dict[str, Any] | None, other_rate_percent: float | None) -> tuple[float, bool]:
+    try:
+        explicit_rate = float((rate_info or {}).get('rate_percent') or 0)
+    except (TypeError, ValueError, AttributeError):
+        explicit_rate = 0.0
+    fallback_rate = max(float(other_rate_percent or 0), 0.0)
+    if explicit_rate > 0:
+        return round(explicit_rate, 2), False
+    return round(fallback_rate, 2), True
+
+
 async def _list_location_employees(point: LocationPoint, db: AsyncSession) -> list[User]:
     return (
         await db.scalars(
@@ -553,13 +645,15 @@ async def update_location_payroll_settings(payload: PayrollSettingsUpdateRequest
             rate_percent = float(raw.get('rate_percent') or 0)
         except (TypeError, ValueError):
             rate_percent = 0.0
-        normalized_rates.append({'category_id': category_id, 'category_name': category_name, 'rate_percent': max(rate_percent, 0.0)})
-        db.add(PayrollCategoryRateVersion(
-            settings_version_id=version.id,
-            category_id=category_id,
-            category_name=category_name,
-            rate_percent=max(rate_percent, 0.0),
-        ))
+        normalized_rate = max(rate_percent, 0.0)
+        normalized_rates.append({'category_id': category_id, 'category_name': category_name, 'rate_percent': normalized_rate})
+        if normalized_rate > 0:
+            db.add(PayrollCategoryRateVersion(
+                settings_version_id=version.id,
+                category_id=category_id,
+                category_name=category_name,
+                rate_percent=normalized_rate,
+            ))
 
     await _log_payroll_action(
         db,
@@ -863,6 +957,7 @@ async def delete_expense_template(template_id: int, db: AsyncSession, current_us
         entry.updated_at = now
         detached_entries_count += 1
 
+    await db.flush()
     template_name = template.name
     await db.delete(template)
     await _log_payroll_action(
@@ -876,6 +971,38 @@ async def delete_expense_template(template_id: int, db: AsyncSession, current_us
     )
     await db.commit()
     return await list_expense_templates(point.name, db, current_user)
+
+
+async def delete_monthly_expense_entry(entry_id: int, db: AsyncSession, current_user: User) -> dict[str, Any]:
+    entry = await db.get(MonthlyExpenseEntry, entry_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail='Расход не найден.')
+    point = await db.get(LocationPoint, entry.location_point_id)
+    if not point:
+        raise HTTPException(status_code=404, detail='Точка расхода не найдена.')
+    await ensure_user_can_access_location(current_user, point.name, db)
+    if entry.template_id is not None:
+        raise HTTPException(status_code=400, detail='Удалять можно только свободные расходы без шаблона.')
+
+    details = {
+        'name': entry.custom_name or 'Свободный расход',
+        'month_start': entry.month_start.isoformat(),
+        'amount': float(entry.amount or 0),
+        'assigned_employee_user_id': entry.assigned_employee_user_id,
+        'comment': entry.comment,
+    }
+    await db.delete(entry)
+    await _log_payroll_action(
+        db,
+        actor_user_id=current_user.id,
+        location_point_id=point.id,
+        entity_type='monthly_expense',
+        entity_id=str(entry_id),
+        action_type='delete_manual',
+        details=details,
+    )
+    await db.commit()
+    return await list_monthly_expenses(point.name, entry.month_start, db, current_user)
 
 
 async def get_monthly_expenses(location: str, month: date, db: AsyncSession, current_user: User) -> dict[str, Any]:
@@ -968,11 +1095,16 @@ async def _build_top_category_lookup(point: LocationPoint) -> dict[str, dict[str
         return dict(cached[1])
 
     lookup: dict[str, dict[str, str]] = {}
-    if _ms_client_enabled(location=normalized):
-        inventory = await ms_client.get_inventory(normalized, **_point_ms_kwargs(point))
-    else:
-        from app.logic import MOCK_INVENTORY
-        inventory = MOCK_INVENTORY.get(normalized, {'categories': []})
+    try:
+        if _ms_client_enabled(location=normalized):
+            inventory = await ms_client.get_inventory(normalized, **_point_ms_kwargs(point))
+        else:
+            from app.logic import MOCK_INVENTORY
+            inventory = MOCK_INVENTORY.get(normalized, {'categories': []})
+    except Exception:
+        logger.exception('Не удалось загрузить инвентарь для категоризации продаж точки %s. Используем fallback без категорий.', normalized)
+        inventory = {'categories': []}
+
     for category in inventory.get('categories', []):
         category_name = category.get('name') or ''
         if category_name == DEFAULT_CATEGORY_NAME:
@@ -1150,150 +1282,396 @@ def _doc_matches_point(doc: dict[str, Any], point: LocationPoint) -> bool:
     return False
 
 
-async def _load_point_sales_metrics(point: LocationPoint, date_from: date, date_to: date) -> dict[str, Any]:
+def _empty_day_metrics() -> dict[str, Any]:
+    return {
+        'categories': [],
+        'gross_sales_amount': 0.0,
+        'return_amount': 0.0,
+        'net_sales_amount': 0.0,
+        'cost_amount': 0.0,
+        'gross_profit_amount': 0.0,
+        'non_tobacco_net_sales_for_bonus': 0.0,
+    }
+
+
+def _extract_profit_report_amount(row: dict[str, Any], *fields: str) -> float:
+    value = _first_money_value(row, tuple(fields))
+    if value is None:
+        return 0.0
+    return round(value, 2)
+
+
+async def _load_profitability_metrics_by_day(point: LocationPoint, date_from: date, date_to: date) -> dict[date, ProfitReportDayMetrics]:
+    if not _ms_client_enabled(token=_point_ms_token(point), location=point.name):
+        return {}
+
+    token = _point_ms_token(point)
+    location = point.name
+    store_id = _point_store_id(point)
+    if not store_id:
+        logger.warning('Для точки %s не задан ms_store_id, поэтому отчет прибыльности не может быть отфильтрован по точке. Используем legacy fallback.', point.name)
+        return {}
+    output: dict[date, ProfitReportDayMetrics] = {}
+
+    for current_day in _daterange(date_from, date_to):
+        try:
+            rows = await ms_client.get_profit_report_by_product(
+                current_day,
+                current_day,
+                token=token,
+                location=location,
+                store_id=store_id,
+            )
+        except Exception:
+            logger.warning(
+                'Не удалось получить отчет прибыльности МоегоСклада для точки %s за %s. Используем legacy fallback.',
+                point.name,
+                current_day.isoformat(),
+                exc_info=True,
+            )
+            continue
+
+        if not rows:
+            continue
+
+        metrics = ProfitReportDayMetrics(has_rows=True)
+        for row in rows:
+            metrics.sales_amount += _extract_profit_report_amount(row, 'sellSum')
+            metrics.return_amount += _extract_profit_report_amount(row, 'returnSum')
+            metrics.cost_amount += _extract_profit_report_amount(row, 'sellCostSum')
+            metrics.cost_amount -= _extract_profit_report_amount(row, 'returnCostSum')
+            metrics.gross_profit_amount += _extract_profit_report_amount(row, 'profit')
+
+        metrics.sales_amount = round(metrics.sales_amount, 2)
+        metrics.return_amount = round(metrics.return_amount, 2)
+        metrics.cost_amount = round(metrics.cost_amount, 2)
+        metrics.gross_profit_amount = round(metrics.gross_profit_amount, 2)
+        output[current_day] = metrics
+
+    return output
+
+
+async def _load_point_sales_metrics_live(point: LocationPoint, date_from: date, date_to: date) -> dict[date, dict[str, Any]]:
+    category_lookup = await _build_top_category_lookup(point)
+    sales_rows, return_rows, shift_rows = await asyncio.gather(
+        _fetch_document_rows(
+            'retaildemand',
+            date_from,
+            date_to,
+            point,
+            expand='store,retailStore,retailShift,retailShift.store,retailShift.retailStore',
+            include_positions=True,
+            positions_expand='assortment,assortment.productFolder',
+        ),
+        _fetch_document_rows(
+            'retailsalesreturn',
+            date_from,
+            date_to,
+            point,
+            expand='store,retailStore,retailShift,retailShift.store,retailShift.retailStore,demand,demand.store,demand.retailStore,demand.retailShift,demand.retailShift.store,demand.retailShift.retailStore',
+            include_positions=True,
+            positions_expand='assortment,assortment.productFolder',
+        ),
+        _fetch_retail_shift_rows(date_from, date_to, point),
+    )
+    sales_rows = [row for row in sales_rows if _doc_matches_point(row, point)]
+    return_rows = [row for row in return_rows if _doc_matches_point(row, point)]
+    shift_rows = [row for row in shift_rows if _doc_matches_point(row, point)]
+    profit_report_by_day = await _load_profitability_metrics_by_day(point, date_from, date_to)
+
+    by_day: dict[date, dict[str, CategoryDocMetrics]] = defaultdict(dict)
+    totals_by_day: dict[date, dict[str, float]] = defaultdict(lambda: {
+        'gross_sales': 0.0,
+        'returns': 0.0,
+        'sales_cost': 0.0,
+        'return_cost': 0.0,
+    })
+    shift_sales_by_day: dict[date, float] = defaultdict(float)
+    shift_returns_by_day: dict[date, float] = defaultdict(float)
+    shift_cost_by_day: dict[date, float] = defaultdict(float)
+    shift_profit_by_day: dict[date, float] = defaultdict(float)
+    shift_cost_days: set[date] = set()
+    shift_profit_days: set[date] = set()
+    category_names_by_id: dict[str, str] = {}
+
+    for doc, is_return in [(row, False) for row in sales_rows] + [(row, True) for row in return_rows]:
+        doc_date = _extract_document_day(doc)
+        if doc_date is None:
+            continue
+        for position in _iter_positions(doc):
+            item_id = _extract_id(position.get('assortment'))
+            category = category_lookup.get(item_id or '')
+            if category:
+                category_id = category['category_id']
+                category_name = category['category_name']
+            else:
+                category_id = '__other__'
+                category_name = DEFAULT_CATEGORY_NAME
+            category_names_by_id[category_id] = category_name
+            amount = _extract_position_amount(position)
+            cost_amount = _extract_position_cost_amount(position) or 0.0
+            bucket = by_day[doc_date].setdefault(category_id, CategoryDocMetrics())
+            if is_return:
+                bucket.returns += amount
+                bucket.return_cost += cost_amount
+                totals_by_day[doc_date]['returns'] += amount
+                totals_by_day[doc_date]['return_cost'] += cost_amount
+            else:
+                bucket.sales += amount
+                bucket.sales_cost += cost_amount
+                totals_by_day[doc_date]['gross_sales'] += amount
+                totals_by_day[doc_date]['sales_cost'] += cost_amount
+
+    for shift_row in shift_rows:
+        shift_day = _extract_document_day(shift_row)
+        if shift_day is None:
+            continue
+        shift_sales_by_day[shift_day] += _extract_shift_sales_amount(shift_row)
+        shift_returns_by_day[shift_day] += _extract_shift_return_amount(shift_row)
+
+        shift_cost_amount = _extract_shift_cost_amount(shift_row)
+        if shift_cost_amount is not None:
+            shift_cost_by_day[shift_day] += shift_cost_amount
+            shift_cost_days.add(shift_day)
+
+        shift_profit_amount = _extract_shift_profit_amount(shift_row)
+        if shift_profit_amount is not None:
+            shift_profit_by_day[shift_day] += shift_profit_amount
+            shift_profit_days.add(shift_day)
+
+    output: dict[date, dict[str, Any]] = {}
+    for day in _daterange(date_from, date_to):
+        category_rows = by_day.get(day, {})
+        doc_totals = totals_by_day.get(day, {'gross_sales': 0.0, 'returns': 0.0, 'sales_cost': 0.0, 'return_cost': 0.0})
+        shift_sales_amount = round(float(shift_sales_by_day.get(day, 0.0) or 0.0), 2)
+        shift_return_amount = round(float(shift_returns_by_day.get(day, 0.0) or 0.0), 2)
+        gross_sales_amount = shift_sales_amount if shift_sales_amount > 0 else round(doc_totals['gross_sales'], 2)
+        return_amount = shift_return_amount if shift_return_amount > 0 else round(doc_totals['returns'], 2)
+        net_sales_amount = round(gross_sales_amount - return_amount, 2)
+        doc_cost_amount = round(doc_totals['sales_cost'] - doc_totals['return_cost'], 2)
+        legacy_cost_amount = round(float(shift_cost_by_day.get(day, 0.0) or 0.0), 2) if day in shift_cost_days else doc_cost_amount
+
+        if day in shift_profit_days:
+            legacy_gross_profit_amount = round(float(shift_profit_by_day.get(day, 0.0) or 0.0), 2)
+            if day not in shift_cost_days:
+                legacy_cost_amount = round(net_sales_amount - legacy_gross_profit_amount, 2)
+        else:
+            legacy_gross_profit_amount = round(net_sales_amount - legacy_cost_amount, 2)
+
+        report_metrics = profit_report_by_day.get(day)
+        if report_metrics and report_metrics.has_rows:
+            cost_amount = round(report_metrics.cost_amount, 2)
+            gross_profit_amount = round(report_metrics.gross_profit_amount, 2)
+        else:
+            cost_amount = legacy_cost_amount
+            gross_profit_amount = legacy_gross_profit_amount
+
+        categories = []
+        non_tobacco_net = 0.0
+        category_cost_sum = 0.0
+        for category_id, metrics in category_rows.items():
+            category_name = category_names_by_id.get(category_id, DEFAULT_CATEGORY_NAME)
+            net_sales = round(metrics.sales - metrics.returns, 2)
+            category_cost = round(metrics.sales_cost - metrics.return_cost, 2)
+            category_cost_sum += category_cost
+            if not _is_tobacco_category(category_name):
+                non_tobacco_net += net_sales
+            categories.append({
+                'category_id': category_id,
+                'category_name': category_name,
+                'sales_amount': round(metrics.sales, 2),
+                'return_amount': round(metrics.returns, 2),
+                'net_sales_amount': net_sales,
+                'cost_amount': category_cost,
+            })
+
+        if not categories and (gross_sales_amount > 0 or return_amount > 0 or abs(cost_amount) > 0.009):
+            synthetic_net = round(gross_sales_amount - return_amount, 2)
+            if not _is_tobacco_category(DEFAULT_CATEGORY_NAME):
+                non_tobacco_net += synthetic_net
+            categories.append({
+                'category_id': '__other__',
+                'category_name': DEFAULT_CATEGORY_NAME,
+                'sales_amount': gross_sales_amount,
+                'return_amount': return_amount,
+                'net_sales_amount': synthetic_net,
+                'cost_amount': cost_amount,
+            })
+        elif categories:
+            cost_delta = round(cost_amount - category_cost_sum, 2)
+            if abs(cost_delta) > 0.009:
+                other_bucket = next((item for item in categories if item['category_id'] == '__other__'), None)
+                if other_bucket is None:
+                    other_bucket = {
+                        'category_id': '__other__',
+                        'category_name': DEFAULT_CATEGORY_NAME,
+                        'sales_amount': 0.0,
+                        'return_amount': 0.0,
+                        'net_sales_amount': 0.0,
+                        'cost_amount': 0.0,
+                    }
+                    categories.append(other_bucket)
+                other_bucket['cost_amount'] = round(float(other_bucket.get('cost_amount') or 0.0) + cost_delta, 2)
+
+        categories.sort(key=lambda item: item['category_name'].lower())
+        output[day] = {
+            'categories': categories,
+            'gross_sales_amount': gross_sales_amount,
+            'return_amount': return_amount,
+            'net_sales_amount': net_sales_amount,
+            'cost_amount': round(cost_amount, 2),
+            'gross_profit_amount': round(gross_profit_amount, 2),
+            'non_tobacco_net_sales_for_bonus': round(non_tobacco_net, 2),
+        }
+    return output
+
+
+async def _get_cached_point_sales_metrics(point: LocationPoint, date_from: date, date_to: date, db: AsyncSession) -> dict[date, dict[str, Any]]:
+    rows = (
+        await db.scalars(
+            select(PayrollDailyMetricCache)
+            .where(
+                PayrollDailyMetricCache.location_point_id == point.id,
+                PayrollDailyMetricCache.metric_date >= date_from,
+                PayrollDailyMetricCache.metric_date <= date_to,
+            )
+            .order_by(PayrollDailyMetricCache.metric_date.asc())
+        )
+    ).all()
+    cached: dict[date, dict[str, Any]] = {}
+    for row in rows:
+        try:
+            categories = json.loads(row.categories_json or '[]')
+            if not isinstance(categories, list):
+                categories = []
+        except Exception:
+            categories = []
+        cached[row.metric_date] = {
+            'categories': categories,
+            'gross_sales_amount': round(float(row.gross_sales_amount or 0), 2),
+            'return_amount': round(float(row.return_amount or 0), 2),
+            'net_sales_amount': round(float(row.net_sales_amount or 0), 2),
+            'cost_amount': round(float(row.cost_amount or 0), 2),
+            'gross_profit_amount': round(float(row.gross_profit_amount or 0), 2),
+            'non_tobacco_net_sales_for_bonus': round(float(row.non_tobacco_net_sales_for_bonus or 0), 2),
+            '_refreshed_at': row.updated_at,
+        }
+    return cached
+
+
+async def _store_point_sales_metrics_cache(point: LocationPoint, metrics_by_day: dict[date, dict[str, Any]], db: AsyncSession) -> None:
+    if not metrics_by_day:
+        return
+    metric_days = sorted(metrics_by_day)
+    existing_rows = (
+        await db.scalars(
+            select(PayrollDailyMetricCache)
+            .where(
+                PayrollDailyMetricCache.location_point_id == point.id,
+                PayrollDailyMetricCache.metric_date >= metric_days[0],
+                PayrollDailyMetricCache.metric_date <= metric_days[-1],
+            )
+        )
+    ).all()
+    existing_by_day = {row.metric_date: row for row in existing_rows}
+    timestamp = datetime.utcnow()
+    for day, metrics in metrics_by_day.items():
+        row = existing_by_day.get(day)
+        payload = {
+            'gross_sales_amount': round(float(metrics.get('gross_sales_amount') or 0), 2),
+            'return_amount': round(float(metrics.get('return_amount') or 0), 2),
+            'net_sales_amount': round(float(metrics.get('net_sales_amount') or 0), 2),
+            'cost_amount': round(float(metrics.get('cost_amount') or 0), 2),
+            'gross_profit_amount': round(float(metrics.get('gross_profit_amount') or 0), 2),
+            'non_tobacco_net_sales_for_bonus': round(float(metrics.get('non_tobacco_net_sales_for_bonus') or 0), 2),
+            'categories_json': json.dumps(metrics.get('categories') or [], ensure_ascii=False),
+            'source_refreshed_at': timestamp,
+            'updated_at': timestamp,
+        }
+        if row is None:
+            row = PayrollDailyMetricCache(
+                location_point_id=point.id,
+                metric_date=day,
+                created_at=timestamp,
+                **payload,
+            )
+            db.add(row)
+        else:
+            for key, value in payload.items():
+                setattr(row, key, value)
+    await db.flush()
+
+
+def _is_cached_day_fresh(day: date, metrics: dict[str, Any] | None) -> bool:
+    if metrics is None:
+        return False
+    today = get_moscow_today()
+    if day < today:
+        return True
+    if day > today:
+        return False
+    refreshed_at = metrics.get('_refreshed_at')
+    if not isinstance(refreshed_at, datetime):
+        return False
+    age_seconds = (datetime.utcnow() - refreshed_at).total_seconds()
+    return age_seconds <= PAYROLL_DAILY_CACHE_RECENT_TTL_SECONDS
+
+
+async def _load_point_sales_metrics(
+    point: LocationPoint,
+    date_from: date,
+    date_to: date,
+    db: AsyncSession | None = None,
+    *,
+    force_refresh: bool = False,
+) -> dict[date, dict[str, Any]]:
     cache_key = (point.id, date_from.isoformat(), date_to.isoformat())
-    cached = _sales_metrics_cache.get(cache_key)
-    if cached and _cache_is_fresh(cached[0], SALES_METRICS_TTL_SECONDS):
-        return cached[1]
+    today = get_moscow_today()
+    includes_today = date_from <= today <= date_to
+    if not force_refresh:
+        cached = _sales_metrics_cache.get(cache_key)
+        if cached and _cache_is_fresh(cached[0], SALES_METRICS_TTL_SECONDS):
+            return cached[1]
 
     try:
-        category_lookup = await _build_top_category_lookup(point)
-        sales_rows, return_rows, shift_rows = await asyncio.gather(
-            _fetch_document_rows(
-                'retaildemand',
-                date_from,
-                date_to,
-                point,
-                expand='store,retailStore,retailShift,retailShift.store,retailShift.retailStore',
-                include_positions=True,
-                positions_expand='assortment,assortment.productFolder',
-            ),
-            _fetch_document_rows(
-                'retailsalesreturn',
-                date_from,
-                date_to,
-                point,
-                expand='store,retailStore,retailShift,retailShift.store,retailShift.retailStore,demand,demand.store,demand.retailStore,demand.retailShift,demand.retailShift.store,demand.retailShift.retailStore',
-                include_positions=True,
-                positions_expand='assortment,assortment.productFolder',
-            ),
-            _fetch_retail_shift_rows(date_from, date_to, point),
-        )
-        sales_rows = [row for row in sales_rows if _doc_matches_point(row, point)]
-        return_rows = [row for row in return_rows if _doc_matches_point(row, point)]
-        shift_rows = [row for row in shift_rows if _doc_matches_point(row, point)]
+        result: dict[date, dict[str, Any]] = {}
+        missing_days: list[date] = _daterange(date_from, date_to)
 
-        cost_cache: dict[str, float] = {}
-        unique_item_ids: set[str] = set()
-        for row in sales_rows + return_rows:
-            for position in _iter_positions(row):
-                item_id = _extract_id(position.get('assortment'))
-                if item_id:
-                    unique_item_ids.add(item_id)
-
-        if _ms_client_enabled(token=_point_ms_token(point), location=point.name) and unique_item_ids:
-            async def load_cost(item_id: str) -> tuple[str, float]:
-                financials = await ms_client.get_item_financials(point.name, item_id, **_point_ms_kwargs(point))
-                return item_id, float(financials.get('cost_price') or 0)
-
-            results = await asyncio.gather(*(load_cost(item_id) for item_id in unique_item_ids))
-            cost_cache = {item_id: cost for item_id, cost in results}
-
-        by_day: dict[date, dict[str, CategoryDocMetrics]] = defaultdict(dict)
-        totals_by_day: dict[date, dict[str, float]] = defaultdict(lambda: {'gross_sales': 0.0, 'returns': 0.0, 'cost': 0.0})
-        shift_sales_by_day: dict[date, float] = defaultdict(float)
-        shift_returns_by_day: dict[date, float] = defaultdict(float)
-        category_names_by_id: dict[str, str] = {}
-
-        for doc, is_return in [(row, False) for row in sales_rows] + [(row, True) for row in return_rows]:
-            doc_date = _extract_document_day(doc)
-            if doc_date is None:
-                continue
-            for position in _iter_positions(doc):
-                item_id = _extract_id(position.get('assortment'))
-                category = category_lookup.get(item_id or '')
-                if category:
-                    category_id = category['category_id']
-                    category_name = category['category_name']
+        if db is not None and not force_refresh:
+            cached_days = await _get_cached_point_sales_metrics(point, date_from, date_to, db)
+            missing_days = []
+            for day in _daterange(date_from, date_to):
+                metrics = cached_days.get(day)
+                if _is_cached_day_fresh(day, metrics):
+                    result[day] = {key: value for key, value in metrics.items() if not key.startswith('_')}
                 else:
-                    category_id = '__other__'
-                    category_name = DEFAULT_CATEGORY_NAME
-                category_names_by_id[category_id] = category_name
-                quantity = _quantity(position.get('quantity'))
-                amount = _money(position.get('sum'))
-                if amount <= 0:
-                    amount = round(_money(position.get('price')) * quantity, 2)
-                cost_amount = round(float(cost_cache.get(item_id or '', 0.0)) * quantity, 2)
-                bucket = by_day[doc_date].setdefault(category_id, CategoryDocMetrics())
-                if is_return:
-                    bucket.returns += amount
-                    totals_by_day[doc_date]['returns'] += amount
-                else:
-                    bucket.sales += amount
-                    totals_by_day[doc_date]['gross_sales'] += amount
-                bucket.cost += cost_amount
-                totals_by_day[doc_date]['cost'] += cost_amount
+                    missing_days.append(day)
 
-        for shift_row in shift_rows:
-            shift_day = _extract_document_day(shift_row)
-            if shift_day is None:
-                continue
-            shift_sales_by_day[shift_day] += _extract_shift_sales_amount(shift_row)
-            shift_returns_by_day[shift_day] += _extract_shift_return_amount(shift_row)
+        if missing_days:
+            live_ranges: list[tuple[date, date]] = []
+            range_start = missing_days[0]
+            previous_day = missing_days[0]
+            for day in missing_days[1:]:
+                if day == previous_day + timedelta(days=1):
+                    previous_day = day
+                    continue
+                live_ranges.append((range_start, previous_day))
+                range_start = previous_day = day
+            live_ranges.append((range_start, previous_day))
 
-        output: dict[date, dict[str, Any]] = {}
-        all_days = set(totals_by_day) | set(shift_sales_by_day) | set(shift_returns_by_day)
-        for day in sorted(all_days):
-            category_rows = by_day.get(day, {})
-            doc_totals = totals_by_day.get(day, {'gross_sales': 0.0, 'returns': 0.0, 'cost': 0.0})
-            shift_sales_amount = round(float(shift_sales_by_day.get(day, 0.0) or 0.0), 2)
-            shift_return_amount = round(float(shift_returns_by_day.get(day, 0.0) or 0.0), 2)
-            gross_sales_amount = shift_sales_amount if shift_sales_amount > 0 else round(doc_totals['gross_sales'], 2)
-            return_amount = shift_return_amount if shift_return_amount > 0 else round(doc_totals['returns'], 2)
-            categories = []
-            non_tobacco_net = 0.0
-            for category_id, metrics in category_rows.items():
-                category_name = category_names_by_id.get(category_id, DEFAULT_CATEGORY_NAME)
-                net_sales = round(metrics.sales - metrics.returns, 2)
-                if not _is_tobacco_category(category_name):
-                    non_tobacco_net += net_sales
-                categories.append({
-                    'category_id': category_id,
-                    'category_name': category_name,
-                    'sales_amount': round(metrics.sales, 2),
-                    'return_amount': round(metrics.returns, 2),
-                    'net_sales_amount': net_sales,
-                    'cost_amount': round(metrics.cost, 2),
-                })
+            refreshed_by_day: dict[date, dict[str, Any]] = {}
+            for range_from, range_to in live_ranges:
+                refreshed_by_day.update(await _load_point_sales_metrics_live(point, range_from, range_to))
+            for day in missing_days:
+                refreshed_by_day.setdefault(day, _empty_day_metrics())
+                result[day] = refreshed_by_day[day]
+            if db is not None:
+                await _store_point_sales_metrics_cache(point, refreshed_by_day, db)
+                await db.commit()
 
-            if not categories and (gross_sales_amount > 0 or return_amount > 0):
-                synthetic_net = round(gross_sales_amount - return_amount, 2)
-                if not _is_tobacco_category(DEFAULT_CATEGORY_NAME):
-                    non_tobacco_net += synthetic_net
-                categories.append({
-                    'category_id': '__other__',
-                    'category_name': DEFAULT_CATEGORY_NAME,
-                    'sales_amount': gross_sales_amount,
-                    'return_amount': return_amount,
-                    'net_sales_amount': synthetic_net,
-                    'cost_amount': 0.0,
-                })
-
-            categories.sort(key=lambda item: item['category_name'].lower())
-            cost_amount = round(doc_totals['cost'], 2)
-            net_sales_amount = round(gross_sales_amount - return_amount, 2)
-            output[day] = {
-                'categories': categories,
-                'gross_sales_amount': gross_sales_amount,
-                'return_amount': return_amount,
-                'net_sales_amount': net_sales_amount,
-                'cost_amount': cost_amount,
-                'gross_profit_amount': round(net_sales_amount - cost_amount, 2),
-                'non_tobacco_net_sales_for_bonus': round(non_tobacco_net, 2),
-            }
-
-        _sales_metrics_cache[cache_key] = (asyncio.get_running_loop().time(), output)
-        return output
+        ordered = {day: result.get(day, _empty_day_metrics()) for day in _daterange(date_from, date_to)}
+        _sales_metrics_cache[cache_key] = (asyncio.get_running_loop().time(), ordered)
+        return ordered
     except Exception:
         logger.exception(
             'Не удалось загрузить продажи/выручку МоегоСклада для точки %s за период %s..%s. Возвращаем пустые метрики.',
@@ -1301,7 +1679,7 @@ async def _load_point_sales_metrics(point: LocationPoint, date_from: date, date_
             date_from.isoformat(),
             date_to.isoformat(),
         )
-        return {}
+        return {day: _empty_day_metrics() for day in _daterange(date_from, date_to)}
 
 
 
@@ -1392,7 +1770,7 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession) -> ShiftComp
 
     settings = await _get_settings_for_date(point, shift.shift_date, db)
     rate_map = await _get_settings_rates(settings.id, db)
-    day_metrics_by_date = await _load_point_sales_metrics(point, shift.shift_date, shift.shift_date)
+    day_metrics_by_date = await _load_point_sales_metrics(point, shift.shift_date, shift.shift_date, db)
     day_metrics = day_metrics_by_date.get(shift.shift_date, {
         'categories': [],
         'gross_sales_amount': 0.0,
@@ -1413,7 +1791,7 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession) -> ShiftComp
         net_sales_amount = round(float(row['net_sales_amount']) * share_ratio, 2)
         category_id = row['category_id']
         rate_info = rate_map.get(category_id)
-        rate_percent = float(rate_info['rate_percent']) if rate_info else float(settings.other_rate_percent or 0)
+        rate_percent, is_other_category = _resolve_category_rate_percent(rate_info, settings.other_rate_percent)
         earning_amount = round(max(net_sales_amount, 0) * (rate_percent / 100.0), 2)
         category_earnings_total += earning_amount
         categories.append({
@@ -1424,7 +1802,7 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession) -> ShiftComp
             'return_amount': return_amount,
             'net_sales_amount': net_sales_amount,
             'earning_amount': earning_amount,
-            'is_other_category': rate_info is None,
+            'is_other_category': is_other_category,
         })
 
     non_tobacco_net = round(float(day_metrics['non_tobacco_net_sales_for_bonus']) * share_ratio, 2)
@@ -1804,7 +2182,7 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
     await ensure_user_can_access_location(current_user, location, db)
     point = await _get_location_point_by_name(location, db)
     await _ensure_shift_snapshots_for_point(point, db)
-    day_metrics = await _load_point_sales_metrics(point, date_from, date_to)
+    day_metrics = await _load_point_sales_metrics(point, date_from, date_to, db)
     gross_sales_amount = sum(day['gross_sales_amount'] for day in day_metrics.values())
     return_amount = sum(day['return_amount'] for day in day_metrics.values())
     net_sales_amount = sum(day['net_sales_amount'] for day in day_metrics.values())
@@ -1827,12 +2205,38 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
         computed = await _build_computed_shift(shift, db)
         employee_salary_total += computed.gross_salary_amount
 
+    current_settings = await _get_settings_for_date(point, date_to, db)
+    rate_map = await _get_settings_rates(current_settings.id, db)
+    category_totals: dict[str, dict[str, Any]] = {}
+    for metrics in day_metrics.values():
+        for row in metrics.get('categories') or []:
+            category_id = str(row.get('category_id') or '__other__')
+            category_name = str(row.get('category_name') or DEFAULT_CATEGORY_NAME)
+            rate_percent, is_other_category = _resolve_category_rate_percent(rate_map.get(category_id), current_settings.other_rate_percent)
+            net_amount = float(row.get('net_sales_amount') or 0)
+            earning_amount = round(max(net_amount, 0.0) * (rate_percent / 100.0), 2)
+            bucket = category_totals.setdefault(category_id, {
+                'category_id': category_id,
+                'category_name': category_name,
+                'rate_percent': rate_percent,
+                'sales_amount': 0.0,
+                'return_amount': 0.0,
+                'net_sales_amount': 0.0,
+                'earning_amount': 0.0,
+                'is_other_category': is_other_category,
+            })
+            bucket['sales_amount'] += float(row.get('sales_amount') or 0)
+            bucket['return_amount'] += float(row.get('return_amount') or 0)
+            bucket['net_sales_amount'] += net_amount
+            bucket['earning_amount'] += earning_amount
+            bucket['rate_percent'] = rate_percent
+            bucket['is_other_category'] = is_other_category
+
     expenses_total = await _collect_period_company_expenses(point, date_from, date_to, db)
     operating_profit = round(net_sales_amount - cost_amount - employee_salary_total - expenses_total, 2)
     manager_rate_percent = _manager_rate_for_profit(operating_profit)
     manager_salary_amount = round(max(operating_profit, 0) * (manager_rate_percent / 100.0), 2)
     net_profit_after_manager_salary = round(operating_profit - manager_salary_amount, 2)
-    current_settings = await _get_settings_for_date(point, date_to, db)
     responsible_admin = await db.get(User, current_settings.responsible_admin_user_id) if current_settings.responsible_admin_user_id else None
     return {
         'location': point.name,
@@ -1852,6 +2256,163 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
         'profit_after_manager_salary': net_profit_after_manager_salary,
         'responsible_admin_user_id': responsible_admin.id if responsible_admin else None,
         'responsible_admin_name': responsible_admin.full_name if responsible_admin else None,
+        'categories': sorted(
+            [
+                {
+                    **row,
+                    'sales_amount': round(float(row['sales_amount']), 2),
+                    'return_amount': round(float(row['return_amount']), 2),
+                    'net_sales_amount': round(float(row['net_sales_amount']), 2),
+                    'earning_amount': round(float(row['earning_amount']), 2),
+                }
+                for row in category_totals.values()
+            ],
+            key=lambda item: item['category_name'].lower(),
+        ),
+    }
+
+
+async def refresh_payroll_metrics_cache(date_from: date, date_to: date, db: AsyncSession, location: str | None = None, *, force_refresh: bool = False) -> dict[str, Any]:
+    query = select(LocationPoint).order_by(LocationPoint.name.asc())
+    if location:
+        query = query.where(LocationPoint.name == _normalize_location(location))
+    points = (await db.scalars(query)).all()
+
+    results: list[dict[str, Any]] = []
+    total_days = 0
+    for point in points:
+        token = _point_ms_token(point)
+        if not _ms_client_enabled(token=token, location=point.name):
+            results.append({
+                'location': point.name,
+                'skipped': True,
+                'reason': 'moysklad_disabled',
+            })
+            continue
+        metrics = await _load_point_sales_metrics(point, date_from, date_to, db, force_refresh=force_refresh)
+        day_count = len(metrics)
+        total_days += day_count
+        gross_sales_amount = round(sum(float(day.get('gross_sales_amount') or 0) for day in metrics.values()), 2)
+        return_amount = round(sum(float(day.get('return_amount') or 0) for day in metrics.values()), 2)
+        cost_amount = round(sum(float(day.get('cost_amount') or 0) for day in metrics.values()), 2)
+        results.append({
+            'location': point.name,
+            'days': day_count,
+            'gross_sales_amount': gross_sales_amount,
+            'return_amount': return_amount,
+            'cost_amount': cost_amount,
+            'refreshed': True,
+        })
+
+    return {
+        'date_from': date_from.isoformat(),
+        'date_to': date_to.isoformat(),
+        'locations': results,
+        'total_days': total_days,
+    }
+
+
+async def rebuild_closed_shift_snapshots(date_from: date, date_to: date, db: AsyncSession, location: str | None = None) -> dict[str, Any]:
+    query = (
+        select(WorkShift)
+        .where(
+            WorkShift.is_deleted.is_(False),
+            WorkShift.status == 'closed',
+            WorkShift.shift_date >= date_from,
+            WorkShift.shift_date <= date_to,
+        )
+        .order_by(WorkShift.shift_date.asc(), WorkShift.id.asc())
+    )
+    if location:
+        normalized = _normalize_location(location)
+        point = await db.scalar(select(LocationPoint).where(LocationPoint.name == normalized).limit(1))
+        if point is None:
+            return {
+                'date_from': date_from.isoformat(),
+                'date_to': date_to.isoformat(),
+                'location': normalized,
+                'updated': 0,
+                'processed': 0,
+                'details': [],
+            }
+        query = query.where(WorkShift.location_point_id == point.id)
+
+    shifts = (await db.scalars(query)).all()
+    details: list[dict[str, Any]] = []
+    updated = 0
+
+    for shift in shifts:
+        point = await db.get(LocationPoint, shift.location_point_id)
+        snapshot = await db.scalar(select(ShiftPayrollSnapshot).where(ShiftPayrollSnapshot.shift_id == shift.id).limit(1))
+        closed_at = snapshot.closed_at if snapshot else (shift.closed_at or datetime.utcnow())
+        is_auto_closed = bool(snapshot.is_auto_closed) if snapshot else False
+
+        if snapshot is not None:
+            await db.execute(delete(ShiftPayrollCategorySnapshot).where(ShiftPayrollCategorySnapshot.snapshot_id == snapshot.id))
+            await db.delete(snapshot)
+            await db.flush()
+
+        computed = await _build_computed_shift(shift, db)
+        new_snapshot = ShiftPayrollSnapshot(
+            shift_id=shift.id,
+            location_point_id=shift.location_point_id,
+            employee_user_id=shift.employee_user_id,
+            shift_date=shift.shift_date,
+            settings_version_id=computed.settings.id,
+            split_count=computed.split_count,
+            share_ratio=computed.share_ratio,
+            exit_amount=computed.exit_amount,
+            bonus_threshold=computed.bonus_threshold,
+            bonus_amount=computed.bonus_amount,
+            other_rate_percent=computed.other_rate_percent,
+            non_tobacco_net_sales_for_bonus=computed.non_tobacco_net_sales_for_bonus,
+            gross_sales_amount=computed.gross_sales_amount,
+            return_amount=computed.return_amount,
+            net_sales_amount=computed.net_sales_amount,
+            cost_amount=computed.cost_amount,
+            gross_profit_amount=computed.gross_profit_amount,
+            category_earnings_total=computed.category_earnings_total,
+            employee_expense_amount=0.0,
+            gross_salary_amount=computed.gross_salary_amount,
+            net_salary_amount=computed.gross_salary_amount,
+            is_auto_closed=is_auto_closed,
+            closed_at=closed_at,
+        )
+        db.add(new_snapshot)
+        await db.flush()
+
+        for row in computed.categories:
+            db.add(ShiftPayrollCategorySnapshot(
+                snapshot_id=new_snapshot.id,
+                category_id=row['category_id'],
+                category_name=row['category_name'],
+                rate_percent=row['rate_percent'],
+                sales_amount=row['sales_amount'],
+                return_amount=row['return_amount'],
+                net_sales_amount=row['net_sales_amount'],
+                earning_amount=row['earning_amount'],
+                is_other_category=row['is_other_category'],
+            ))
+
+        updated += 1
+        details.append({
+            'shift_id': shift.id,
+            'shift_date': shift.shift_date.isoformat(),
+            'location': point.name if point else None,
+            'gross_sales_amount': computed.gross_sales_amount,
+            'return_amount': computed.return_amount,
+            'cost_amount': computed.cost_amount,
+            'gross_profit_amount': computed.gross_profit_amount,
+        })
+
+    await db.commit()
+    return {
+        'date_from': date_from.isoformat(),
+        'date_to': date_to.isoformat(),
+        'location': _normalize_location(location) if location else None,
+        'processed': len(shifts),
+        'updated': updated,
+        'details': details,
     }
 
 

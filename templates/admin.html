@@ -344,6 +344,38 @@
 </div>
 
 
+<div id="edit-cost-override-modal" class="modal-overlay hidden">
+    <div class="modal-card form-modal-card discrepancy-edit-modal-card">
+        <div class="modal-header">
+            <div>
+                <h2>Локальная себестоимость</h2>
+                <p class="muted-text">Сохраните себестоимость только для таблицы расхождений по этой точке. Карточка товара в МойСклад не изменится.</p>
+            </div>
+            <button id="close-edit-cost-override-modal-btn" class="btn secondary btn-inline" type="button">Закрыть</button>
+        </div>
+
+        <form id="edit-cost-override-form" class="user-form discrepancy-edit-form" novalidate>
+            <div class="discrepancy-edit-summary">
+                <strong id="edit-cost-override-item-name">Товар</strong>
+                <p id="edit-cost-override-item-meta" class="muted-text"></p>
+            </div>
+            <label>Локальная себестоимость за шт.
+                <input type="number" id="edit-cost-override-value" min="0" step="0.01" placeholder="Оставьте пустым, чтобы удалить локальное значение">
+            </label>
+            <label>Комментарий
+                <textarea id="edit-cost-override-note" rows="3" placeholder="Почему используем именно эту себестоимость"></textarea>
+            </label>
+            <div class="form-actions">
+                <button type="submit" id="save-cost-override-btn" class="btn primary">Сохранить</button>
+                <button type="button" id="clear-cost-override-btn" class="btn danger">Удалить локальное значение</button>
+                <button type="button" id="edit-cost-override-cancel-btn" class="btn secondary">Отмена</button>
+            </div>
+            <div id="edit-cost-override-message" class="message"></div>
+        </form>
+    </div>
+</div>
+
+
 <div id="location-modal" class="modal-overlay hidden">
     <div class="modal-card location-modal-card">
         <div class="modal-header">
@@ -421,7 +453,7 @@
         <div class="modal-header">
             <div>
                 <h2>Категории цикла</h2>
-                <p class="muted-text">Выбирайте подкатегории по конкретной дате внутри текущего 15-дневного цикла. Завершённые ревизии доступны только для просмотра.</p>
+                <p class="muted-text">Выбирайте подкатегории по конкретной дате внутри текущего цикла месяца: 1–15 или 16–последний день. Прошлые и завершённые даты доступны только для просмотра.</p>
             </div>
             <div class="modal-header-actions">
                 <button id="apply-previous-cycle-targets-btn" class="btn secondary btn-inline" type="button">Добавить прошлый выбор</button>
@@ -443,7 +475,7 @@
                 <input type="text" id="cycle-targets-search" placeholder="Начните вводить категорию или подкатегорию..." autocomplete="off">
             </label>
         </div>
-        <p class="muted-text" style="margin:0 0 12px;">Выберите дату внутри текущего 15-дневного цикла и отметьте подкатегории именно на этот день. Итоговая ревизия за цикл остаётся без изменений.</p>
+        <p class="muted-text" style="margin:0 0 12px;">При открытии всегда подставляется сегодняшняя дата. Прошлые даты показывают уже выбранные подкатегории без возможности редактирования, а на текущую и будущие даты можно выбирать только свободные категории текущего цикла.</p>
         <div id="cycle-targets-meta" class="muted-text" style="margin-bottom:6px;"></div>
         <div class="cycle-targets-status-row muted-text">
             <span id="cycle-targets-selected-count">Выбрано категорий: 0. Подкатегорий: 0.</span>

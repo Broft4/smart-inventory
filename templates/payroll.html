@@ -45,14 +45,39 @@
         <div id="payroll-status" class="inventory-status hidden"></div>
     </section>
 
+    <section class="category-card hidden" id="manager-summary-card">
+        <details class="payroll-collapse">
+            <summary class="report-summary-header payroll-collapse-summary">
+                <div>
+                    <h2>Зарплата администратора и прибыль точки</h2>
+                    <p class="muted-text">Расчёт по точке за выбранный период.</p>
+                </div>
+                <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
+            </summary>
+            <div class="payroll-collapse-body">
+                <div class="summary-kpi-grid payroll-kpi-grid">
+                    <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Выручка</span><strong id="manager-net-sales">0 ₽</strong></div>
+                    <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Возвраты</span><strong id="manager-returns">0 ₽</strong></div>
+                    <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Себестоимость</span><strong id="manager-cost">0 ₽</strong></div>
+                    <div class="summary-kpi-card warning"><span class="summary-kpi-label">Зарплаты сотрудников</span><strong id="manager-employee-salary">0 ₽</strong></div>
+                    <div class="summary-kpi-card warning"><span class="summary-kpi-label">Расходы точки</span><strong id="manager-expenses">0 ₽</strong></div>
+                    <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Прибыль до зарплаты админа</span><strong id="manager-profit">0 ₽</strong></div>
+                    <div class="summary-kpi-card plus"><span class="summary-kpi-label">Зарплата админа</span><strong id="manager-salary">0 ₽</strong></div>
+                    <div class="summary-kpi-card plus"><span class="summary-kpi-label">Прибыль после зарплаты админа</span><strong id="manager-profit-after-manager">0 ₽</strong></div>
+                </div>
+                <div class="muted-text" id="manager-responsible-line"></div>
+            </div>
+        </details>
+    </section>
+
     <section class="category-card payroll-summary-card">
-        <details class="payroll-collapse" open>
+        <details class="payroll-collapse">
             <summary class="report-summary-header payroll-collapse-summary">
                 <div>
                     <h2>Итог</h2>
                     <p class="muted-text">Начисления по сменам, категориям и итог к выплате.</p>
                 </div>
-                <span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span>
+                <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
             </summary>
             <div class="payroll-collapse-body">
                 <div class="summary-kpi-grid payroll-kpi-grid">
@@ -87,35 +112,10 @@
         </details>
     </section>
 
-    <section class="category-card hidden" id="manager-summary-card">
-        <details class="payroll-collapse" open>
-            <summary class="report-summary-header payroll-collapse-summary">
-                <div>
-                    <h2>Зарплата администратора и прибыль точки</h2>
-                    <p class="muted-text">Расчёт по точке за выбранный период.</p>
-                </div>
-                <span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span>
-            </summary>
-            <div class="payroll-collapse-body">
-                <div class="summary-kpi-grid payroll-kpi-grid">
-                    <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Выручка</span><strong id="manager-net-sales">0 ₽</strong></div>
-                    <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Возвраты</span><strong id="manager-returns">0 ₽</strong></div>
-                    <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Себестоимость</span><strong id="manager-cost">0 ₽</strong></div>
-                    <div class="summary-kpi-card warning"><span class="summary-kpi-label">Зарплаты сотрудников</span><strong id="manager-employee-salary">0 ₽</strong></div>
-                    <div class="summary-kpi-card warning"><span class="summary-kpi-label">Расходы точки</span><strong id="manager-expenses">0 ₽</strong></div>
-                    <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Прибыль до зарплаты админа</span><strong id="manager-profit">0 ₽</strong></div>
-                    <div class="summary-kpi-card plus"><span class="summary-kpi-label">Зарплата админа</span><strong id="manager-salary">0 ₽</strong></div>
-                    <div class="summary-kpi-card plus"><span class="summary-kpi-label">Прибыль после зарплаты админа</span><strong id="manager-profit-after-manager">0 ₽</strong></div>
-                </div>
-                <div class="muted-text" id="manager-responsible-line"></div>
-            </div>
-        </details>
-    </section>
-
     {% if user.role not in ['admin', 'superadmin'] %}
-    <section class="category-card">
-        <details class="payroll-collapse" open>
-            <summary class="report-summary-header payroll-collapse-summary"><div><h2>Смены</h2><p class="muted-text">По каждой смене — выручка, бонус и итог.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span></summary>
+    <section class="category-card" id="payroll-shifts-card">
+        <details class="payroll-collapse">
+            <summary class="report-summary-header payroll-collapse-summary"><div><h2>Смены</h2><p class="muted-text">По каждой смене — выручка, бонус и итог.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span></summary>
             <div class="payroll-collapse-body">
                 <div id="payroll-days-container" class="payroll-days-container"></div>
             </div>
@@ -124,11 +124,31 @@
     {% endif %}
 
     <section class="category-card">
-        <details class="payroll-collapse" open>
-            <summary class="report-summary-header payroll-collapse-summary"><div><h2>Категории</h2><p class="muted-text">Сколько начислено по каждой категории за выбранный период.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span></summary>
+        <details class="payroll-collapse">
+            <summary class="report-summary-header payroll-collapse-summary"><div><h2>Категории</h2><p class="muted-text">Сколько начислено по каждой категории за выбранный период.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span></summary>
             <div class="payroll-collapse-body">
-                <div class="table-wrap">
-                    <table class="table payroll-table">
+                <div class="payroll-category-filters">
+                    <label>Поиск
+                        <input type="text" id="payroll-category-search" placeholder="Категория..." autocomplete="off">
+                    </label>
+                    <label>Показывать
+                        <select id="payroll-category-view">
+                            <option value="all">Все категории</option>
+                            <option value="earned">Только с начислением</option>
+                            <option value="sales">Только с продажами</option>
+                        </select>
+                    </label>
+                    <label>Сортировка
+                        <select id="payroll-category-sort">
+                            <option value="earning_desc">Сначала больше начислено</option>
+                            <option value="sales_desc">Сначала больше продаж</option>
+                            <option value="name_asc">По алфавиту</option>
+                        </select>
+                    </label>
+                    <div class="payroll-category-filter-meta muted-text" id="payroll-category-filter-meta">Показано категорий: 0</div>
+                </div>
+                <div class="table-wrap payroll-table-wrap">
+                    <table class="table payroll-table payroll-category-table">
                         <thead>
                             <tr>
                                 <th>Категория</th>
@@ -147,8 +167,8 @@
     </section>
 
     <section class="category-card hidden" id="admin-settings-card">
-        <details class="payroll-collapse" open>
-            <summary class="report-summary-header payroll-collapse-summary"><div><h2>Настройки зарплаты точки</h2><p class="muted-text">Версионные правила: новые изменения не переписывают прошлые закрытые смены.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span></summary>
+        <details class="payroll-collapse">
+            <summary class="report-summary-header payroll-collapse-summary"><div><h2>Настройки зарплаты точки</h2><p class="muted-text">Версионные правила: новые изменения не переписывают прошлые закрытые смены.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span></summary>
             <div class="payroll-collapse-body">
                 <div class="payroll-settings-grid">
                     <label>Дата вступления<input type="date" id="settings-effective-from"></label>
@@ -173,37 +193,58 @@
     </section>
 
     <section class="category-card{% if user.role not in ['admin', 'superadmin'] %} hidden{% endif %}" id="expenses-card">
-        <details class="payroll-collapse" open>
-            <summary class="report-summary-header payroll-collapse-summary"><div><h2>Расходы</h2><p class="muted-text">Шаблоны расходов на месяц и фактические суммы по точке.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span></summary>
+        <details class="payroll-collapse">
+            <summary class="report-summary-header payroll-collapse-summary"><div><h2>Расходы</h2><p class="muted-text">Шаблоны расходов на месяц и фактические суммы по точке.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span></summary>
             <div class="payroll-collapse-body">
                 <div class="expense-layout">
-            <div class="expense-create-card">
-                <div class="payroll-filter-grid expense-create-grid">
-                    <label>Месяц<input type="month" id="expenses-month-input"></label>
-                    <label>Новый шаблон<input type="text" id="expense-template-name" placeholder="Например, аренда"></label>
-                    <label>Тип<select id="expense-template-type"><option value="dynamic">Динамический</option><option value="static">Статический</option></select></label>
-                    <label>Сумма по умолчанию<input type="number" id="expense-template-default" min="0" step="0.01"></label>
-                    <label class="checkbox-like expense-checkbox-card"><input type="checkbox" id="expense-template-employee"> По умолчанию относить к сотруднику</label>
-                </div>
-                <div class="admin-toolbar-actions"><button id="create-expense-template-btn" type="button" class="btn secondary btn-inline">Добавить шаблон</button></div>
-            </div>
-            <div class="expense-section">
-                <div class="expense-section-head">
-                    <div>
-                        <h3>Шаблоны расходов</h3>
-                        <p class="muted-text">Шаблоны переходят из месяца в месяц, пока активны.</p>
+                    <div class="expense-create-card">
+                        <div class="payroll-filter-grid expense-create-grid">
+                            <label>Месяц<input type="month" id="expenses-month-input"></label>
+                            <label>Новый шаблон<input type="text" id="expense-template-name" placeholder="Например, аренда"></label>
+                            <label>Тип<select id="expense-template-type"><option value="dynamic">Динамический</option><option value="static">Статический</option></select></label>
+                            <label>Сумма по умолчанию<input type="number" id="expense-template-default" min="0" step="0.01"></label>
+                            <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline"><input type="checkbox" id="expense-template-employee"> По умолчанию относить к сотруднику</label>
+                        </div>
+                        <div class="admin-toolbar-actions"><button id="create-expense-template-btn" type="button" class="btn secondary btn-inline">Добавить шаблон</button></div>
                     </div>
-                    <button id="expense-templates-toggle-btn" type="button" class="btn secondary btn-inline">Свернуть шаблоны</button>
-                </div>
-                <div id="expense-template-tbody" class="expense-template-grid"></div>
-            </div>
-            <div class="expense-section">
-                <div class="expense-section-head">
-                    <h3>Расходы за месяц</h3>
-                    <p class="muted-text">Оплата, сотрудник и удержание из зарплаты настраиваются по каждой записи отдельно.</p>
-                </div>
-                <div id="expense-entry-tbody" class="expense-entry-grid"></div>
-            </div>
+
+                    <div class="expense-create-card">
+                        <div class="expense-section-head">
+                            <div>
+                                <h3>Свободный расход</h3>
+                                <p class="muted-text">Разовый расход без шаблона: уборка, штраф, курьер, ремонт и другие траты.</p>
+                            </div>
+                        </div>
+                        <div class="payroll-filter-grid expense-manual-grid">
+                            <label>Название<input type="text" id="manual-expense-name" placeholder="Например, уборка"></label>
+                            <label>Сумма<input type="number" id="manual-expense-amount" min="0" step="0.01"></label>
+                            <label>Сотрудник<select id="manual-expense-employee"><option value="">Без привязки</option></select></label>
+                            <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline"><input type="checkbox" id="manual-expense-paid"> Уже оплачен</label>
+                            <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline"><input type="checkbox" id="manual-expense-apply"> Вычитать из зарплаты сотрудника</label>
+                            <label class="expense-comment-field expense-comment-field--full">Комментарий<textarea id="manual-expense-comment" rows="3" placeholder="Комментарий к расходу"></textarea></label>
+                        </div>
+                        <div class="admin-toolbar-actions"><button id="create-manual-expense-btn" type="button" class="btn primary btn-inline">Добавить свободный расход</button></div>
+                    </div>
+
+                    <div class="expense-section">
+                        <div class="expense-section-head">
+                            <div>
+                                <h3>Шаблоны расходов</h3>
+                                <p class="muted-text">Шаблоны переходят из месяца в месяц, пока активны.</p>
+                            </div>
+                            <button id="expense-templates-toggle-btn" type="button" class="btn secondary btn-inline">Свернуть шаблоны</button>
+                        </div>
+                        <div id="expense-template-tbody" class="expense-template-grid"></div>
+                    </div>
+                    <div class="expense-section">
+                        <div class="expense-section-head expense-section-head--stacked">
+                            <div>
+                                <h3>Расходы за месяц</h3>
+                                <p class="muted-text">Оплата, сотрудник, комментарий и удержание из зарплаты настраиваются по каждой записи отдельно.</p>
+                            </div>
+                        </div>
+                        <div id="expense-entry-tbody" class="expense-entry-grid"></div>
+                    </div>
                 </div>
             </div>
         </details>

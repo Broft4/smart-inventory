@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import sqlite3
+from collections import deque
 from dataclasses import dataclass
 from datetime import date
 from time import monotonic
@@ -29,6 +30,13 @@ class CacheEntry:
 
 def _normalize_location(value: str | None) -> str:
     return str(value or '').strip().title()
+
+
+def _normalize_optional_ms_value(value: Any) -> str | None:
+    raw = str(value or '').strip()
+    if not raw or raw.lower() in {'none', 'null', 'undefined'}:
+        return None
+    return raw
 
 
 def _sqlite_db_path() -> str | None:
@@ -82,11 +90,18 @@ class MoySkladClient:
         self._assortment_search_cache: dict[str, CacheEntry] = {}
         self._assortment_search_locks: dict[str, asyncio.Lock] = {}
 
-        self.max_concurrent_requests = max(1, min(4, int(settings.ms_max_concurrent_requests or 4)))
+        self.max_concurrent_requests = max(1, min(4, int(settings.ms_max_concurrent_requests or 2)))
+        self.rate_limit_window_requests = max(1, min(95, int(settings.ms_rate_limit_window_requests or 45)))
+        self.rate_limit_window_seconds = max(1.0, float(settings.ms_rate_limit_window_seconds or 5.0))
+        self.rate_limit_remaining_threshold = max(1, int(settings.ms_rate_limit_remaining_threshold or 3))
         self.financial_cache_ttl = max(120, int(settings.ms_financial_cache_ttl_seconds or 900))
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
         self._location_config_cache: dict[str, CacheEntry] = {}
+        self._request_semaphore = asyncio.Semaphore(self.max_concurrent_requests)
+        self._rate_limit_lock = asyncio.Lock()
+        self._request_timestamps: deque[float] = deque()
+        self._cooldown_until = 0.0
 
     def _load_location_config_from_db(self, location: str) -> dict[str, str | None] | None:
         db_path = _sqlite_db_path()
@@ -116,9 +131,9 @@ class MoySkladClient:
             return None
         return {
             'name': _normalize_location(row['name']),
-            'token': (str(row['ms_token'] or '').strip() or None),
-            'store_id': (str(row['ms_store_id'] or '').strip() or None),
-            'store_name': (str(row['ms_store_name'] or '').strip() or None),
+            'token': _normalize_optional_ms_value(row['ms_token']),
+            'store_id': _normalize_optional_ms_value(row['ms_store_id']),
+            'store_name': _normalize_optional_ms_value(row['ms_store_name']),
         }
 
     def _get_location_config(self, location: str) -> dict[str, str | None] | None:
@@ -131,15 +146,14 @@ class MoySkladClient:
         return value
 
     def _resolve_token(self, token: str | None = None, *, location: str | None = None) -> str | None:
-        explicit = str(token or '').strip()
+        explicit = _normalize_optional_ms_value(token)
         if explicit:
             return explicit
         if location:
-            db_token = str((self._get_location_config(location) or {}).get('token') or '').strip()
+            db_token = _normalize_optional_ms_value((self._get_location_config(location) or {}).get('token'))
             if db_token:
                 return db_token
-        normalized = str(settings.moysklad_token or '').strip()
-        return normalized or None
+        return _normalize_optional_ms_value(settings.moysklad_token)
 
     def enabled(self, token: str | None = None, *, location: str | None = None) -> bool:
         return bool(self._resolve_token(token, location=location))
@@ -155,7 +169,7 @@ class MoySkladClient:
         }
 
     def _inventory_cache_key(self, location: str, store_id: str | None = None) -> tuple[str, str | None]:
-        return _normalize_location(location), (str(store_id).strip() or None)
+        return _normalize_location(location), _normalize_optional_ms_value(store_id)
 
     def _financial_cache_prefix(self, location: str, store_id: str | None = None) -> str:
         normalized, normalized_store_id = self._inventory_cache_key(location, store_id)
@@ -218,17 +232,83 @@ class MoySkladClient:
         sanitized = parsed._replace(query='', fragment='')
         return urlunparse(sanitized)
 
+    def _parse_retry_delay_header(self, value: Any) -> float | None:
+        raw = str(value or '').strip()
+        if not raw:
+            return None
+        try:
+            milliseconds = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return max(milliseconds / 1000.0, 0.0)
+
     def _get_retry_delay(self, response: httpx.Response, attempt: int) -> float:
-        retry_after = response.headers.get('X-Lognex-Retry-TimeInterval') or response.headers.get('X-Lognex-Retry-After')
-        if retry_after:
-            try:
-                return max(float(retry_after) / 1000.0, 0.5)
-            except ValueError:
-                pass
+        retry_after = (
+            self._parse_retry_delay_header(response.headers.get('X-Lognex-Retry-TimeInterval'))
+            or self._parse_retry_delay_header(response.headers.get('X-Lognex-Retry-After'))
+        )
+        if retry_after is not None:
+            return max(retry_after, 0.5)
         return min(1.5 * attempt, 6.0)
 
     def _get_exception_retry_delay(self, attempt: int) -> float:
         return min(1.5 * attempt, 6.0)
+
+    async def _register_server_cooldown(self, delay_seconds: float, reason: str, *, url: str | None = None) -> None:
+        delay = max(float(delay_seconds or 0.0), 0.0)
+        if delay <= 0:
+            return
+        until = monotonic() + delay
+        async with self._rate_limit_lock:
+            if until > self._cooldown_until:
+                self._cooldown_until = until
+        logger.warning(
+            'МойСклад rate-limit cooldown %.2f сек. Причина=%s%s',
+            delay,
+            reason,
+            f' url={url}' if url else '',
+        )
+
+    async def _wait_for_rate_limit_slot(self) -> None:
+        while True:
+            sleep_for = 0.0
+            async with self._rate_limit_lock:
+                now = monotonic()
+                while self._request_timestamps and (now - self._request_timestamps[0]) >= self.rate_limit_window_seconds:
+                    self._request_timestamps.popleft()
+
+                if self._cooldown_until > now:
+                    sleep_for = max(self._cooldown_until - now, 0.05)
+                elif len(self._request_timestamps) >= self.rate_limit_window_requests:
+                    oldest = self._request_timestamps[0]
+                    sleep_for = max(self.rate_limit_window_seconds - (now - oldest), 0.05)
+                else:
+                    self._request_timestamps.append(now)
+                    return
+
+            await asyncio.sleep(sleep_for)
+
+    async def _sync_rate_limit_from_response(self, response: httpx.Response, *, url: str) -> None:
+        remaining_raw = response.headers.get('X-RateLimit-Remaining')
+        reset_delay = (
+            self._parse_retry_delay_header(response.headers.get('X-Lognex-Reset'))
+            or self._parse_retry_delay_header(response.headers.get('X-Lognex-Retry-After'))
+            or self._parse_retry_delay_header(response.headers.get('X-Lognex-Retry-TimeInterval'))
+        )
+
+        remaining: int | None = None
+        if remaining_raw is not None:
+            try:
+                remaining = max(int(float(remaining_raw)), 0)
+            except (TypeError, ValueError):
+                remaining = None
+
+        if response.status_code == 429:
+            await self._register_server_cooldown(max(reset_delay or 1.0, 1.0), '429', url=url)
+            return
+
+        if remaining is not None and remaining <= self.rate_limit_remaining_threshold and (reset_delay or 0) > 0:
+            await self._register_server_cooldown(reset_delay or 0.0, f'remaining={remaining}', url=url)
 
     async def _request_json(
         self,
@@ -246,7 +326,11 @@ class MoySkladClient:
 
         for attempt in range(1, self.retry_attempts + 1):
             try:
-                response = await client.get(url, headers=self.headers(token, location=location), params=params)
+                await self._wait_for_rate_limit_slot()
+                async with self._request_semaphore:
+                    response = await client.get(url, headers=self.headers(token, location=location), params=params)
+
+                await self._sync_rate_limit_from_response(response, url=url)
 
                 if response.status_code == 429:
                     delay = self._get_retry_delay(response, attempt)
@@ -434,6 +518,16 @@ class MoySkladClient:
         await asyncio.gather(*(enrich(row) for row in rows))
         return rows
 
+
+    def _entity_href(self, entity_name: str, entity_id: str | None) -> str | None:
+        normalized_id = self._normalize_entity_id(entity_id)
+        if not normalized_id:
+            return None
+        normalized_entity = str(entity_name or '').strip().strip('/')
+        if not normalized_entity:
+            return None
+        return f"{self.base_url}/entity/{normalized_entity}/{normalized_id}"
+
     async def get_documents_by_period(
         self,
         entity_name: str,
@@ -479,6 +573,40 @@ class MoySkladClient:
             )
         return rows
 
+
+    async def get_profit_report_by_product(
+        self,
+        date_from: date,
+        date_to: date,
+        *,
+        store_id: str | None = None,
+        retail_store_id: str | None = None,
+        token: str | None = None,
+        location: str | None = None,
+    ) -> list[dict[str, Any]]:
+        filter_parts = ['entityType=retaildemand']
+
+        retail_store_href = self._entity_href('retailstore', retail_store_id)
+        if retail_store_href:
+            filter_parts.append(f'retailStore={retail_store_href}')
+        else:
+            store_href = self._entity_href('store', store_id)
+            if store_href:
+                filter_parts.append(f'store={store_href}')
+
+        params: dict[str, Any] = {
+            'momentFrom': f'{date_from.isoformat()} 00:00:00',
+            'momentTo': f'{date_to.isoformat()} 23:59:59',
+            'filter': ';'.join(filter_parts),
+        }
+        return await self.get_all_pages(
+            'report/profit/byproduct',
+            params=params,
+            token=token,
+            location=location,
+            page_limit=1000,
+        )
+
     async def get_stores_ids(self, token: str | None = None, location: str | None = None) -> dict[str, str]:
         if self._cache_alive(self._stores_cache):
             return self._stores_cache.value
@@ -504,24 +632,26 @@ class MoySkladClient:
 
     async def _resolve_store(self, location: str, *, token: str | None = None, store_id: str | None = None) -> tuple[str, str]:
         normalized = _normalize_location(location)
-        normalized_store_id = str(store_id or '').strip() or None
+        normalized_store_id = _normalize_optional_ms_value(store_id)
         if normalized_store_id:
             return normalized, normalized_store_id
 
         config = self._get_location_config(normalized) or {}
-        db_store_id = str(config.get('store_id') or '').strip() or None
+        db_store_id = _normalize_optional_ms_value(config.get('store_id'))
         if db_store_id:
             return normalized, db_store_id
 
         if normalized.lower() == (settings.store_dmitrov or '').strip().lower():
-            if settings.store_dmitrov_id:
-                return normalized, settings.store_dmitrov_id
+            configured_store_id = _normalize_optional_ms_value(settings.store_dmitrov_id)
+            if configured_store_id:
+                return normalized, configured_store_id
         elif normalized.lower() == (settings.store_dubna or '').strip().lower():
-            if settings.store_dubna_id:
-                return normalized, settings.store_dubna_id
+            configured_store_id = _normalize_optional_ms_value(settings.store_dubna_id)
+            if configured_store_id:
+                return normalized, configured_store_id
 
         lookup_names = {normalized.lower()}
-        db_store_name = str(config.get('store_name') or '').strip().lower()
+        db_store_name = str(_normalize_optional_ms_value(config.get('store_name')) or '').strip().lower()
         if db_store_name:
             lookup_names.add(db_store_name)
 
@@ -869,6 +999,13 @@ class MoySkladClient:
             return (cached.value or {}).get(item_id)
         return None
 
+    def get_inventory_financial_seeds(self, location: str, *, store_id: str | None = None) -> dict[str, dict[str, Any]]:
+        cache_key = self._inventory_cache_key(location, store_id)
+        cached = self._financials_by_location_cache.get(cache_key)
+        if self._cache_alive(cached):
+            return dict(cached.value or {})
+        return {}
+
     def _normalize_money_value(self, value: Any) -> float | None:
         if isinstance(value, dict):
             value = value.get('value')
@@ -919,7 +1056,7 @@ class MoySkladClient:
             return None
         return self._normalize_money_value(source.get('buyPrice'))
 
-    def _extract_financials_from_sources(self, *sources: dict[str, Any] | None) -> tuple[float | None, float | None]:
+    def extract_financials_from_sources(self, *sources: dict[str, Any] | None) -> tuple[float | None, float | None]:
         cost_price = None
         retail_price = None
         for source in sources:
@@ -930,6 +1067,9 @@ class MoySkladClient:
             if cost_price is not None and retail_price is not None:
                 break
         return cost_price, retail_price
+
+    def _extract_financials_from_sources(self, *sources: dict[str, Any] | None) -> tuple[float | None, float | None]:
+        return self.extract_financials_from_sources(*sources)
 
     async def get_item_financials(self, location: str, item_id: str, *, token: str | None = None, store_id: str | None = None) -> dict[str, float | None]:
         if not item_id:
@@ -971,7 +1111,7 @@ class MoySkladClient:
             product_meta = assortment_row.get('product') if isinstance((assortment_row or {}).get('product'), dict) else None
             product_row, _ = await self._get_product_row_by_meta((product_meta or {}).get('meta') if isinstance(product_meta, dict) else None, token=token)
 
-            cost_price, fallback_retail_price = self._extract_financials_from_sources(assortment_row, product_row, product_meta)
+            cost_price, fallback_retail_price = self.extract_financials_from_sources(assortment_row, product_row, product_meta)
 
             if cost_price is None and code:
                 search_row, search_source = await self._search_assortment_row_by_code(code, token=token)
@@ -1173,6 +1313,8 @@ class MoySkladClient:
             return
         try:
             await self.get_inventory(location, token=token, store_id=store_id)
+        except ValueError:
+            logger.warning('Пропускаем прогрев кеша МоегоСклада для точки %s: не удалось определить склад.', location)
         except Exception:
             logger.exception('Не удалось прогреть кеш МоегоСклада для точки %s', location)
 

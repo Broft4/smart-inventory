@@ -1126,12 +1126,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('logout-btn')?.addEventListener('click', logout);
     document.getElementById('refresh-btn')?.addEventListener('click', loadInventory);
     document.getElementById('start-revision-btn')?.addEventListener('click', async () => {
-        if (!inventoryState?.report_id || inventoryState?.employee_finished || inventoryState?.report_completed) return;
+        if (inventoryState?.employee_finished || inventoryState?.report_completed) return;
         try {
             const response = await fetch('/start-report', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ report_id: inventoryState.report_id }),
+                body: JSON.stringify({ report_id: inventoryState?.report_id ?? null }),
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok || data.success === false) {

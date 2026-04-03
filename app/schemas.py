@@ -115,7 +115,7 @@ class ReopenEmployeeAccessResponse(BaseModel):
 
 
 class StartReportRequest(BaseModel):
-    report_id: int
+    report_id: Optional[int] = None
 
 
 class StartReportResponse(BaseModel):
@@ -176,7 +176,7 @@ class CategoryModel(BaseModel):
 
 
 class InventoryStructureResponse(BaseModel):
-    report_id: int
+    report_id: Optional[int] = None
     location: str
     report_date: str
     categories: list[CategoryModel]
@@ -250,6 +250,21 @@ class UpdateDiscrepancyResponse(BaseModel):
     status: StatusEnum
 
 
+class UpdateDiscrepancyCostOverrideRequest(BaseModel):
+    cost_price: Optional[float] = Field(default=None, ge=0)
+    note: Optional[str] = Field(default=None, max_length=1000)
+
+
+class UpdateDiscrepancyCostOverrideResponse(BaseModel):
+    success: bool
+    message: str
+    check_result_id: int
+    item_id: str
+    cost_price: Optional[float] = None
+    note: Optional[str] = None
+    source: Optional[str] = None
+
+
 class DiscrepancyItem(BaseModel):
     check_result_id: Optional[int] = None
     category_name: Optional[str] = None
@@ -264,6 +279,9 @@ class DiscrepancyItem(BaseModel):
     cost_total: Optional[float] = None
     retail_total: Optional[float] = None
     lost_profit: Optional[float] = None
+    cost_price_source: Optional[str] = None
+    cost_price_note: Optional[str] = None
+    cost_price_updated_at: Optional[str] = None
 
 
 class CompletedSubcategoryInfo(BaseModel):

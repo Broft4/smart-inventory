@@ -1,0 +1,3 @@
+CRON_TZ=Europe/Moscow
+0 4 * * * flock -n /tmp/smart_inventory_payroll_cache.lock sh -c 'cd /opt/smart_inventory && /opt/smart_inventory/.venv/bin/python -m scripts.refresh_payroll_metrics_cache --yesterday-only --rebuild-closed-shifts --skip-product-financials >> /var/log/smart_inventory_payroll_cache.log 2>&1'
+20 4 * * * flock -n /tmp/smart_inventory_product_financial_cache.lock sh -c 'cd /opt/smart_inventory && /opt/smart_inventory/.venv/bin/python -m scripts.refresh_product_financial_cache >> /var/log/smart_inventory_product_financial_cache.log 2>&1'

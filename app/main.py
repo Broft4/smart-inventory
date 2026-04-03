@@ -53,6 +53,7 @@ from app.logic import (
     save_cycle_targets,
     start_report,
     update_discrepancy_actual_qty,
+    update_discrepancy_cost_override,
     update_location_point,
     update_user,
     user_to_schema,
@@ -72,6 +73,7 @@ from app.payroll import (
     create_manual_monthly_expense,
     deactivate_expense_template,
     delete_expense_template,
+    delete_monthly_expense_entry,
     delete_work_shift,
     export_employee_payroll_xlsx,
     get_employee_payroll_summary,
@@ -112,6 +114,8 @@ from app.schemas import (
     StartReportRequest,
     StartReportResponse,
     StoreListResponse,
+    UpdateDiscrepancyCostOverrideRequest,
+    UpdateDiscrepancyCostOverrideResponse,
     UpdateDiscrepancyRequest,
     UpdateDiscrepancyResponse,
     UpdateLocationRequest,
@@ -680,6 +684,16 @@ async def api_update_discrepancy(
     return await update_discrepancy_actual_qty(check_result_id, payload, db, current_user=admin)
 
 
+@app.put('/api/report/discrepancy-cost/{check_result_id}', response_model=UpdateDiscrepancyCostOverrideResponse)
+async def api_update_discrepancy_cost_override(
+    check_result_id: int,
+    payload: UpdateDiscrepancyCostOverrideRequest,
+    admin: User = Depends(require_admin_or_superadmin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await update_discrepancy_cost_override(check_result_id, payload, db, current_user=admin)
+
+
 @app.post('/api/report/{report_id}/reopen-employee-access', response_model=ReopenEmployeeAccessResponse)
 async def api_reopen_employee_access(report_id: int, payload: ReopenEmployeeAccessRequest, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
     return await reopen_employee_report_access(report_id, payload.employee_user_id, db, admin)
@@ -769,6 +783,11 @@ async def api_payroll_expenses(location: str, month: date, user: User = Depends(
 @app.put('/api/payroll/expenses/{entry_id}')
 async def api_payroll_expense_update(entry_id: int, payload: MonthlyExpenseEntryUpdateRequest, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
     return await update_monthly_expense_entry(entry_id, payload, db, user)
+
+
+@app.delete('/api/payroll/expenses/{entry_id}')
+async def api_payroll_expense_delete(entry_id: int, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await delete_monthly_expense_entry(entry_id, db, user)
 
 
 @app.post('/api/payroll/expenses/manual')

@@ -11,6 +11,11 @@ const payrollState = {
     expenses: [],
     audit: [],
     shiftDays: [],
+    categoryFilters: {
+        search: '',
+        view: 'all',
+        sort: 'earning_desc',
+    },
 };
 
 function qs(id) {
@@ -47,6 +52,20 @@ function formatTimeRu(dateTimeValue) {
     const date = new Date(normalized);
     if (Number.isNaN(date.getTime())) return String(dateTimeValue);
     return new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit' }).format(date);
+}
+
+function normalizeSearch(value) {
+    return String(value ?? '').trim().toLowerCase();
+}
+
+function compactCurrency(value) {
+    const num = Number(value || 0);
+    if (!Number.isFinite(num)) return '0';
+    return num.toLocaleString('ru-RU', { maximumFractionDigits: 0 });
+}
+
+function isMobileCompactMode() {
+    return window.matchMedia('(max-width: 640px)').matches;
 }
 
 function monthLabel(monthValue) {
@@ -210,21 +229,75 @@ function renderSummary(summary) {
 
     renderEmployeeShiftCalendar(summary);
 
-    const categoryTbody = qs('payroll-category-tbody');
-    categoryTbody.innerHTML = summary.categories?.length
-        ? summary.categories.map(category => `
-            <tr>
-                <td>${category.category_name}</td>
-                <td>${Number(category.rate_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%</td>
-                <td>${formatMoney(category.sales_amount)}</td>
-                <td>${formatMoney(category.return_amount)}</td>
-                <td>${formatMoney(category.net_sales_amount)}</td>
-                <td>${formatMoney(category.earning_amount)}</td>
-            </tr>
-        `).join('')
-        : '<tr><td colspan="6" class="muted-text">Нет начислений по категориям.</td></tr>';
+    if (!isAdminRole()) {
+        renderPayrollCategoryTable(summary.categories || []);
+    } else if (payrollState.managerSummary?.categories) {
+        renderPayrollCategoryTable(payrollState.managerSummary.categories || []);
+    } else {
+        renderPayrollCategoryTable(summary.categories || []);
+    }
 }
 
+function getFilteredPayrollCategories(categories = []) {
+    const search = normalizeSearch(payrollState.categoryFilters.search);
+    const view = payrollState.categoryFilters.view || 'all';
+    const sort = payrollState.categoryFilters.sort || 'earning_desc';
+
+    const filtered = (categories || []).filter(category => {
+        const categoryName = String(category?.category_name || '');
+        if (search && !normalizeSearch(categoryName).includes(search)) {
+            return false;
+        }
+        const earningAmount = Number(category?.earning_amount || 0);
+        const salesAmount = Number(category?.sales_amount || 0);
+        if (view === 'earned' && Math.abs(earningAmount) <= 1e-9) return false;
+        if (view === 'sales' && Math.abs(salesAmount) <= 1e-9) return false;
+        return true;
+    });
+
+    filtered.sort((left, right) => {
+        if (sort === 'name_asc') {
+            return String(left?.category_name || '').localeCompare(String(right?.category_name || ''), 'ru');
+        }
+        if (sort === 'sales_desc') {
+            return Number(right?.sales_amount || 0) - Number(left?.sales_amount || 0);
+        }
+        return Number(right?.earning_amount || 0) - Number(left?.earning_amount || 0);
+    });
+
+    return filtered;
+}
+
+function renderPayrollCategoryTable(categories = payrollState.summary?.categories || []) {
+    const categoryTbody = qs('payroll-category-tbody');
+    const filterMeta = qs('payroll-category-filter-meta');
+    if (!categoryTbody) return;
+
+    const filtered = getFilteredPayrollCategories(categories);
+    if (filterMeta) {
+        filterMeta.textContent = `Показано категорий: ${filtered.length} из ${Array.isArray(categories) ? categories.length : 0}`;
+    }
+
+    categoryTbody.innerHTML = filtered.length
+        ? filtered.map(category => `
+            <tr>
+                <td data-label="Категория">${escapeHtml(category.category_name)}</td>
+                <td data-label="%">${Number(category.rate_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%</td>
+                <td data-label="Продажи">${formatMoney(category.sales_amount)}</td>
+                <td data-label="Возвраты">${formatMoney(category.return_amount)}</td>
+                <td data-label="Чистая сумма">${formatMoney(category.net_sales_amount)}</td>
+                <td data-label="Начислено"><strong>${formatMoney(category.earning_amount)}</strong></td>
+            </tr>
+        `).join('')
+        : '<tr><td colspan="6" class="muted-text">По текущим фильтрам категории не найдены.</td></tr>';
+}
+
+function applyPayrollCategoryFiltersFromUi() {
+    payrollState.categoryFilters.search = qs('payroll-category-search')?.value || '';
+    payrollState.categoryFilters.view = qs('payroll-category-view')?.value || 'all';
+    payrollState.categoryFilters.sort = qs('payroll-category-sort')?.value || 'earning_desc';
+    renderPayrollCategoryTable(payrollState.summary?.categories || []);
+}
 
 function syncCollapseToggleText(details) {
     if (!details) return;
@@ -272,38 +345,51 @@ function renderEmployeeShiftCalendar(summary) {
         cells.push('<div class="shift-calendar-cell shift-calendar-cell--empty" aria-hidden="true"></div>');
     }
 
+    const compactMode = isMobileCompactMode();
+
     for (let d = 1; d <= totalDays; d += 1) {
         const date = `${year}-${String(mon).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
         const day = mapByDate.get(date);
         const isToday = date === today;
         let stateClass = '';
-        let body = '<div class="shift-calendar-empty-day">Смены нет</div>';
+        let body = compactMode
+            ? '<div class="shift-calendar-empty-day">—</div>'
+            : '<div class="shift-calendar-empty-day">Смены нет</div>';
         if (day) {
             if (day.is_closed) stateClass = ' employee-shift-day--closed';
             else if (isToday) stateClass = ' employee-shift-day--today-open';
             else if (date > today) stateClass = ' employee-shift-day--future';
 
             const categoryAmount = Number(day.category_earnings_total || 0);
-            const lines = [
-                `<div class="employee-shift-line"><span>Выход</span><strong>${formatMoney(day.exit_amount || 0)}</strong></div>`,
-                `<div class="employee-shift-line"><span>Бонус</span><strong>${formatMoney(day.bonus_amount || 0)}</strong></div>`,
-                `<div class="employee-shift-line"><span>Категории</span><strong>${formatMoney(categoryAmount)}</strong></div>`,
-            ];
-            if (isToday || day.is_closed) {
-                lines.push(`<div class="employee-shift-line total"><span>${day.is_closed ? 'Итог' : 'Промежуточно'}</span><strong>${formatMoney(day.gross_salary_amount || 0)}</strong></div>`);
+            const statusClass = day.is_closed ? 'closed' : (isToday ? 'open' : 'planned');
+            const statusLabel = day.is_closed ? 'Завершена' : (isToday ? 'Текущая' : 'Назначена');
+            if (compactMode) {
+                body = `
+                    <div class="employee-shift-status employee-shift-status--compact ${statusClass}">${statusLabel}</div>
+                    ${isToday || day.is_closed ? `<div class="employee-shift-compact-total">${compactCurrency(day.gross_salary_amount || 0)} ₽</div>` : ''}
+                `;
+            } else {
+                const lines = [
+                    `<div class="employee-shift-line"><span>Выход</span><strong>${formatMoney(day.exit_amount || 0)}</strong></div>`,
+                    `<div class="employee-shift-line"><span>Бонус</span><strong>${formatMoney(day.bonus_amount || 0)}</strong></div>`,
+                    `<div class="employee-shift-line"><span>Категории</span><strong>${formatMoney(categoryAmount)}</strong></div>`,
+                ];
+                if (isToday || day.is_closed) {
+                    lines.push(`<div class="employee-shift-line total"><span>${day.is_closed ? 'Итог' : 'Промежуточно'}</span><strong>${formatMoney(day.gross_salary_amount || 0)}</strong></div>`);
+                }
+                body = `
+                    <div class="employee-shift-status ${statusClass}">${statusLabel}</div>
+                    <div class="employee-shift-lines">${lines.join('')}</div>
+                `;
             }
-            body = `
-                <div class="employee-shift-status ${day.is_closed ? 'closed' : (isToday ? 'open' : 'planned')}">${day.is_closed ? 'Завершена' : (isToday ? 'Текущая смена' : 'Назначена')}</div>
-                <div class="employee-shift-lines">${lines.join('')}</div>
-            `;
         }
 
         cells.push(`
-            <article class="shift-calendar-cell employee-shift-calendar-cell${isToday ? ' shift-calendar-cell--today' : ''}${stateClass}">
+            <article class="shift-calendar-cell employee-shift-calendar-cell${isToday ? ' shift-calendar-cell--today' : ''}${stateClass}${compactMode ? ' employee-shift-calendar-cell--compact' : ''}">
                 <div class="shift-calendar-cell-head">
                     <div class="shift-calendar-day-meta">
                         <strong>${d}</strong>
-                        <span>${formatDateRu(date)}</span>
+                        <span>${compactMode ? '' : formatDateRu(date)}</span>
                     </div>
                 </div>
                 <div class="shift-calendar-cell-body">${body}</div>
@@ -458,14 +544,15 @@ function renderTemplates() {
     `).join('') || '<div class="empty-text">Шаблонов расходов пока нет.</div>';
 }
 
+
 function renderExpenses() {
-    const employeeOptions = ['<option value="">—</option>', ...payrollState.employees.map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}</option>`)].join('');
+    const employeeOptions = ['<option value="">Без привязки</option>', ...payrollState.employees.map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}</option>`)].join('');
     qs('expense-entry-tbody').innerHTML = (payrollState.expenses || []).map(entry => `
-        <article class="expense-entry-card">
+        <article class="expense-entry-card ${entry.is_manual ? 'manual' : ''}">
             <div class="expense-entry-head">
                 <div>
-                    <h4>${escapeHtml(entry.template_name)}</h4>
-                    <p class="muted-text">${entry.amount_type === 'static' ? 'Статический расход' : 'Динамический расход'} · месяц ${escapeHtml(entry.month_start || '')}</p>
+                    <h4>${escapeHtml(entry.name || entry.template_name || 'Расход')}</h4>
+                    <p class="muted-text">${entry.is_manual ? 'Свободный расход без шаблона' : `${entry.amount_type === 'static' ? 'Статический расход' : 'Динамический расход'} · месяц ${escapeHtml(entry.month_start || '')}`}</p>
                 </div>
                 <span class="status-chip ${entry.is_paid ? 'green' : 'orange'}">${entry.is_paid ? 'Оплачен' : 'Не оплачен'}</span>
             </div>
@@ -478,17 +565,22 @@ function renderExpenses() {
                     Сотрудник
                     <select data-expense-employee="${entry.id}">${employeeOptions}</select>
                 </label>
-                <label class="checkbox-like expense-checkbox-card">
+                <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline">
                     <input type="checkbox" data-expense-paid="${entry.id}" ${entry.is_paid ? 'checked' : ''}>
-                    Платёж уже оплачен
+                    Уже оплачен
                 </label>
-                <label class="checkbox-like expense-checkbox-card">
+                <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline">
                     <input type="checkbox" data-expense-apply="${entry.id}" ${entry.apply_to_employee_salary ? 'checked' : ''}>
                     Вычитать из зарплаты сотрудника
+                </label>
+                <label class="expense-comment-field expense-entry-comment">
+                    Комментарий
+                    <textarea rows="3" data-expense-comment="${entry.id}" placeholder="Комментарий к расходу">${escapeHtml(entry.comment || '')}</textarea>
                 </label>
             </div>
             <div class="expense-entry-actions">
                 <button type="button" class="btn secondary btn-inline" onclick="saveExpenseEntry(${entry.id})">Сохранить расход</button>
+                ${entry.is_manual ? `<button type="button" class="btn danger btn-inline" onclick="deleteExpenseEntry(${entry.id})">Удалить</button>` : ''}
             </div>
         </article>
     `).join('') || '<div class="empty-text">Нет расходов за выбранный месяц.</div>';
@@ -497,6 +589,7 @@ function renderExpenses() {
         if (select && entry.assigned_employee_user_id) select.value = String(entry.assigned_employee_user_id);
     });
 }
+
 
 function describeAuditLog(log) {
     const actor = log.actor_name || 'Система';
@@ -631,6 +724,7 @@ async function loadSummary() {
         if (isAdminRole()) {
             const managerSummary = await api(`/api/payroll/manager-summary?location=${encodeURIComponent(location)}&date_from=${dateFrom}&date_to=${dateTo}`);
             renderManagerSummary(managerSummary);
+            renderPayrollCategoryTable(managerSummary.categories || []);
         }
         showStatus('Данные обновлены.', 'success');
         setTimeout(hideStatus, 1500);
@@ -668,6 +762,10 @@ async function loadExpenseTemplatesAndEntries() {
     const expenses = await api(`/api/payroll/expenses?location=${encodeURIComponent(location)}&month=${month}`);
     payrollState.expenses = expenses.entries || [];
     renderExpenses();
+    const manualExpenseEmployee = qs('manual-expense-employee');
+    if (manualExpenseEmployee) {
+        manualExpenseEmployee.innerHTML = ['<option value="">Без привязки</option>', ...payrollState.employees.map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}</option>`)].join('');
+    }
 }
 
 async function loadAudit() {
@@ -838,11 +936,13 @@ window.saveExpenseEntry = async function saveExpenseEntry(id) {
     const isPaid = document.querySelector(`[data-expense-paid="${id}"]`).checked;
     const employeeValue = document.querySelector(`[data-expense-employee="${id}"]`).value;
     const applyToEmployeeSalary = document.querySelector(`[data-expense-apply="${id}"]`).checked;
+    const comment = document.querySelector(`[data-expense-comment="${id}"]`)?.value || '';
     const payload = {
         amount,
         is_paid: isPaid,
         assigned_employee_user_id: employeeValue ? Number(employeeValue) : null,
         apply_to_employee_salary: applyToEmployeeSalary,
+        comment,
     };
     try {
         await api(`/api/payroll/expenses/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
@@ -852,6 +952,51 @@ window.saveExpenseEntry = async function saveExpenseEntry(id) {
         showStatus('Расход сохранён.', 'success');
     } catch (error) {
         showStatus(error.message || 'Не удалось сохранить расход.', 'error');
+    }
+};
+
+async function createManualExpense() {
+    const payload = {
+        location: selectedLocation(),
+        month_start: selectedMonthStart('expenses-month-input'),
+        name: qs('manual-expense-name').value.trim(),
+        amount: Number(qs('manual-expense-amount').value || 0),
+        assigned_employee_user_id: qs('manual-expense-employee').value ? Number(qs('manual-expense-employee').value) : null,
+        is_paid: qs('manual-expense-paid').checked,
+        apply_to_employee_salary: qs('manual-expense-apply').checked,
+        comment: qs('manual-expense-comment').value.trim(),
+    };
+    if (!payload.name) {
+        showStatus('Укажи название свободного расхода.', 'error');
+        return;
+    }
+    try {
+        await api('/api/payroll/expenses/manual', { method: 'POST', body: JSON.stringify(payload) });
+        qs('manual-expense-name').value = '';
+        qs('manual-expense-amount').value = '';
+        qs('manual-expense-employee').value = '';
+        qs('manual-expense-paid').checked = false;
+        qs('manual-expense-apply').checked = false;
+        qs('manual-expense-comment').value = '';
+        await loadExpenseTemplatesAndEntries();
+        await loadSummary();
+        await loadAudit();
+        showStatus('Свободный расход добавлен.', 'success');
+    } catch (error) {
+        showStatus(error.message || 'Не удалось добавить свободный расход.', 'error');
+    }
+}
+
+window.deleteExpenseEntry = async function deleteExpenseEntry(id) {
+    if (!confirm('Удалить этот свободный расход?')) return;
+    try {
+        await api(`/api/payroll/expenses/${id}`, { method: 'DELETE' });
+        await loadExpenseTemplatesAndEntries();
+        await loadSummary();
+        await loadAudit();
+        showStatus('Свободный расход удалён.', 'success');
+    } catch (error) {
+        showStatus(error.message || 'Не удалось удалить свободный расход.', 'error');
     }
 };
 
@@ -909,7 +1054,11 @@ qs('add-shift-btn')?.addEventListener('click', addShift);
 qs('shift-month-input')?.addEventListener('change', loadShiftCalendar);
 qs('expenses-month-input')?.addEventListener('change', loadExpenseTemplatesAndEntries);
 qs('create-expense-template-btn')?.addEventListener('click', createExpenseTemplate);
+qs('create-manual-expense-btn')?.addEventListener('click', createManualExpense);
 qs('logout-btn').addEventListener('click', logout);
+qs('payroll-category-search')?.addEventListener('input', applyPayrollCategoryFiltersFromUi);
+qs('payroll-category-view')?.addEventListener('change', applyPayrollCategoryFiltersFromUi);
+qs('payroll-category-sort')?.addEventListener('change', applyPayrollCategoryFiltersFromUi);
 qs('shift-modal-save-btn')?.addEventListener('click', saveShiftFromModal);
 qs('shift-modal-close-btn')?.addEventListener('click', closeShiftModal);
 qs('shift-modal-cancel-btn')?.addEventListener('click', closeShiftModal);
@@ -933,6 +1082,12 @@ document.querySelectorAll('.payroll-collapse').forEach((details) => {
 document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && !qs('shift-modal')?.classList.contains('hidden')) {
         closeShiftModal();
+    }
+});
+
+window.addEventListener('resize', () => {
+    if (payrollState.summary) {
+        renderSummary(payrollState.summary);
     }
 });
 

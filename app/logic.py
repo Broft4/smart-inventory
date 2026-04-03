@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import calendar
 import hashlib
 import httpx
 import hmac
@@ -23,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.moysklad import DEFAULT_CATEGORY_NAME, DEFAULT_SUBCATEGORY_NAME, ms_client
-from app.models import AdminLocationAccess, CategoryAssignment, CheckResult, LocationPoint, Report, ReportEmployeeCompletion, ReportEmployeeStart, ReportTargetSnapshot, SelectionCycle, SelectionTarget, SelectionTargetDay, User, VerifyAttemptProgress
+from app.models import AdminLocationAccess, CategoryAssignment, CheckResult, LocationPoint, ProductCostOverride, ProductFinancialCache, Report, ReportEmployeeCompletion, ReportEmployeeStart, ReportTargetSnapshot, SelectionCycle, SelectionTarget, SelectionTargetDay, User, VerifyAttemptProgress
 logger = logging.getLogger(__name__)
 
 
@@ -61,6 +62,8 @@ from app.schemas import (
     UpdateLocationResponse,
     StoreOption,
     SubcategoryModel,
+    UpdateDiscrepancyCostOverrideRequest,
+    UpdateDiscrepancyCostOverrideResponse,
     UpdateDiscrepancyRequest,
     UpdateDiscrepancyResponse,
     UserActionResponse,
@@ -109,16 +112,110 @@ def _ms_client_enabled(token: str | None = None, *, location: str | None = None)
     return bool(enabled_attr)
 
 
+def _normalize_optional_ms_value(value: Any) -> str | None:
+    raw = str(value or '').strip()
+    if not raw or raw.lower() in {'none', 'null', 'undefined'}:
+        return None
+    return raw
+
+
 async def _get_location_ms_credentials(location: str, db: AsyncSession | None = None) -> tuple[str | None, str | None]:
     normalized = _normalize_location(location)
-    if db is None:
-        return None, None
-    point = await db.scalar(select(LocationPoint).where(LocationPoint.name == normalized).limit(1))
-    if not point:
-        return None, None
-    token = (point.ms_token or '').strip() or None
-    store_id = (point.ms_store_id or '').strip() or None
-    return token, store_id
+    if db is not None:
+        point = await db.scalar(select(LocationPoint).where(LocationPoint.name == normalized).limit(1))
+        if point:
+            token = _normalize_optional_ms_value(point.ms_token)
+            store_id = _normalize_optional_ms_value(point.ms_store_id)
+            return token, store_id
+    token = getattr(settings, 'moysklad_token', None)
+    if normalized == 'Дмитров':
+        return token, _normalize_optional_ms_value(settings.store_dmitrov_id)
+    if normalized == 'Дубна':
+        return token, _normalize_optional_ms_value(settings.store_dubna_id)
+    return token, None
+
+
+def _extract_meta_id(meta_or_obj: dict[str, Any] | None) -> str | None:
+    if not meta_or_obj:
+        return None
+    if isinstance(meta_or_obj.get('meta'), dict):
+        meta_or_obj = meta_or_obj['meta']
+    obj_id = meta_or_obj.get('id')
+    if obj_id:
+        return str(obj_id)
+    href = meta_or_obj.get('href')
+    if not href:
+        return None
+    return str(href).rstrip('/').split('/')[-1]
+
+
+def _iter_inventory_items(inventory: dict[str, Any]) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    for category in inventory.get('categories', []):
+        for subcategory in category.get('subcategories', []):
+            for item in subcategory.get('items', []):
+                item_id = str(item.get('id') or '').strip()
+                if not item_id:
+                    continue
+                items.append({
+                    'id': item_id,
+                    'name': str(item.get('name') or '').strip() or item_id,
+                })
+    return items
+
+
+@dataclass(slots=True)
+class CycleContext:
+    cycle_version: int
+    started_at: date
+    target_date: date
+
+
+async def _resolve_cycle_context(location: str, db: AsyncSession, requested_date: date | None = None) -> CycleContext:
+    normalized = _normalize_location(location)
+    cycle = await _get_or_create_selection_cycle(normalized, db)
+    if requested_date is None:
+        return CycleContext(
+            cycle_version=cycle.cycle_version,
+            started_at=cycle.started_at,
+            target_date=_resolve_cycle_target_date(cycle.started_at, None),
+        )
+
+    current_min_date, current_max_date = _cycle_date_bounds(cycle.started_at)
+    if current_min_date <= requested_date <= current_max_date:
+        return CycleContext(
+            cycle_version=cycle.cycle_version,
+            started_at=cycle.started_at,
+            target_date=_resolve_cycle_target_date(cycle.started_at, requested_date),
+        )
+
+    historical_start, historical_end = _cycle_bounds_for_date(requested_date)
+    historical_cycle_version = await db.scalar(
+        select(Report.cycle_version)
+        .where(Report.location == normalized)
+        .where(Report.report_date >= historical_start)
+        .where(Report.report_date <= historical_end)
+        .order_by(Report.report_date.desc(), Report.id.desc())
+        .limit(1)
+    )
+    if historical_cycle_version is None:
+        historical_cycle_version = await db.scalar(
+            select(SelectionTargetDay.cycle_version)
+            .where(SelectionTargetDay.location == normalized)
+            .where(SelectionTargetDay.target_date >= historical_start)
+            .where(SelectionTargetDay.target_date <= historical_end)
+            .order_by(SelectionTargetDay.target_date.desc(), SelectionTargetDay.id.desc())
+            .limit(1)
+        )
+    if historical_cycle_version is None:
+        cycle_delta = max(0, _cycle_order_value(cycle.started_at) - _cycle_order_value(requested_date))
+        historical_cycle_version = max(1, int(cycle.cycle_version or 1) - cycle_delta)
+
+    return CycleContext(
+        cycle_version=int(historical_cycle_version or 1),
+        started_at=historical_start,
+        target_date=requested_date,
+    )
 
 
 def _get_cached_stripped_inventory(location: str, raw_inventory: dict[str, Any]) -> dict[str, Any]:
@@ -288,9 +385,39 @@ MSK_SHIFT = timedelta(hours=3)
 SELECTION_CYCLE_DAYS = 15
 
 MSK_TZ = timezone(MSK_SHIFT)
+RUS_MONTH_NAMES = [
+    'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
+    'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь',
+]
 
 def get_moscow_today() -> date:
     return datetime.now(MSK_TZ).date()
+
+
+def _cycle_bounds_for_date(target_date: date) -> tuple[date, date]:
+    if target_date.day <= 15:
+        return target_date.replace(day=1), target_date.replace(day=15)
+    month_last_day = calendar.monthrange(target_date.year, target_date.month)[1]
+    return target_date.replace(day=16), target_date.replace(day=month_last_day)
+
+
+def _cycle_index_for_date(target_date: date) -> int:
+    return 1 if target_date.day <= 15 else 2
+
+
+def _cycle_order_value(target_date: date) -> int:
+    return target_date.year * 24 + (target_date.month - 1) * 2 + (_cycle_index_for_date(target_date) - 1)
+
+
+def _cycle_days_left_for_date(target_date: date) -> int:
+    _, cycle_end = _cycle_bounds_for_date(target_date)
+    return max(0, (cycle_end - target_date).days + 1)
+
+
+def _cycle_label_for_date(target_date: date) -> str:
+    cycle_start, cycle_end = _cycle_bounds_for_date(target_date)
+    month_label = f"{RUS_MONTH_NAMES[target_date.month - 1]} {target_date.year}"
+    return f"{month_label} · Цикл {_cycle_index_for_date(target_date)} ({cycle_start.day}–{cycle_end.day})"
 
 
 def hash_password(password: str) -> str:
@@ -562,6 +689,12 @@ def bootstrap_schema_and_admin(sync_conn) -> None:
         required = {'id', 'report_id', 'user_id', 'user_full_name_snapshot', 'finished_at'}
         if not required.issubset(cols):
             sync_conn.execute(text('DROP TABLE IF EXISTS report_employee_completions'))
+
+    if 'product_financial_cache' in tables:
+        cols = {c['name'] for c in inspector.get_columns('product_financial_cache')}
+        required = {'id', 'location_point_id', 'item_id', 'item_name', 'item_code', 'cost_price', 'retail_price', 'source_refreshed_at', 'created_at', 'updated_at'}
+        if not required.issubset(cols):
+            sync_conn.execute(text('DROP TABLE IF EXISTS product_financial_cache'))
 
 
     if 'expense_templates' in tables:
@@ -1371,23 +1504,35 @@ async def _ensure_cycle_final_report(location: str, cycle_version: int, cycle_st
 async def _get_or_create_selection_cycle(location: str, db: AsyncSession) -> SelectionCycle:
     normalized = _normalize_location(location)
     cycle = await db.scalar(select(SelectionCycle).where(SelectionCycle.location == normalized).limit(1))
-    today = date.today()
+    today = get_moscow_today()
+    expected_cycle_start, _ = _cycle_bounds_for_date(today)
 
     if not cycle:
-        cycle = SelectionCycle(location=normalized, cycle_version=1, started_at=today)
+        cycle = SelectionCycle(location=normalized, cycle_version=1, started_at=expected_cycle_start)
         db.add(cycle)
         await db.commit()
         await db.refresh(cycle)
         return cycle
 
-    if (today - cycle.started_at).days >= SELECTION_CYCLE_DAYS:
+    stored_cycle_start = cycle.started_at or expected_cycle_start
+    stored_order = _cycle_order_value(stored_cycle_start)
+    current_order = _cycle_order_value(today)
+
+    if stored_order < current_order:
         old_version = cycle.cycle_version
-        old_started_at = cycle.started_at
+        old_started_at = stored_cycle_start
         await _ensure_cycle_final_report(normalized, old_version, old_started_at, db)
-        cycle.cycle_version += 1
-        cycle.started_at = today
+        cycle.cycle_version += max(1, current_order - stored_order)
+        cycle.started_at = expected_cycle_start
         cycle.updated_at = datetime.utcnow()
         await db.execute(delete(CategoryAssignment).where(CategoryAssignment.location == normalized, CategoryAssignment.cycle_version == old_version))
+        await db.commit()
+        await db.refresh(cycle)
+        return cycle
+
+    if cycle.started_at != expected_cycle_start:
+        cycle.started_at = expected_cycle_start
+        cycle.updated_at = datetime.utcnow()
         await db.commit()
         await db.refresh(cycle)
 
@@ -1407,9 +1552,9 @@ async def reset_selection_cycle(location: str, db: AsyncSession) -> ResetSelecti
     await db.refresh(cycle)
     return ResetSelectionCycleResponse(
         success=True,
-        message='Выбор категорий и подкатегорий обновлён. Начался новый 15-дневный цикл.',
-        cycle_version=cycle.cycle_version,
-        cycle_started_at=cycle.started_at.strftime('%d.%m.%Y'),
+        message='Выбор категорий и подкатегорий обновлён. Начался новый цикл месяца.',
+        cycle_version=cycle_context.cycle_version,
+        cycle_started_at=cycle_context.started_at.strftime('%d.%m.%Y'),
     )
 
 
@@ -1537,9 +1682,7 @@ async def _resolve_previous_selection_targets_for_date(
 
 
 def _cycle_date_bounds(cycle_started_at: date) -> tuple[date, date]:
-    min_date = cycle_started_at
-    max_date = cycle_started_at + timedelta(days=14)
-    return min_date, max_date
+    return _cycle_bounds_for_date(cycle_started_at)
 
 
 def _resolve_cycle_target_date(cycle_started_at: date, requested_date: date | None) -> date:
@@ -2046,13 +2189,13 @@ async def delete_location_point(location_id: int, db: AsyncSession) -> DeleteRes
 
 async def get_cycle_targets(location: str, db: AsyncSession, target_date: date | None = None) -> AdminCycleTargetsResponse:
     normalized = _normalize_location(location)
-    cycle = await _get_or_create_selection_cycle(normalized, db)
-    resolved_target_date = _resolve_cycle_target_date(cycle.started_at, target_date)
+    cycle_context = await _resolve_cycle_context(normalized, db, target_date)
+    resolved_target_date = cycle_context.target_date
     inventory = await _get_inventory_for(normalized, db=db)
-    targets = await _resolve_selection_targets_for_date(normalized, cycle.cycle_version, resolved_target_date, db)
+    targets = await _resolve_selection_targets_for_date(normalized, cycle_context.cycle_version, resolved_target_date, db)
     previous_targets, previous_target_date = await _resolve_previous_selection_targets_for_date(
         normalized,
-        cycle.cycle_version,
+        cycle_context.cycle_version,
         resolved_target_date,
         db,
     )
@@ -2066,18 +2209,26 @@ async def get_cycle_targets(location: str, db: AsyncSession, target_date: date |
     )
     occupied_category_ids, occupied_subcategory_ids = await _load_cycle_scope_taken_elsewhere(
         normalized,
-        cycle.cycle_version,
+        cycle_context.cycle_version,
         inventory,
         db,
         exclude_target_date=resolved_target_date,
     )
-    target_report = await _get_daily_report_for_cycle_date(normalized, cycle.cycle_version, resolved_target_date, db)
-    is_locked = bool(target_report and target_report.status == 'completed')
-    locked_message = (
-        f'Ревизия за {resolved_target_date.strftime("%d.%m.%Y")} уже завершена. Для неё можно только посмотреть выбранные подкатегории.'
-        if is_locked
-        else None
-    )
+    target_report = await _get_daily_report_for_cycle_date(normalized, cycle_context.cycle_version, resolved_target_date, db)
+    today = get_moscow_today()
+    is_past_date_locked = resolved_target_date < today
+    is_completed_report_locked = bool(target_report and target_report.status == 'completed')
+    is_locked = bool(is_past_date_locked or is_completed_report_locked)
+    if is_past_date_locked:
+        locked_message = (
+            f'Дата {resolved_target_date.strftime("%d.%m.%Y")} уже прошла. Для прошлых дат выбор доступен только для просмотра.'
+        )
+    elif is_completed_report_locked:
+        locked_message = (
+            f'Ревизия за {resolved_target_date.strftime("%d.%m.%Y")} уже завершена. Для неё можно только посмотреть выбранные подкатегории.'
+        )
+    else:
+        locked_message = None
 
     visible_previous_category_ids: set[str] = set()
     visible_previous_subcategory_ids: set[str] = set()
@@ -2145,11 +2296,11 @@ async def get_cycle_targets(location: str, db: AsyncSession, target_date: date |
             completed_subcategories=completed_subcategories,
         ))
 
-    min_target_date, max_target_date = _cycle_date_bounds(cycle.started_at)
+    min_target_date, max_target_date = _cycle_date_bounds(cycle_context.started_at)
     return AdminCycleTargetsResponse(
         location=normalized,
-        cycle_version=cycle.cycle_version,
-        cycle_started_at=cycle.started_at.strftime('%d.%m.%Y'),
+        cycle_version=cycle_context.cycle_version,
+        cycle_started_at=cycle_context.started_at.strftime('%d.%m.%Y'),
         target_date=resolved_target_date.isoformat(),
         min_target_date=min_target_date.isoformat(),
         max_target_date=max_target_date.isoformat(),
@@ -2174,7 +2325,9 @@ async def save_cycle_targets(payload: SaveCycleTargetsRequest, db: AsyncSession)
     target_date = _resolve_cycle_target_date(cycle.started_at, payload.target_date)
     min_target_date, max_target_date = _cycle_date_bounds(cycle.started_at)
     if target_date < min_target_date or target_date > max_target_date:
-        raise HTTPException(status_code=400, detail='Дата выбора должна быть в пределах текущего 15-дневного цикла.')
+        raise HTTPException(status_code=400, detail='Дата выбора должна быть в пределах текущего полумесячного цикла.')
+    if target_date < get_moscow_today():
+        raise HTTPException(status_code=400, detail='Прошлые даты доступны только для просмотра. Менять категории можно только на текущую дату и вперёд.')
 
     target_report = await _get_daily_report_for_cycle_date(normalized, cycle.cycle_version, target_date, db)
     if target_report is not None and target_report.status == 'completed':
@@ -2824,7 +2977,7 @@ async def _build_inventory_structure_for_report(
     can_finish_report, _, _, finish_block_message = _evaluate_finish_readiness(categories)
 
     resolved_cycle_started_at = cycle_started_at or report.report_date
-    resolved_cycle_days_left = cycle_days_left if cycle_days_left is not None else max(0, SELECTION_CYCLE_DAYS - (date.today() - report.report_date).days)
+    resolved_cycle_days_left = cycle_days_left if cycle_days_left is not None else _cycle_days_left_for_date(report.report_date)
 
     return InventoryStructureResponse(
         report_id=report.id,
@@ -2918,8 +3071,43 @@ async def _get_previous_unfinished_report_block_message(
 async def get_inventory_data(location: str, db: AsyncSession, user: User) -> InventoryStructureResponse:
     normalized = _normalize_location(location)
     cycle = await _get_or_create_selection_cycle(normalized, db)
-    report = await get_or_create_daily_report(normalized, cycle.cycle_version, db)
-    days_left = max(0, SELECTION_CYCLE_DAYS - (date.today() - cycle.started_at).days)
+    today = get_moscow_today()
+    report = await db.scalar(
+        select(Report).where(
+            Report.location == normalized,
+            Report.report_date == today,
+            Report.report_type == DAILY_REPORT_TYPE,
+        ).limit(1)
+    )
+    days_left = _cycle_days_left_for_date(today)
+
+    if report is None:
+        preview_report = Report(
+            location=normalized,
+            report_date=today,
+            cycle_version=cycle.cycle_version,
+            report_type=DAILY_REPORT_TYPE,
+            status='created',
+        )
+        start_block_message = await _get_previous_unfinished_report_block_message(preview_report, user, db, auto_complete_ready=False)
+        return InventoryStructureResponse(
+            report_id=None,
+            location=normalized,
+            report_date=today.isoformat(),
+            categories=[],
+            cycle_version=cycle.cycle_version,
+            cycle_started_at=cycle.started_at.strftime('%d.%m.%Y'),
+            cycle_days_left=days_left,
+            report_status='created',
+            employee_started=False,
+            employee_finished=False,
+            report_started=False,
+            report_completed=False,
+            can_finish_report=False,
+            finish_block_message=None,
+            start_block_message=start_block_message,
+        )
+
     start_block_message = await _get_previous_unfinished_report_block_message(report, user, db, auto_complete_ready=False)
     return await _build_inventory_structure_for_report(
         report,
@@ -3038,7 +3226,7 @@ async def assign_selection_to_user(report_id: int, category_id: str, target_type
         if diagnostic_sub:
             raise HTTPException(status_code=400, detail='Служебные ветки «Без категории/Без подкатегории» нельзя брать целиком. Выберите конкретные товары.')
         if subcategory_id in completed_subcategory_ids.get(category_id, set()):
-            raise HTTPException(status_code=400, detail='Эта подкатегория уже была пройдена в текущем 15-дневном цикле.')
+            raise HTTPException(status_code=400, detail='Эта подкатегория уже была пройдена в текущем цикле месяца.')
 
         existing = sub_assignments.get(subcategory_id)
         if existing:
@@ -3390,12 +3578,20 @@ async def verify_item_or_category(data: VerifyRequest, db: AsyncSession, checked
     )
 
 
-async def start_report(report_id: int, db: AsyncSession, user: User) -> StartReportResponse:
-    report = await db.get(Report, report_id)
-    if not report:
-        raise HTTPException(status_code=404, detail='Ревизия не найдена.')
-    if user.role != RoleEnum.EMPLOYEE.value or user.location != report.location:
+async def start_report(report_id: int | None, db: AsyncSession, user: User) -> StartReportResponse:
+    if user.role != RoleEnum.EMPLOYEE.value or not user.location:
         raise HTTPException(status_code=403, detail='Можно начать только свою ревизию по назначенной точке.')
+
+    report: Report | None = None
+    if report_id is not None:
+        report = await db.get(Report, report_id)
+        if not report:
+            raise HTTPException(status_code=404, detail='Ревизия не найдена.')
+        if user.location != report.location:
+            raise HTTPException(status_code=403, detail='Можно начать только свою ревизию по назначенной точке.')
+    else:
+        cycle = await _get_or_create_selection_cycle(user.location, db)
+        report = await get_or_create_daily_report(user.location, cycle.cycle_version, db)
 
     await _sync_report_status(report, db)
     if report.status == 'completed':
@@ -3525,14 +3721,15 @@ async def get_reports_history(location: str, db: AsyncSession) -> ReportHistoryR
     for report in reports:
         report_type = report.report_type or DAILY_REPORT_TYPE
         report_number = report_numbers.get(report.id) if report_type != FINAL_REPORT_TYPE else None
+        cycle_label = _cycle_label_for_date(report.report_date)
         if report_type == FINAL_REPORT_TYPE:
             label = (
-                f"Цикл {report.cycle_version} · Итоговая · "
+                f"{cycle_label} · Итоговая · "
                 f"{_format_moscow_datetime(report.date_created)} — {_report_status_label(report.status)}"
             )
         else:
             label = (
-                f"Цикл {report.cycle_version} · №{report_number or '-'} · "
+                f"{cycle_label} · №{report_number or '-'} · "
                 f"{_format_moscow_datetime(report.date_created)} — {_report_status_label(report.status)}"
             )
         history_items.append(
@@ -3725,31 +3922,396 @@ async def _get_report_number(report: Report, db: AsyncSession) -> int:
     return int(result or 0)
 
 
-async def _load_discrepancy_financials(location: str, results: list[CheckResult], db: AsyncSession | None = None) -> dict[str, dict[str, float | None]]:
-    token, store_id = await _get_location_ms_credentials(location, db)
-    if not _ms_client_enabled(token, location=location):
+def _logic_money_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return round(float(value) / 100.0, 2)
+    except (TypeError, ValueError):
+        return None
+
+
+
+def _logic_first_money_value(container: dict[str, Any], fields: tuple[str, ...]) -> float | None:
+    for field in fields:
+        if field in container and container.get(field) is not None:
+            amount = _logic_money_or_none(container.get(field))
+            if amount is not None:
+                return amount
+    return None
+
+
+
+def _logic_quantity(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+
+def _logic_clean_text(value: str | None) -> str:
+    return ' '.join(str(value or '').strip().lower().replace('ё', 'е').split())
+
+
+
+def _logic_candidate_name_variants(value: str | None) -> set[str]:
+    raw = _logic_clean_text(value)
+    if not raw:
+        return set()
+    variants = {raw}
+    separators = [':', '-', '—', '(', ')', '[', ']', '/', '\\']
+    parts = {raw}
+    for sep in separators:
+        next_parts = set()
+        for part in parts:
+            next_parts.update(p.strip() for p in part.split(sep) if p.strip())
+        parts |= next_parts
+    variants |= parts
+    return {item for item in variants if item}
+
+
+
+def _logic_iter_point_reference_candidates(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    collected: list[dict[str, Any]] = []
+    seen: set[int] = set()
+
+    def add(candidate: Any) -> None:
+        if not isinstance(candidate, dict):
+            return
+        marker = id(candidate)
+        if marker in seen:
+            return
+        seen.add(marker)
+        collected.append(candidate)
+
+    def add_store_refs(container: dict[str, Any] | None) -> None:
+        if not isinstance(container, dict):
+            return
+        add(container.get('store'))
+        add(container.get('retailStore'))
+        add(container.get('retailstore'))
+
+    add_store_refs(doc)
+
+    retail_shift = doc.get('retailShift')
+    add(retail_shift)
+    add_store_refs(retail_shift if isinstance(retail_shift, dict) else None)
+
+    demand = doc.get('demand')
+    add(demand)
+    if isinstance(demand, dict):
+        add_store_refs(demand)
+        demand_shift = demand.get('retailShift')
+        add(demand_shift)
+        add_store_refs(demand_shift if isinstance(demand_shift, dict) else None)
+
+    return collected
+
+
+
+def _logic_doc_matches_point(doc: dict[str, Any], point: LocationPoint) -> bool:
+    if doc.get('applicable') is False:
+        return False
+
+    point_ids = {str(point.ms_store_id or '').strip()} - {''}
+    point_names = set()
+    for raw in (point.name, point.ms_store_name):
+        point_names |= _logic_candidate_name_variants(raw)
+
+    if not point_ids and not point_names:
+        return True
+
+    candidate_names: set[str] = set()
+    candidate_ids: set[str] = set()
+    for candidate in _logic_iter_point_reference_candidates(doc):
+        candidate_id = candidate.get('id') or ((candidate.get('meta') or {}).get('id') if isinstance(candidate.get('meta'), dict) else None)
+        if not candidate_id and isinstance(candidate.get('meta'), dict):
+            href = candidate['meta'].get('href')
+            if href:
+                candidate_id = str(href).rstrip('/').split('/')[-1]
+        if candidate_id:
+            candidate_ids.add(str(candidate_id))
+        candidate_names |= _logic_candidate_name_variants(candidate.get('name'))
+        meta = candidate.get('meta') if isinstance(candidate.get('meta'), dict) else None
+        if meta:
+            candidate_names |= _logic_candidate_name_variants(meta.get('name'))
+
+    if point_ids & candidate_ids:
+        return True
+
+    if point_names and candidate_names:
+        if point_names & candidate_names:
+            return True
+        for point_name in point_names:
+            for candidate_name in candidate_names:
+                if point_name in candidate_name or candidate_name in point_name:
+                    return True
+
+    return False
+
+
+
+def _logic_iter_positions(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    positions = doc.get('positions')
+    if isinstance(positions, dict):
+        return positions.get('rows', []) or []
+    if isinstance(positions, list):
+        return positions
+    return []
+
+
+
+def _logic_extract_position_amount(position: dict[str, Any]) -> float:
+    quantity = _logic_quantity(position.get('quantity'))
+    amount = _logic_first_money_value(position, ('sum', 'amount', 'saleSum', 'retailSum'))
+    if amount is not None:
+        return round(amount, 2)
+    unit_price = _logic_first_money_value(position, ('price', 'salePrice', 'sellingPrice'))
+    if unit_price is not None and quantity > 0:
+        return round(unit_price * quantity, 2)
+    return 0.0
+
+
+
+def _logic_extract_position_cost_amount(position: dict[str, Any]) -> float | None:
+    quantity = _logic_quantity(position.get('quantity'))
+    total_cost = _logic_first_money_value(position, ('costSum', 'buySum', 'buyPriceSum', 'purchaseCostSum', 'costAmount', 'purchaseSum', 'cost'))
+    if total_cost is not None:
+        return round(max(total_cost, 0.0), 2)
+    unit_cost = _logic_first_money_value(position, ('buyPrice', 'costPrice', 'purchasePrice', 'purchaseCost', 'costValue'))
+    if unit_cost is not None and quantity > 0:
+        return round(max(unit_cost, 0.0) * quantity, 2)
+    return None
+
+
+
+def _logic_extract_document_item_id(position: dict[str, Any]) -> str | None:
+    assortment = position.get('assortment')
+    if not isinstance(assortment, dict):
+        return None
+    meta = assortment.get('meta') if isinstance(assortment.get('meta'), dict) else assortment
+    item_id = meta.get('id')
+    if item_id:
+        return str(item_id)
+    href = meta.get('href')
+    if href:
+        return str(href).rstrip('/').split('/')[-1]
+    return None
+
+
+
+async def _load_cached_discrepancy_financials(location: str, item_ids: set[str], db: AsyncSession | None = None) -> dict[str, dict[str, float | None | str]]:
+    normalized = _normalize_location(location)
+    unique_item_ids = {str(item_id).strip() for item_id in item_ids if str(item_id).strip()}
+    if not unique_item_ids or db is None:
         return {}
 
-    unique_item_ids = sorted({
-        row.target_id
+    point = await db.scalar(select(LocationPoint).where(LocationPoint.name == normalized).limit(1))
+    if point is None:
+        return {}
+
+    cache_rows = (
+        await db.scalars(
+            select(ProductFinancialCache)
+            .where(ProductFinancialCache.location_point_id == point.id)
+            .where(ProductFinancialCache.item_id.in_(sorted(unique_item_ids)))
+        )
+    ).all()
+    financials: dict[str, dict[str, float | None | str]] = {
+        row.item_id: {
+            'cost_price': float(row.cost_price) if row.cost_price is not None else None,
+            'retail_price': float(row.retail_price) if row.retail_price is not None else None,
+            'cost_price_source': 'cache' if row.cost_price is not None else None,
+            'cost_price_note': None,
+            'cost_price_updated_at': row.updated_at.isoformat() if row.updated_at else None,
+        }
+        for row in cache_rows
+    }
+
+    override_rows = (
+        await db.scalars(
+            select(ProductCostOverride)
+            .where(ProductCostOverride.location_point_id == point.id)
+            .where(ProductCostOverride.item_id.in_(sorted(unique_item_ids)))
+        )
+    ).all()
+    for row in override_rows:
+        current = financials.get(row.item_id) or {
+            'cost_price': None,
+            'retail_price': None,
+            'cost_price_source': None,
+            'cost_price_note': None,
+            'cost_price_updated_at': None,
+        }
+        current['cost_price'] = float(row.cost_price) if row.cost_price is not None else None
+        current['cost_price_source'] = 'override'
+        current['cost_price_note'] = row.note or None
+        current['cost_price_updated_at'] = row.updated_at.isoformat() if row.updated_at else None
+        financials[row.item_id] = current
+
+    missing_ids = {item_id for item_id in unique_item_ids if item_id not in financials or financials[item_id].get('retail_price') is None}
+    if not missing_ids:
+        return financials
+
+    token, store_id = await _get_location_ms_credentials(normalized, db)
+    if not _ms_client_enabled(token, location=normalized):
+        return financials
+
+    seeds = ms_client.get_inventory_financial_seeds(normalized, store_id=store_id)
+    for item_id in missing_ids:
+        seed = seeds.get(item_id) or {}
+        retail_price = seed.get('retail_price')
+        if retail_price is None:
+            continue
+        current = financials.get(item_id) or {
+            'cost_price': None,
+            'retail_price': None,
+            'cost_price_source': None,
+            'cost_price_note': None,
+            'cost_price_updated_at': None,
+        }
+        current['retail_price'] = float(retail_price)
+        financials[item_id] = current
+    return financials
+
+
+async def _load_discrepancy_financials(location: str, results: list[CheckResult], db: AsyncSession | None = None, *, date_from: date | None = None, date_to: date | None = None) -> dict[str, dict[str, float | None | str]]:
+    unique_item_ids = {
+        str(row.target_id).strip()
         for row in results
-        if row.target_type == 'item' and row.status == 'red' and row.target_id
-    })
-    if not unique_item_ids:
-        return {}
+        if row.target_type == 'item' and str(row.target_id or '').strip()
+    }
+    return await _load_cached_discrepancy_financials(location, unique_item_ids, db=db)
 
-    semaphore = asyncio.Semaphore(getattr(ms_client, 'max_concurrent_requests', 4))
 
-    async def fetch(item_id: str) -> tuple[str, dict[str, float | None]]:
-        async with semaphore:
-            try:
-                values = await ms_client.get_item_financials(location, item_id, token=token, store_id=store_id)
-            except Exception:
-                return item_id, {'cost_price': None, 'retail_price': None}
-            return item_id, values
+async def refresh_product_financial_cache(
+    db: AsyncSession,
+    *,
+    location: str | None = None,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    location_query = select(LocationPoint).order_by(LocationPoint.name.asc())
+    if location:
+        location_query = location_query.where(LocationPoint.name == _normalize_location(location))
+    points = (await db.scalars(location_query)).all()
 
-    loaded = await asyncio.gather(*(fetch(item_id) for item_id in unique_item_ids))
-    return {item_id: values for item_id, values in loaded}
+    summary: dict[str, Any] = {
+        'locations_total': len(points),
+        'locations_processed': 0,
+        'locations_skipped': 0,
+        'items_upserted': 0,
+        'items_deleted': 0,
+        'locations': [],
+    }
+    refreshed_at = datetime.utcnow()
+
+    for point in points:
+        normalized = _normalize_location(point.name)
+        token, store_id = await _get_location_ms_credentials(normalized, db)
+        if not _ms_client_enabled(token, location=normalized):
+            summary['locations_skipped'] += 1
+            summary['locations'].append({
+                'location': normalized,
+                'status': 'skipped',
+                'reason': 'moysklad_disabled',
+                'items_upserted': 0,
+                'items_deleted': 0,
+            })
+            continue
+
+        inventory = await ms_client.get_inventory(normalized, token=token, store_id=store_id)
+        inventory_items = _iter_inventory_items(inventory)
+        item_ids = {item['id'] for item in inventory_items}
+        seeds = ms_client.get_inventory_financial_seeds(normalized, store_id=store_id)
+        assortment_rows = await ms_client.get_all_pages(
+            'entity/assortment',
+            params={'expand': 'product'},
+            token=token,
+            location=normalized,
+            page_limit=1000,
+        )
+
+        assortment_by_id: dict[str, dict[str, Any]] = {}
+        assortment_by_code: dict[str, dict[str, Any]] = {}
+        for row in assortment_rows:
+            row_id = _extract_meta_id(row)
+            if row_id:
+                assortment_by_id[row_id] = row
+            row_code = str(row.get('code') or '').strip().lower()
+            if row_code and row_code not in assortment_by_code:
+                assortment_by_code[row_code] = row
+
+        existing_rows = (
+            await db.scalars(
+                select(ProductFinancialCache)
+                .where(ProductFinancialCache.location_point_id == point.id)
+            )
+        ).all()
+        existing_by_item_id = {row.item_id: row for row in existing_rows}
+        seen_item_ids: set[str] = set()
+        items_upserted = 0
+
+        for item in inventory_items:
+            item_id = item['id']
+            seen_item_ids.add(item_id)
+            seed = seeds.get(item_id) or {}
+            item_code = str(seed.get('code') or '').strip() or None
+            assortment_row = assortment_by_id.get(item_id)
+            if assortment_row is None and item_code:
+                assortment_row = assortment_by_code.get(item_code.lower())
+            product_row = assortment_row.get('product') if isinstance((assortment_row or {}).get('product'), dict) else None
+            cost_price, retail_price = ms_client.extract_financials_from_sources(assortment_row, product_row)
+            if retail_price in {None, 0.0}:
+                retail_price = seed.get('retail_price')
+
+            existing = existing_by_item_id.get(item_id)
+            if existing is None:
+                db.add(ProductFinancialCache(
+                    location_point_id=point.id,
+                    item_id=item_id,
+                    item_name=item['name'],
+                    item_code=item_code,
+                    cost_price=cost_price,
+                    retail_price=retail_price,
+                    source_refreshed_at=refreshed_at,
+                    updated_at=refreshed_at,
+                ))
+            else:
+                if force_refresh or existing.cost_price != cost_price or existing.retail_price != retail_price or existing.item_name != item['name'] or existing.item_code != item_code:
+                    existing.item_name = item['name']
+                    existing.item_code = item_code
+                    existing.cost_price = cost_price
+                    existing.retail_price = retail_price
+                    existing.source_refreshed_at = refreshed_at
+                    existing.updated_at = refreshed_at
+                else:
+                    existing.source_refreshed_at = refreshed_at
+                    existing.updated_at = refreshed_at
+            items_upserted += 1
+
+        stale_item_ids = {row.item_id for row in existing_rows if row.item_id not in seen_item_ids}
+        items_deleted = 0
+        if stale_item_ids:
+            delete_result = await db.execute(
+                delete(ProductFinancialCache)
+                .where(ProductFinancialCache.location_point_id == point.id)
+                .where(ProductFinancialCache.item_id.in_(sorted(stale_item_ids)))
+            )
+            items_deleted = int(delete_result.rowcount or 0)
+
+        await db.commit()
+        summary['locations_processed'] += 1
+        summary['items_upserted'] += items_upserted
+        summary['items_deleted'] += items_deleted
+        summary['locations'].append({
+            'location': normalized,
+            'status': 'ok',
+            'items_upserted': items_upserted,
+            'items_deleted': items_deleted,
+        })
+
+    return summary
 
 
 async def get_admin_period_report(location: str, date_from: date, date_to: date, db: AsyncSession) -> AdminReport:
@@ -3818,7 +4380,7 @@ async def get_admin_period_report(location: str, date_from: date, date_to: date,
         if row.checked_by_user_id is not None
     )
 
-    discrepancy_financials = await _load_discrepancy_financials(normalized, results, db=db)
+    discrepancy_financials = await _load_discrepancy_financials(normalized, results, db=db, date_from=date_from, date_to=date_to)
     historical_category_ids, historical_subcategory_ids, historical_item_ids = _report_history_target_maps(report_snapshots, results)
     report_scope_category_ids, report_scope_subcategory_ids, report_scope_category_names, report_scope_subcategory_labels = _report_selection_scope(
         report_snapshots,
@@ -3939,6 +4501,9 @@ async def get_admin_period_report(location: str, date_from: date, date_to: date,
                     cost_total=cost_total,
                     retail_total=retail_total,
                     lost_profit=lost_profit,
+                    cost_price_source=str(financials.get('cost_price_source') or '') or None,
+                    cost_price_note=str(financials.get('cost_price_note') or '') or None,
+                    cost_price_updated_at=str(financials.get('cost_price_updated_at') or '') or None,
                 )
             )
 
@@ -4178,7 +4743,7 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
                 results,
             )
 
-    discrepancy_financials = await _load_discrepancy_financials(normalized, results, db=db)
+    discrepancy_financials = await _load_discrepancy_financials(normalized, results, db=db, date_from=report.report_date, date_to=report.report_date)
     completed_before_report: dict[str, set[str]] = {}
     if report_type == DAILY_REPORT_TYPE:
         completed_before_report = await _load_completed_subcategory_ids_for_cycle(
@@ -4307,6 +4872,9 @@ async def get_admin_report(location: str, db: AsyncSession, report_id: int | Non
                     cost_total=cost_total,
                     retail_total=retail_total,
                     lost_profit=lost_profit,
+                    cost_price_source=str(financials.get('cost_price_source') or '') or None,
+                    cost_price_note=str(financials.get('cost_price_note') or '') or None,
+                    cost_price_updated_at=str(financials.get('cost_price_updated_at') or '') or None,
                 )
             )
 
@@ -5101,6 +5669,89 @@ async def update_discrepancy_actual_qty(
         actual_quantity=float(actual_quantity),
         diff=float(diff),
         status=StatusEnum.GREEN if diff == 0.0 else StatusEnum.RED,
+    )
+
+
+
+
+async def update_discrepancy_cost_override(
+    check_result_id: int,
+    payload: UpdateDiscrepancyCostOverrideRequest,
+    db: AsyncSession,
+    current_user: User,
+) -> UpdateDiscrepancyCostOverrideResponse:
+    check_result = await db.get(CheckResult, check_result_id)
+    if not check_result:
+        raise HTTPException(status_code=404, detail='Строка расхождения не найдена.')
+    if check_result.target_type != 'item':
+        raise HTTPException(status_code=400, detail='Локальную себестоимость можно задать только для товарного расхождения.')
+
+    report = await db.get(Report, check_result.report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail='Ревизия для строки расхождения не найдена.')
+
+    await ensure_user_can_access_location(current_user, report.location, db)
+
+    point = await db.scalar(select(LocationPoint).where(LocationPoint.name == report.location).limit(1))
+    if point is None:
+        raise HTTPException(status_code=404, detail='Точка для расхождения не найдена.')
+
+    item_id = str(check_result.target_id or '').strip()
+    if not item_id:
+        raise HTTPException(status_code=400, detail='У строки расхождения отсутствует идентификатор товара.')
+
+    existing = await db.scalar(
+        select(ProductCostOverride)
+        .where(ProductCostOverride.location_point_id == point.id)
+        .where(ProductCostOverride.item_id == item_id)
+        .limit(1)
+    )
+
+    normalized_note = str(payload.note or '').strip() or None
+    if payload.cost_price is None:
+        if existing is not None:
+            await db.delete(existing)
+            await db.commit()
+        return UpdateDiscrepancyCostOverrideResponse(
+            success=True,
+            message='Локальная себестоимость удалена. Теперь будет использоваться общий кеш точки.',
+            check_result_id=check_result.id,
+            item_id=item_id,
+            cost_price=None,
+            note=None,
+            source='cache',
+        )
+
+    cost_price = round(float(payload.cost_price), 2)
+    now = datetime.utcnow()
+    if existing is None:
+        db.add(ProductCostOverride(
+            location_point_id=point.id,
+            item_id=item_id,
+            item_name=check_result.target_name or 'Товар',
+            cost_price=cost_price,
+            note=normalized_note,
+            created_by_user_id=current_user.id,
+            updated_by_user_id=current_user.id,
+            created_at=now,
+            updated_at=now,
+        ))
+    else:
+        existing.item_name = check_result.target_name or existing.item_name
+        existing.cost_price = cost_price
+        existing.note = normalized_note
+        existing.updated_by_user_id = current_user.id
+        existing.updated_at = now
+
+    await db.commit()
+    return UpdateDiscrepancyCostOverrideResponse(
+        success=True,
+        message='Локальная себестоимость сохранена для этой точки.',
+        check_result_id=check_result.id,
+        item_id=item_id,
+        cost_price=cost_price,
+        note=normalized_note,
+        source='override',
     )
 
 
