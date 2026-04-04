@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -40,11 +41,11 @@ DEFAULT_EXIT_AMOUNT = 2000.0
 DEFAULT_BONUS_THRESHOLD = 40000.0
 DEFAULT_BONUS_AMOUNT = 500.0
 DEFAULT_OTHER_RATE_PERCENT = 3.0
-ADMIN_SALARY_BRACKETS = [
-    (200000.0, 25.0),
-    (125000.0, 20.0),
-    (100000.0, 15.0),
-    (50000.0, 10.0),
+DEFAULT_MANAGER_SALARY_BRACKETS = [
+    {'threshold': 200000.0, 'rate_percent': 25.0},
+    {'threshold': 125000.0, 'rate_percent': 20.0},
+    {'threshold': 100000.0, 'rate_percent': 15.0},
+    {'threshold': 50000.0, 'rate_percent': 10.0},
 ]
 
 TOBACCO_KEYWORDS = ('сигарет', 'сигарилл', 'стик')
@@ -68,6 +69,24 @@ def _ms_client_enabled(token: str | None = None, location: str | None = None) ->
     return bool(enabled_attr)
 
 
+
+def bootstrap_payroll_schema(connection) -> None:
+    columns = {
+        str(row[1])
+        for row in connection.exec_driver_sql("PRAGMA table_info(payroll_settings_versions)").fetchall()
+    }
+    if 'bonus_category_ids_json' not in columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE payroll_settings_versions ADD COLUMN bonus_category_ids_json TEXT NOT NULL DEFAULT '[]'"
+        )
+    if 'manager_salary_brackets_json' not in columns:
+        default_json = json.dumps(DEFAULT_MANAGER_SALARY_BRACKETS, ensure_ascii=False).replace("'", "''")
+        connection.exec_driver_sql(
+            "ALTER TABLE payroll_settings_versions "
+            f"ADD COLUMN manager_salary_brackets_json TEXT NOT NULL DEFAULT '{default_json}'"
+        )
+
+
 class PayrollSettingsUpdateRequest(BaseModel):
     location: str
     effective_from: date
@@ -76,6 +95,8 @@ class PayrollSettingsUpdateRequest(BaseModel):
     bonus_amount: float = Field(default=DEFAULT_BONUS_AMOUNT, ge=0)
     other_rate_percent: float = Field(default=DEFAULT_OTHER_RATE_PERCENT, ge=0)
     responsible_admin_user_id: int | None = Field(default=None, ge=1)
+    bonus_category_ids: list[str] = Field(default_factory=list)
+    manager_salary_brackets: list[dict[str, Any]] = Field(default_factory=list)
     category_rates: list[dict[str, Any]] = Field(default_factory=list)
 
 
@@ -153,6 +174,8 @@ class ShiftComputedPayroll:
     exit_amount: float
     bonus_threshold: float
     bonus_amount: float
+    bonus_base_sales_amount: float
+    bonus_category_ids: list[str]
     other_rate_percent: float
     gross_sales_amount: float
     return_amount: float
@@ -314,10 +337,68 @@ def _is_tobacco_category(name: str | None) -> bool:
 
 
 
-def _manager_rate_for_profit(net_profit: float) -> float:
-    for threshold, rate in ADMIN_SALARY_BRACKETS:
+def _default_manager_salary_brackets() -> list[dict[str, float]]:
+    return [dict(item) for item in DEFAULT_MANAGER_SALARY_BRACKETS]
+
+
+
+def _normalize_manager_salary_brackets(raw_rows: Any) -> list[dict[str, float]]:
+    normalized: list[dict[str, float]] = []
+    seen_thresholds: set[float] = set()
+    for row in raw_rows or []:
+        try:
+            threshold = round(max(float((row or {}).get('threshold') or 0), 0.0), 2)
+            rate_percent = round(max(float((row or {}).get('rate_percent') or (row or {}).get('rate') or 0), 0.0), 2)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if threshold in seen_thresholds:
+            continue
+        seen_thresholds.add(threshold)
+        normalized.append({'threshold': threshold, 'rate_percent': rate_percent})
+    normalized.sort(key=lambda item: item['threshold'], reverse=True)
+    return normalized or _default_manager_salary_brackets()
+
+
+
+def _load_manager_salary_brackets(settings_version: PayrollSettingsVersion | None) -> list[dict[str, float]]:
+    raw_value = getattr(settings_version, 'manager_salary_brackets_json', None) if settings_version else None
+    try:
+        parsed = json.loads(raw_value or '[]')
+    except (TypeError, ValueError, json.JSONDecodeError):
+        parsed = []
+    return _normalize_manager_salary_brackets(parsed)
+
+
+
+def _load_bonus_category_ids(settings_version: PayrollSettingsVersion | None) -> list[str]:
+    raw_value = getattr(settings_version, 'bonus_category_ids_json', None) if settings_version else None
+    try:
+        parsed = json.loads(raw_value or '[]')
+    except (TypeError, ValueError, json.JSONDecodeError):
+        parsed = []
+    return _normalize_bonus_category_ids(parsed)
+
+
+
+def _normalize_bonus_category_ids(raw_rows: Any) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in raw_rows or []:
+        category_id = str(value or '').strip()
+        if not category_id or category_id in seen:
+            continue
+        seen.add(category_id)
+        result.append(category_id)
+    return result
+
+
+
+def _manager_rate_for_profit(net_profit: float, brackets: list[dict[str, float]] | None = None) -> float:
+    for row in _normalize_manager_salary_brackets(brackets):
+        threshold = float(row.get('threshold') or 0)
+        rate_percent = float(row.get('rate_percent') or 0)
         if net_profit >= threshold:
-            return rate
+            return rate_percent
     return 0.0
 
 
@@ -455,6 +536,8 @@ async def _ensure_default_payroll_settings(point: LocationPoint, db: AsyncSessio
         bonus_threshold=DEFAULT_BONUS_THRESHOLD,
         bonus_amount=DEFAULT_BONUS_AMOUNT,
         other_rate_percent=DEFAULT_OTHER_RATE_PERCENT,
+        bonus_category_ids_json='[]',
+        manager_salary_brackets_json=json.dumps(_default_manager_salary_brackets(), ensure_ascii=False),
         responsible_admin_user_id=responsible_admin_user_id,
     )
     db.add(version)
@@ -472,6 +555,8 @@ async def _ensure_default_payroll_settings(point: LocationPoint, db: AsyncSessio
             'bonus_threshold': version.bonus_threshold,
             'bonus_amount': version.bonus_amount,
             'other_rate_percent': version.other_rate_percent,
+            'bonus_category_ids': [],
+            'manager_salary_brackets': _default_manager_salary_brackets(),
             'responsible_admin_user_id': version.responsible_admin_user_id,
         },
     )
@@ -571,6 +656,8 @@ async def get_location_payroll_setup(location: str, db: AsyncSession, current_us
             'bonus_threshold': round(float(settings.bonus_threshold or 0), 2),
             'bonus_amount': round(float(settings.bonus_amount or 0), 2),
             'other_rate_percent': round(float(settings.other_rate_percent or 0), 2),
+            'bonus_category_ids': _load_bonus_category_ids(settings),
+            'manager_salary_brackets': _load_manager_salary_brackets(settings),
             'responsible_admin_user_id': settings.responsible_admin_user_id,
             'category_rates': sorted(rates.values(), key=lambda item: item['category_name'].lower()),
         },
@@ -620,18 +707,54 @@ async def update_location_payroll_settings(payload: PayrollSettingsUpdateRequest
         if (has_access or 0) <= 0:
             raise HTTPException(status_code=400, detail='У выбранного администратора нет доступа к точке.')
 
-    version = PayrollSettingsVersion(
-        location_point_id=point.id,
-        effective_from=payload.effective_from,
-        exit_amount=payload.exit_amount,
-        bonus_threshold=payload.bonus_threshold,
-        bonus_amount=payload.bonus_amount,
-        other_rate_percent=payload.other_rate_percent,
-        responsible_admin_user_id=payload.responsible_admin_user_id,
-        created_by_user_id=current_user.id,
+    if current_user.role != 'superadmin' and payload.manager_salary_brackets:
+        raise HTTPException(status_code=403, detail='Настраивать зарплату администратора может только суперадмин.')
+
+    normalized_bonus_category_ids = _normalize_bonus_category_ids(payload.bonus_category_ids)
+
+    existing_version = await db.scalar(
+        select(PayrollSettingsVersion)
+        .where(
+            PayrollSettingsVersion.location_point_id == point.id,
+            PayrollSettingsVersion.effective_from == payload.effective_from,
+        )
+        .order_by(PayrollSettingsVersion.id.desc())
+        .limit(1)
     )
-    db.add(version)
-    await db.flush()
+
+    settings_source = existing_version or await _ensure_default_payroll_settings(point, db)
+    manager_salary_brackets = _normalize_manager_salary_brackets(payload.manager_salary_brackets) if current_user.role == 'superadmin' else _load_manager_salary_brackets(settings_source)
+
+    if existing_version is None:
+        version = PayrollSettingsVersion(
+            location_point_id=point.id,
+            effective_from=payload.effective_from,
+            exit_amount=payload.exit_amount,
+            bonus_threshold=payload.bonus_threshold,
+            bonus_amount=payload.bonus_amount,
+            other_rate_percent=payload.other_rate_percent,
+            bonus_category_ids_json=json.dumps(normalized_bonus_category_ids, ensure_ascii=False),
+            manager_salary_brackets_json=json.dumps(manager_salary_brackets, ensure_ascii=False),
+            responsible_admin_user_id=payload.responsible_admin_user_id,
+            created_by_user_id=current_user.id,
+        )
+        db.add(version)
+        await db.flush()
+        audit_action = 'create_version'
+    else:
+        version = existing_version
+        version.exit_amount = payload.exit_amount
+        version.bonus_threshold = payload.bonus_threshold
+        version.bonus_amount = payload.bonus_amount
+        version.other_rate_percent = payload.other_rate_percent
+        version.bonus_category_ids_json = json.dumps(normalized_bonus_category_ids, ensure_ascii=False)
+        if current_user.role == 'superadmin' or not getattr(version, 'manager_salary_brackets_json', None):
+            version.manager_salary_brackets_json = json.dumps(manager_salary_brackets, ensure_ascii=False)
+        version.responsible_admin_user_id = payload.responsible_admin_user_id
+        version.created_by_user_id = current_user.id
+        await db.execute(delete(PayrollCategoryRateVersion).where(PayrollCategoryRateVersion.settings_version_id == version.id))
+        await db.flush()
+        audit_action = 'update_version'
 
     seen_ids: set[str] = set()
     normalized_rates: list[dict[str, Any]] = []
@@ -661,13 +784,15 @@ async def update_location_payroll_settings(payload: PayrollSettingsUpdateRequest
         location_point_id=point.id,
         entity_type='payroll_settings',
         entity_id=str(version.id),
-        action_type='create_version',
+        action_type=audit_action,
         details={
             'effective_from': payload.effective_from.isoformat(),
             'exit_amount': payload.exit_amount,
             'bonus_threshold': payload.bonus_threshold,
             'bonus_amount': payload.bonus_amount,
             'other_rate_percent': payload.other_rate_percent,
+            'bonus_category_ids': normalized_bonus_category_ids,
+            'manager_salary_brackets': manager_salary_brackets,
             'responsible_admin_user_id': payload.responsible_admin_user_id,
             'category_rates': normalized_rates,
         },
@@ -1145,6 +1270,36 @@ async def _fetch_retail_shift_rows(date_from: date, date_to: date, point: Locati
 
 
 
+def _extract_position_category_info(
+    position: dict[str, Any],
+    category_lookup: dict[str, dict[str, str]],
+    category_ids_by_name: dict[str, str],
+) -> dict[str, str] | None:
+    assortment = position.get('assortment') or {}
+    item_id = _extract_id(assortment)
+    if item_id and item_id in category_lookup:
+        return category_lookup[item_id]
+
+    path_name = str(assortment.get('pathName') or assortment.get('path_name') or '').strip()
+    if path_name:
+        first_part = next((part.strip() for part in re.split(r'\s*/\s*', path_name) if part.strip()), '')
+        if first_part and first_part in category_ids_by_name:
+            return {
+                'category_id': category_ids_by_name[first_part],
+                'category_name': first_part,
+            }
+
+    folder = assortment.get('productFolder') or assortment.get('folder') or {}
+    folder_name = str(folder.get('name') or '').strip()
+    if folder_name and folder_name in category_ids_by_name:
+        return {
+            'category_id': category_ids_by_name[folder_name],
+            'category_name': folder_name,
+        }
+    return None
+
+
+
 def _iter_positions(doc: dict[str, Any]) -> list[dict[str, Any]]:
     positions = doc.get('positions')
     if isinstance(positions, dict):
@@ -1353,6 +1508,13 @@ async def _load_profitability_metrics_by_day(point: LocationPoint, date_from: da
 
 async def _load_point_sales_metrics_live(point: LocationPoint, date_from: date, date_to: date) -> dict[date, dict[str, Any]]:
     category_lookup = await _build_top_category_lookup(point)
+    category_ids_by_name: dict[str, str] = {}
+    for value in category_lookup.values():
+        category_name = str(value.get('category_name') or '').strip()
+        category_id = str(value.get('category_id') or '').strip()
+        if category_name and category_id and category_name not in category_ids_by_name:
+            category_ids_by_name[category_name] = category_id
+
     sales_rows, return_rows, shift_rows = await asyncio.gather(
         _fetch_document_rows(
             'retaildemand',
@@ -1399,8 +1561,7 @@ async def _load_point_sales_metrics_live(point: LocationPoint, date_from: date, 
         if doc_date is None:
             continue
         for position in _iter_positions(doc):
-            item_id = _extract_id(position.get('assortment'))
-            category = category_lookup.get(item_id or '')
+            category = _extract_position_category_info(position, category_lookup, category_ids_by_name)
             if category:
                 category_id = category['category_id']
                 category_name = category['category_name']
@@ -1469,11 +1630,15 @@ async def _load_point_sales_metrics_live(point: LocationPoint, date_from: date, 
         categories = []
         non_tobacco_net = 0.0
         category_cost_sum = 0.0
+        category_sales_sum = 0.0
+        category_return_sum = 0.0
         for category_id, metrics in category_rows.items():
             category_name = category_names_by_id.get(category_id, DEFAULT_CATEGORY_NAME)
             net_sales = round(metrics.sales - metrics.returns, 2)
             category_cost = round(metrics.sales_cost - metrics.return_cost, 2)
             category_cost_sum += category_cost
+            category_sales_sum += round(metrics.sales, 2)
+            category_return_sum += round(metrics.returns, 2)
             if not _is_tobacco_category(category_name):
                 non_tobacco_net += net_sales
             categories.append({
@@ -1484,6 +1649,26 @@ async def _load_point_sales_metrics_live(point: LocationPoint, date_from: date, 
                 'net_sales_amount': net_sales,
                 'cost_amount': category_cost,
             })
+
+        sales_delta = round(gross_sales_amount - category_sales_sum, 2)
+        return_delta = round(return_amount - category_return_sum, 2)
+        if abs(sales_delta) > 0.009 or abs(return_delta) > 0.009:
+            other_bucket = next((item for item in categories if item['category_id'] == '__other__'), None)
+            if other_bucket is None:
+                other_bucket = {
+                    'category_id': '__other__',
+                    'category_name': DEFAULT_CATEGORY_NAME,
+                    'sales_amount': 0.0,
+                    'return_amount': 0.0,
+                    'net_sales_amount': 0.0,
+                    'cost_amount': 0.0,
+                }
+                categories.append(other_bucket)
+            other_bucket['sales_amount'] = round(float(other_bucket.get('sales_amount') or 0.0) + sales_delta, 2)
+            other_bucket['return_amount'] = round(float(other_bucket.get('return_amount') or 0.0) + return_delta, 2)
+            other_bucket['net_sales_amount'] = round(float(other_bucket.get('sales_amount') or 0.0) - float(other_bucket.get('return_amount') or 0.0), 2)
+            if not _is_tobacco_category(DEFAULT_CATEGORY_NAME):
+                non_tobacco_net += round(sales_delta - return_delta, 2)
 
         if not categories and (gross_sales_amount > 0 or return_amount > 0 or abs(cost_amount) > 0.009):
             synthetic_net = round(gross_sales_amount - return_amount, 2)
@@ -1730,6 +1915,7 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession) -> ShiftComp
             )
         ).all()
         settings = await db.get(PayrollSettingsVersion, snapshot.settings_version_id) if snapshot.settings_version_id else await _get_settings_for_date(point, shift.shift_date, db)
+        bonus_category_ids = _load_bonus_category_ids(settings)
         return ShiftComputedPayroll(
             shift=shift,
             location_point=point,
@@ -1753,6 +1939,8 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession) -> ShiftComp
             exit_amount=round(float(snapshot.exit_amount or 0), 2),
             bonus_threshold=round(float(snapshot.bonus_threshold or 0), 2),
             bonus_amount=round(float(snapshot.bonus_amount or 0), 2),
+            bonus_base_sales_amount=round(float(snapshot.non_tobacco_net_sales_for_bonus or 0), 2),
+            bonus_category_ids=bonus_category_ids,
             other_rate_percent=round(float(snapshot.other_rate_percent or 0), 2),
             gross_sales_amount=round(float(snapshot.gross_sales_amount or 0), 2),
             return_amount=round(float(snapshot.return_amount or 0), 2),
@@ -1769,6 +1957,7 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession) -> ShiftComp
         )
 
     settings = await _get_settings_for_date(point, shift.shift_date, db)
+    bonus_category_ids = _load_bonus_category_ids(settings)
     rate_map = await _get_settings_rates(settings.id, db)
     day_metrics_by_date = await _load_point_sales_metrics(point, shift.shift_date, shift.shift_date, db)
     day_metrics = day_metrics_by_date.get(shift.shift_date, {
@@ -1784,6 +1973,7 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession) -> ShiftComp
     share_ratio = round(1.0 / split_count, 4)
     categories: list[dict[str, Any]] = []
     category_earnings_total = 0.0
+    bonus_base_sales_amount = 0.0
 
     for row in day_metrics['categories']:
         sales_amount = round(float(row['sales_amount']) * share_ratio, 2)
@@ -1804,6 +1994,14 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession) -> ShiftComp
             'earning_amount': earning_amount,
             'is_other_category': is_other_category,
         })
+        if bonus_category_ids:
+            if category_id in bonus_category_ids:
+                bonus_base_sales_amount += net_sales_amount
+
+    if bonus_category_ids:
+        bonus_base_sales_amount = round(bonus_base_sales_amount, 2)
+    else:
+        bonus_base_sales_amount = round(float(day_metrics['non_tobacco_net_sales_for_bonus']) * share_ratio, 2)
 
     non_tobacco_net = round(float(day_metrics['non_tobacco_net_sales_for_bonus']) * share_ratio, 2)
     gross_sales_amount = round(float(day_metrics['gross_sales_amount']) * share_ratio, 2)
@@ -1811,7 +2009,7 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession) -> ShiftComp
     net_sales_amount = round(float(day_metrics['net_sales_amount']) * share_ratio, 2)
     cost_amount = round(float(day_metrics['cost_amount']) * share_ratio, 2)
     gross_profit_amount = round(float(day_metrics['gross_profit_amount']) * share_ratio, 2)
-    bonus = float(settings.bonus_amount or 0) if non_tobacco_net >= float(settings.bonus_threshold or 0) else 0.0
+    bonus = float(settings.bonus_amount or 0) if bonus_base_sales_amount >= float(settings.bonus_threshold or 0) else 0.0
     gross_salary_amount = round(float(settings.exit_amount or 0) + bonus + category_earnings_total, 2)
 
     return ShiftComputedPayroll(
@@ -1825,6 +2023,8 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession) -> ShiftComp
         exit_amount=round(float(settings.exit_amount or 0), 2),
         bonus_threshold=round(float(settings.bonus_threshold or 0), 2),
         bonus_amount=round(bonus, 2),
+        bonus_base_sales_amount=bonus_base_sales_amount,
+        bonus_category_ids=bonus_category_ids,
         other_rate_percent=round(float(settings.other_rate_percent or 0), 2),
         gross_sales_amount=gross_sales_amount,
         return_amount=return_amount,
@@ -1867,7 +2067,7 @@ async def close_shift(shift_id: int, db: AsyncSession, actor_user: User | None, 
         bonus_threshold=computed.bonus_threshold,
         bonus_amount=computed.bonus_amount,
         other_rate_percent=computed.other_rate_percent,
-        non_tobacco_net_sales_for_bonus=computed.non_tobacco_net_sales_for_bonus,
+        non_tobacco_net_sales_for_bonus=computed.bonus_base_sales_amount,
         gross_sales_amount=computed.gross_sales_amount,
         return_amount=computed.return_amount,
         net_sales_amount=computed.net_sales_amount,
@@ -2014,6 +2214,8 @@ def _serialize_computed_shift(computed: ShiftComputedPayroll) -> dict[str, Any]:
         'cost_amount': computed.cost_amount,
         'gross_profit_amount': computed.gross_profit_amount,
         'non_tobacco_net_sales_for_bonus': computed.non_tobacco_net_sales_for_bonus,
+        'bonus_base_sales_amount': computed.bonus_base_sales_amount,
+        'bonus_category_ids': computed.bonus_category_ids,
         'exit_amount': computed.exit_amount,
         'bonus_threshold': computed.bonus_threshold,
         'bonus_amount': computed.bonus_amount,
@@ -2206,6 +2408,7 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
         employee_salary_total += computed.gross_salary_amount
 
     current_settings = await _get_settings_for_date(point, date_to, db)
+    manager_salary_brackets = _load_manager_salary_brackets(current_settings)
     rate_map = await _get_settings_rates(current_settings.id, db)
     category_totals: dict[str, dict[str, Any]] = {}
     for metrics in day_metrics.values():
@@ -2234,7 +2437,7 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
 
     expenses_total = await _collect_period_company_expenses(point, date_from, date_to, db)
     operating_profit = round(net_sales_amount - cost_amount - employee_salary_total - expenses_total, 2)
-    manager_rate_percent = _manager_rate_for_profit(operating_profit)
+    manager_rate_percent = _manager_rate_for_profit(operating_profit, manager_salary_brackets)
     manager_salary_amount = round(max(operating_profit, 0) * (manager_rate_percent / 100.0), 2)
     net_profit_after_manager_salary = round(operating_profit - manager_salary_amount, 2)
     responsible_admin = await db.get(User, current_settings.responsible_admin_user_id) if current_settings.responsible_admin_user_id else None
@@ -2256,6 +2459,7 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
         'profit_after_manager_salary': net_profit_after_manager_salary,
         'responsible_admin_user_id': responsible_admin.id if responsible_admin else None,
         'responsible_admin_name': responsible_admin.full_name if responsible_admin else None,
+        'manager_salary_brackets': manager_salary_brackets,
         'categories': sorted(
             [
                 {
@@ -2365,7 +2569,7 @@ async def rebuild_closed_shift_snapshots(date_from: date, date_to: date, db: Asy
             bonus_threshold=computed.bonus_threshold,
             bonus_amount=computed.bonus_amount,
             other_rate_percent=computed.other_rate_percent,
-            non_tobacco_net_sales_for_bonus=computed.non_tobacco_net_sales_for_bonus,
+            non_tobacco_net_sales_for_bonus=computed.bonus_base_sales_amount,
             gross_sales_amount=computed.gross_sales_amount,
             return_amount=computed.return_amount,
             net_sales_amount=computed.net_sales_amount,

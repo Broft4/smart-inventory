@@ -51,6 +51,7 @@
                 <span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span>
             </summary>
             <div class="payroll-collapse-body">
+                <div id="shift-calendar-status" class="inventory-status hidden"></div>
                 <div class="shift-calendar-scroller">
                     <div class="shift-calendar-weekdays" aria-hidden="true">
                         <span>Пн</span><span>Вт</span><span>Ср</span><span>Чт</span><span>Пт</span><span>Сб</span><span>Вс</span>
@@ -97,6 +98,9 @@
         </details>
     </section>
 
+
+    <button type="button" id="shift-floating-add-btn" class="shift-floating-add-btn" aria-label="Назначить смену">+</button>
+
     <div id="shift-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="shift-modal-title">
         <div class="modal-card shift-modal-card">
             <div class="modal-header">
@@ -110,6 +114,7 @@
                 <label>Дата смены<input type="date" id="shift-modal-date-input"></label>
                 <label>Сотрудник<select id="shift-modal-employee-select"></select></label>
             </div>
+            <div id="shift-modal-status" class="inventory-status hidden"></div>
             <div class="modal-actions shift-modal-actions">
                 <button type="button" class="btn secondary btn-inline" id="shift-modal-cancel-btn">Отмена</button>
                 <button id="shift-modal-save-btn" type="button" class="btn primary btn-inline btn-with-loader">

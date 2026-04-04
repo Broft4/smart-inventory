@@ -256,6 +256,12 @@ class PayrollSettingsVersion(Base):
     bonus_threshold: Mapped[float] = mapped_column(Float, default=40000.0, nullable=False)
     bonus_amount: Mapped[float] = mapped_column(Float, default=500.0, nullable=False)
     other_rate_percent: Mapped[float] = mapped_column(Float, default=3.0, nullable=False)
+    bonus_category_ids_json: Mapped[str] = mapped_column(Text, default='[]', nullable=False)
+    manager_salary_brackets_json: Mapped[str] = mapped_column(
+        Text,
+        default='[{"threshold": 200000.0, "rate_percent": 25.0}, {"threshold": 125000.0, "rate_percent": 20.0}, {"threshold": 100000.0, "rate_percent": 15.0}, {"threshold": 50000.0, "rate_percent": 10.0}]',
+        nullable=False,
+    )
     responsible_admin_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
     created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)

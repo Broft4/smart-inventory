@@ -26,6 +26,10 @@ function isAdminRole() {
     return ['admin', 'superadmin'].includes(payrollState.user.role);
 }
 
+function isSuperadminRole() {
+    return payrollState.user.role === 'superadmin';
+}
+
 function formatMoney(value) {
     const num = Number(value || 0);
     return `${num.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`;
@@ -196,47 +200,61 @@ function renderSummary(summary) {
     qs('kpi-employee-expenses').textContent = formatMoney(summary.employee_expenses_total || 0);
     qs('kpi-payout').textContent = formatMoney(summary.net_payout_amount || 0);
 
-    const shiftsCard = qs('payroll-shifts-card');
     const daysContainer = qs('payroll-days-container');
-    if (shiftsCard) {
-        shiftsCard.classList.toggle('hidden', isAdminRole());
-    }
-    if (daysContainer && !isAdminRole()) {
+    if (daysContainer) {
         if (!summary.days?.length) {
             daysContainer.innerHTML = '<div class="muted-text">За выбранный период смен не найдено.</div>';
         } else {
-            daysContainer.innerHTML = summary.days.map(day => `
-                <article class="payroll-day-card">
-                    <div class="payroll-day-header">
-                        <strong>${day.shift_date}</strong>
-                        <span class="payroll-chip ${day.is_closed ? 'green' : 'orange'}">${day.is_closed ? 'Закрыта' : 'Открыта'}</span>
-                        ${!day.is_closed && payrollState.user.role === 'employee' && Number(day.employee_user_id) === Number(payrollState.user.id)
-                            ? `<button class="btn secondary btn-inline" type="button" onclick="closeOwnShift(${day.id})">Закрыть смену</button>`
-                            : ''}
-                    </div>
-                    <div class="payroll-day-grid">
-                        <div><span class="summary-label">Выручка</span><strong>${formatMoney(day.gross_sales_amount)}</strong></div>
-                        <div><span class="summary-label">Возвраты</span><strong>${formatMoney(day.return_amount)}</strong></div>
-                        <div><span class="summary-label">Выручка после возвратов</span><strong>${formatMoney(day.net_sales_amount)}</strong></div>
-                        <div><span class="summary-label">Выход</span><strong>${formatMoney(day.exit_amount)}</strong></div>
-                        <div><span class="summary-label">Бонус</span><strong>${formatMoney(day.bonus_amount)}</strong></div>
-                        <div><span class="summary-label">Итого</span><strong>${formatMoney(day.gross_salary_amount)}</strong></div>
-                    </div>
-                </article>
-            `).join('');
+            daysContainer.innerHTML = summary.days.map(day => {
+                const categoryLines = Array.isArray(day.categories) && day.categories.length
+                    ? day.categories
+                        .filter(category => Math.abs(Number(category?.sales_amount || 0)) > 1e-9 || Math.abs(Number(category?.earning_amount || 0)) > 1e-9 || Math.abs(Number(category?.return_amount || 0)) > 1e-9)
+                        .map(category => `
+                            <div class="employee-shift-line${Number(category?.earning_amount || 0) > 0 ? ' total' : ''}">
+                                <span>${escapeHtml(category.category_name)} · ${Number(category.rate_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}% · ${formatMoney(category.net_sales_amount || 0)}</span>
+                                <strong>${formatMoney(category.earning_amount || 0)}</strong>
+                            </div>
+                        `).join('')
+                    : '<div class="muted-text">По категории начислений за смену нет.</div>';
+                const bonusSourceLabel = Array.isArray(day.bonus_category_ids) && day.bonus_category_ids.length
+                    ? 'Выбранные категории'
+                    : 'Нетабачная выручка';
+                return `
+                    <article class="payroll-day-card">
+                        <div class="payroll-day-header">
+                            <div>
+                                <strong>${day.shift_date}</strong>
+                                ${isAdminRole() ? `<div class="muted-text">${escapeHtml(day.employee_name || '')}</div>` : ''}
+                            </div>
+                            <span class="payroll-chip ${day.is_closed ? 'green' : 'orange'}">${day.is_closed ? 'Закрыта' : 'Открыта'}</span>
+                            ${!day.is_closed && payrollState.user.role === 'employee' && Number(day.employee_user_id) === Number(payrollState.user.id)
+                                ? `<button class="btn secondary btn-inline" type="button" onclick="closeOwnShift(${day.id})">Закрыть смену</button>`
+                                : ''}
+                        </div>
+                        <div class="payroll-day-grid">
+                            <div><span class="summary-label">Выручка</span><strong>${formatMoney(day.gross_sales_amount)}</strong></div>
+                            <div><span class="summary-label">Возвраты</span><strong>${formatMoney(day.return_amount)}</strong></div>
+                            <div><span class="summary-label">Выручка после возвратов</span><strong>${formatMoney(day.net_sales_amount)}</strong></div>
+                            <div><span class="summary-label">Выход</span><strong>${formatMoney(day.exit_amount)}</strong></div>
+                            <div><span class="summary-label">Бонус</span><strong>${formatMoney(day.bonus_amount)}</strong></div>
+                            <div><span class="summary-label">Итого</span><strong>${formatMoney(day.gross_salary_amount)}</strong></div>
+                        </div>
+                        <div class="employee-shift-lines">
+                            <div class="employee-shift-line"><span>База бонуса · ${bonusSourceLabel}</span><strong>${formatMoney(day.bonus_base_sales_amount || 0)}</strong></div>
+                            <div class="employee-shift-line"><span>Порог бонуса</span><strong>${formatMoney(day.bonus_threshold || 0)}</strong></div>
+                            <div class="employee-shift-line total"><span>Начислено по категориям</span><strong>${formatMoney(day.category_earnings_total || 0)}</strong></div>
+                        </div>
+                        <div class="employee-shift-lines">${categoryLines}</div>
+                    </article>
+                `;
+            }).join('');
         }
     }
 
     renderEmployeeShiftCalendar(summary);
-
-    if (!isAdminRole()) {
-        renderPayrollCategoryTable(summary.categories || []);
-    } else if (payrollState.managerSummary?.categories) {
-        renderPayrollCategoryTable(payrollState.managerSummary.categories || []);
-    } else {
-        renderPayrollCategoryTable(summary.categories || []);
-    }
+    renderPayrollCategoryTable(summary.categories || []);
 }
+
 
 function getFilteredPayrollCategories(categories = []) {
     const search = normalizeSearch(payrollState.categoryFilters.search);
@@ -421,6 +439,41 @@ function renderManagerSummary(summary) {
         : 'Ответственный администратор для точки пока не назначен.';
 }
 
+function renderManagerBrackets() {
+    const wrap = qs('settings-manager-brackets');
+    const card = qs('settings-manager-brackets-card');
+    if (!wrap || !card) return;
+    if (!isSuperadminRole()) {
+        card.classList.add('hidden');
+        wrap.innerHTML = '';
+        return;
+    }
+    card.classList.remove('hidden');
+    const brackets = Array.isArray(payrollState.settings?.manager_salary_brackets) && payrollState.settings.manager_salary_brackets.length
+        ? payrollState.settings.manager_salary_brackets
+        : [
+            { threshold: 200000, rate_percent: 25 },
+            { threshold: 125000, rate_percent: 20 },
+            { threshold: 100000, rate_percent: 15 },
+            { threshold: 50000, rate_percent: 10 },
+        ];
+    wrap.innerHTML = brackets.map((row, index) => `
+        <div class="settings-threshold-row">
+            <label>Порог чистой прибыли<input type="number" min="0" step="0.01" data-manager-threshold value="${Number(row.threshold || 0)}"></label>
+            <label>Процент админа<input type="number" min="0" step="0.01" data-manager-rate value="${Number(row.rate_percent || 0)}"></label>
+            <button type="button" class="btn danger btn-inline" onclick="removeManagerBracket(${index})">Удалить</button>
+        </div>
+    `).join('');
+}
+
+window.removeManagerBracket = function removeManagerBracket(index) {
+    if (!isSuperadminRole()) return;
+    const rows = collectManagerBracketsFromUi();
+    rows.splice(index, 1);
+    payrollState.settings = { ...payrollState.settings, manager_salary_brackets: rows };
+    renderManagerBrackets();
+};
+
 function renderSettings() {
     const card = qs('admin-settings-card');
     if (!isAdminRole()) {
@@ -429,7 +482,8 @@ function renderSettings() {
     }
     card.classList.remove('hidden');
     const settings = payrollState.settings || {};
-    qs('settings-effective-from').value = todayIso();
+    const selectedBonusCategories = new Set(settings.bonus_category_ids || []);
+    qs('settings-effective-from').value = settings.effective_from || todayIso();
     qs('settings-exit').value = settings.exit_amount ?? 2000;
     qs('settings-threshold').value = settings.bonus_threshold ?? 40000;
     qs('settings-bonus').value = settings.bonus_amount ?? 500;
@@ -437,9 +491,19 @@ function renderSettings() {
     qs('settings-admin-select').innerHTML = ['<option value="">—</option>', ...payrollState.admins.map(admin => `<option value="${admin.id}">${admin.full_name}</option>`)].join('');
     if (settings.responsible_admin_user_id) qs('settings-admin-select').value = String(settings.responsible_admin_user_id);
     const existing = new Map((settings.category_rates || []).map(item => [item.category_id, item.rate_percent]));
-    qs('settings-category-rates').innerHTML = payrollState.categoryCatalog.map(category => `
+    qs('settings-category-rates').innerHTML = payrollState.categoryCatalog.map(category => {
+        const isExcludedFromExitBonus = selectedBonusCategories.size > 0 && !selectedBonusCategories.has(category.id);
+        return `
         <label class="settings-rate-card">
             <span class="settings-rate-name">${escapeHtml(category.name)}</span>
+            <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline settings-bonus-checkbox">
+                <input
+                    type="checkbox"
+                    data-bonus-category-id="${escapeHtml(category.id)}"
+                    ${isExcludedFromExitBonus ? 'checked' : ''}
+                >
+                Исключить из бонуса к выходу
+            </label>
             <input
                 type="number"
                 min="0"
@@ -450,8 +514,10 @@ function renderSettings() {
                 placeholder="%"
             >
         </label>
-    `).join('');
+    `}).join('');
+    renderManagerBrackets();
 }
+
 
 function renderShiftCalendar() {
     const card = qs('admin-shifts-card');
@@ -724,7 +790,6 @@ async function loadSummary() {
         if (isAdminRole()) {
             const managerSummary = await api(`/api/payroll/manager-summary?location=${encodeURIComponent(location)}&date_from=${dateFrom}&date_to=${dateTo}`);
             renderManagerSummary(managerSummary);
-            renderPayrollCategoryTable(managerSummary.categories || []);
         }
         showStatus('Данные обновлены.', 'success');
         setTimeout(hideStatus, 1500);
@@ -776,6 +841,23 @@ async function loadAudit() {
     renderAudit();
 }
 
+function collectManagerBracketsFromUi() {
+    return [...document.querySelectorAll('.settings-threshold-row')]
+        .map(row => ({
+            threshold: Number(row.querySelector('[data-manager-threshold]')?.value || 0),
+            rate_percent: Number(row.querySelector('[data-manager-rate]')?.value || 0),
+        }))
+        .filter(item => Number.isFinite(item.threshold) && Number.isFinite(item.rate_percent));
+}
+
+window.addManagerBracket = function addManagerBracket() {
+    if (!isSuperadminRole()) return;
+    const rows = collectManagerBracketsFromUi();
+    rows.push({ threshold: 0, rate_percent: 0 });
+    payrollState.settings = { ...payrollState.settings, manager_salary_brackets: rows };
+    renderManagerBrackets();
+};
+
 async function saveSettings() {
     const categoryRates = [...document.querySelectorAll('[data-category-rate-id]')]
         .map(input => ({
@@ -784,6 +866,14 @@ async function saveSettings() {
             rate_percent: input.value === '' ? null : Number(input.value),
         }))
         .filter(item => item.rate_percent !== null && Number.isFinite(item.rate_percent));
+    const excludedBonusCategoryIds = new Set(
+        [...document.querySelectorAll('[data-bonus-category-id]:checked')]
+            .map(input => input.dataset.bonusCategoryId)
+            .filter(Boolean)
+    );
+    const bonusCategoryIds = (payrollState.categoryCatalog || [])
+        .map(category => category.id)
+        .filter(categoryId => categoryId && !excludedBonusCategoryIds.has(categoryId));
     const payload = {
         location: selectedLocation(),
         effective_from: qs('settings-effective-from').value,
@@ -792,6 +882,8 @@ async function saveSettings() {
         bonus_amount: Number(qs('settings-bonus').value || 0),
         other_rate_percent: Number(qs('settings-other-rate').value || 0),
         responsible_admin_user_id: qs('settings-admin-select').value ? Number(qs('settings-admin-select').value) : null,
+        bonus_category_ids: bonusCategoryIds,
+        manager_salary_brackets: isSuperadminRole() ? collectManagerBracketsFromUi() : [],
         category_rates: categoryRates,
     };
     showStatus('Сохраняем новую версию правил...', 'loading');
@@ -1050,6 +1142,7 @@ qs('payroll-location-select').addEventListener('change', async () => {
 });
 qs('payroll-employee-select')?.addEventListener('change', loadSummary);
 qs('save-settings-btn')?.addEventListener('click', saveSettings);
+qs('settings-add-manager-bracket-btn')?.addEventListener('click', () => window.addManagerBracket());
 qs('add-shift-btn')?.addEventListener('click', addShift);
 qs('shift-month-input')?.addEventListener('change', loadShiftCalendar);
 qs('expenses-month-input')?.addEventListener('change', loadExpenseTemplatesAndEntries);

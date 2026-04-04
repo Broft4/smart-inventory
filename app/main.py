@@ -69,6 +69,7 @@ from app.payroll import (
     PayrollSettingsUpdateRequest,
     WorkShiftUpsertRequest,
     close_shift,
+    bootstrap_payroll_schema,
     create_expense_template,
     create_manual_monthly_expense,
     deactivate_expense_template,
@@ -159,6 +160,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(bootstrap_schema_and_admin)
+        await conn.run_sync(bootstrap_payroll_schema)
     async with AsyncSession(bind=engine, expire_on_commit=False) as session:
         await ensure_default_admin(session)
     try:

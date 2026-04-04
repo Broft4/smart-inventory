@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Зарплата — Умная ревизия</title>
+    <title>Бухгалтерия — Умная ревизия</title>
     <link rel="stylesheet" href="/static/css/style.css?v={{ asset_version }}">
 </head>
 <body>
 <div class="container admin-container payroll-page">
     <header class="page-header admin-header-v2">
         <div>
-            <h1>Зарплата</h1>
+            <h1>Бухгалтерия</h1>
             <p class="muted-text">{{ user.full_name }}{% if default_location %} · базовая точка {{ default_location }}{% endif %}</p>
         </div>
         <div class="header-actions">
@@ -74,8 +74,8 @@
         <details class="payroll-collapse">
             <summary class="report-summary-header payroll-collapse-summary">
                 <div>
-                    <h2>Итог</h2>
-                    <p class="muted-text">Начисления по сменам, категориям и итог к выплате.</p>
+                    <h2>Итог за период</h2>
+                    <p class="muted-text">Без дублей: итог по сменам сверху, сводка по категориям за период ниже.</p>
                 </div>
                 <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
             </summary>
@@ -88,45 +88,9 @@
                     <div class="summary-kpi-card warning"><span class="summary-kpi-label">Расходы на сотрудника</span><strong id="kpi-employee-expenses">0 ₽</strong></div>
                     <div class="summary-kpi-card plus"><span class="summary-kpi-label">К выплате</span><strong id="kpi-payout">0 ₽</strong></div>
                 </div>
-            </div>
-        </details>
-    </section>
 
-    <section class="category-card hidden" id="employee-calendar-card">
-        <details id="employee-calendar-details" class="payroll-collapse">
-            <summary class="report-summary-header payroll-collapse-summary">
-                <div>
-                    <h2>Календарь смен</h2>
-                    <p class="muted-text">Ваши смены в календарном виде за выбранный период.</p>
-                </div>
-                <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
-            </summary>
-            <div class="payroll-collapse-body">
-                <div class="shift-calendar-scroller">
-                    <div class="shift-calendar-weekdays" aria-hidden="true">
-                        <span>Пн</span><span>Вт</span><span>Ср</span><span>Чт</span><span>Пт</span><span>Сб</span><span>Вс</span>
-                    </div>
-                    <div id="employee-shift-calendar-grid" class="shift-calendar-grid employee-shift-calendar-grid"></div>
-                </div>
-            </div>
-        </details>
-    </section>
-
-    {% if user.role not in ['admin', 'superadmin'] %}
-    <section class="category-card" id="payroll-shifts-card">
-        <details class="payroll-collapse">
-            <summary class="report-summary-header payroll-collapse-summary"><div><h2>Смены</h2><p class="muted-text">По каждой смене — выручка, бонус и итог.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span></summary>
-            <div class="payroll-collapse-body">
                 <div id="payroll-days-container" class="payroll-days-container"></div>
-            </div>
-        </details>
-    </section>
-    {% endif %}
 
-    <section class="category-card">
-        <details class="payroll-collapse">
-            <summary class="report-summary-header payroll-collapse-summary"><div><h2>Категории</h2><p class="muted-text">Сколько начислено по каждой категории за выбранный период.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span></summary>
-            <div class="payroll-collapse-body">
                 <div class="payroll-category-filters">
                     <label>Поиск
                         <input type="text" id="payroll-category-search" placeholder="Категория..." autocomplete="off">
@@ -166,6 +130,26 @@
         </details>
     </section>
 
+    <section class="category-card hidden" id="employee-calendar-card">
+        <details id="employee-calendar-details" class="payroll-collapse">
+            <summary class="report-summary-header payroll-collapse-summary">
+                <div>
+                    <h2>Календарь смен</h2>
+                    <p class="muted-text">Ваши смены в календарном виде за выбранный период.</p>
+                </div>
+                <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
+            </summary>
+            <div class="payroll-collapse-body">
+                <div class="shift-calendar-scroller">
+                    <div class="shift-calendar-weekdays" aria-hidden="true">
+                        <span>Пн</span><span>Вт</span><span>Ср</span><span>Чт</span><span>Пт</span><span>Сб</span><span>Вс</span>
+                    </div>
+                    <div id="employee-shift-calendar-grid" class="shift-calendar-grid employee-shift-calendar-grid"></div>
+                </div>
+            </div>
+        </details>
+    </section>
+
     <section class="category-card hidden" id="admin-settings-card">
         <details class="payroll-collapse">
             <summary class="report-summary-header payroll-collapse-summary"><div><h2>Настройки зарплаты точки</h2><p class="muted-text">Версионные правила: новые изменения не переписывают прошлые закрытые смены.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span></summary>
@@ -181,13 +165,24 @@
                 <div class="payroll-settings-rates-card">
                     <div class="payroll-settings-rates-head">
                         <div>
-                            <h3>Проценты по категориям</h3>
-                            <p class="muted-text">Настройка процентов по верхним категориям из МойСклад. Блок «Все остальное» задается отдельно выше.</p>
+                            <h3>Проценты по категориям и бонус к выходу</h3>
+                            <p class="muted-text">Для каждой верхней категории можно задать процент продаж и отметить, входит ли она в выручку для бонуса к выходу. Если ничего не отмечено, бонус считается как раньше — по всем нетабачным категориям.</p>
                         </div>
                     </div>
                     <div id="settings-category-rates" class="settings-category-grid"></div>
                 </div>
+                <div class="payroll-settings-rates-card hidden" id="settings-manager-brackets-card">
+                    <div class="payroll-settings-rates-head">
+                        <div>
+                            <h3>Зарплата администратора по чистой прибыли</h3>
+                            <p class="muted-text">Только для суперадмина. Порог считается по чистой прибыли после расходов точки и зарплат сотрудников.</p>
+                        </div>
+                        <button type="button" class="btn secondary btn-inline" id="settings-add-manager-bracket-btn">Добавить порог</button>
+                    </div>
+                    <div id="settings-manager-brackets" class="settings-threshold-grid"></div>
+                </div>
                 <div class="admin-toolbar-actions"><button id="save-settings-btn" type="button" class="btn primary btn-inline">Сохранить версию правил</button></div>
+                <div id="settings-status" class="inventory-status hidden"></div>
             </div>
         </details>
     </section>
@@ -197,6 +192,7 @@
             <summary class="report-summary-header payroll-collapse-summary"><div><h2>Расходы</h2><p class="muted-text">Шаблоны расходов на месяц и фактические суммы по точке.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span></summary>
             <div class="payroll-collapse-body">
                 <div class="expense-layout">
+                    <div id="expenses-status" class="inventory-status hidden"></div>
                     <div class="expense-create-card">
                         <div class="payroll-filter-grid expense-create-grid">
                             <label>Месяц<input type="month" id="expenses-month-input"></label>

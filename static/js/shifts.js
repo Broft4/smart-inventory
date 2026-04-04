@@ -106,6 +106,30 @@ function hideStatus() {
     box.className = 'inventory-status hidden';
 }
 
+function showScopedStatus(id, message, tone = 'loading') {
+    const box = qs(id);
+    if (!box) return;
+    if (box._hideTimer) {
+        clearTimeout(box._hideTimer);
+        box._hideTimer = null;
+    }
+    box.textContent = message;
+    box.className = `inventory-status ${tone}`;
+    box.classList.remove('hidden');
+}
+
+function hideScopedStatus(id) {
+    const box = qs(id);
+    if (!box) return;
+    if (box._hideTimer) {
+        clearTimeout(box._hideTimer);
+        box._hideTimer = null;
+    }
+    box.classList.add('hidden');
+    box.textContent = '';
+    box.className = 'inventory-status hidden';
+}
+
 function setButtonLoading(button, isLoading, loadingLabel = 'Сохраняем...') {
     if (!button) return;
     const loader = button.querySelector('.btn-loader');
@@ -336,8 +360,13 @@ function renderShiftCalendar() {
     days.forEach(day => {
         const dayNumber = Number(String(day.date).slice(8, 10));
         const shiftCount = (day.shifts || []).length;
+        const miniChips = shiftCount
+            ? `<div class="shift-calendar-mini-list">${day.shifts.slice(0, 4).map(shift => `
+                <span class="shift-calendar-mini-chip ${shift.is_closed ? 'closed' : 'open'}" title="${escapeHtml(shift.employee_name)}">${escapeHtml(initialsFromName(shift.employee_name))}</span>
+            `).join('')}${shiftCount > 4 ? `<span class="shift-calendar-mini-more">+${shiftCount - 4}</span>` : ''}</div>`
+            : '<div class="shift-calendar-empty-day">Смен нет</div>';
         const shiftCards = shiftCount
-            ? day.shifts.map(shift => `
+            ? `${miniChips}${day.shifts.map(shift => `
                 <div class="shift-calendar-entry ${shift.is_closed ? 'closed' : 'open'}">
                     <div class="shift-calendar-entry-head">
                         <strong>${escapeHtml(shift.employee_name)}</strong>
@@ -349,7 +378,7 @@ function renderShiftCalendar() {
                         <button type="button" class="btn danger btn-inline" onclick="deleteShift(${shift.id})">Убрать</button>
                     </div>
                 </div>
-            `).join('')
+            `).join('')}`
             : '<div class="shift-calendar-empty-day">Смен нет</div>';
 
         cells.push(`
@@ -446,34 +475,42 @@ window.openShiftDay = function openShiftDay(dateValue) {
 
 window.deleteShift = async function deleteShift(id) {
     if (!confirm('Убрать эту смену из активного календаря?')) return;
+    showScopedStatus('shift-calendar-status', 'Убираем смену...', 'loading');
     try {
         await api(`/api/payroll/shifts/${id}`, { method: 'DELETE' });
         await refreshPageData(false);
         showStatus('Смена убрана.', 'success');
+        showScopedStatus('shift-calendar-status', 'Смена убрана.', 'success');
         setTimeout(hideStatus, 1200);
     } catch (error) {
         showStatus(error.message || 'Не удалось убрать смену.', 'error');
+        showScopedStatus('shift-calendar-status', error.message || 'Не удалось убрать смену.', 'error');
     }
 };
 
 window.closeAdminShift = async function closeAdminShift(id) {
+    showScopedStatus('shift-calendar-status', 'Закрываем смену...', 'loading');
     try {
         await api(`/api/payroll/shifts/${id}/close`, { method: 'POST' });
         await refreshPageData(false);
         showStatus('Смена закрыта.', 'success');
+        showScopedStatus('shift-calendar-status', 'Смена закрыта.', 'success');
         setTimeout(hideStatus, 1200);
     } catch (error) {
         showStatus(error.message || 'Не удалось закрыть смену.', 'error');
+        showScopedStatus('shift-calendar-status', error.message || 'Не удалось закрыть смену.', 'error');
     }
 };
 
 window.openShiftModal = function openShiftModal(dateValue) {
     if (qs('shift-modal-date-input')) qs('shift-modal-date-input').value = dateValue || todayIso();
+    hideScopedStatus('shift-modal-status');
     qs('shift-modal')?.classList.remove('hidden');
 };
 
 function closeShiftModal() {
     qs('shift-modal')?.classList.add('hidden');
+    hideScopedStatus('shift-modal-status');
 }
 
 async function saveShiftFromModal() {
@@ -485,18 +522,22 @@ async function saveShiftFromModal() {
     };
     if (!payload.location || !payload.shift_date || !payload.employee_user_id) {
         showStatus('Выберите дату и сотрудника для смены.', 'error');
+        showScopedStatus('shift-modal-status', 'Выберите дату и сотрудника для смены.', 'error');
         return;
     }
+    showScopedStatus('shift-modal-status', 'Назначаем смену...', 'loading');
     try {
         setButtonLoading(button, true, 'Назначаем...');
         await api('/api/payroll/shifts', { method: 'POST', body: JSON.stringify(payload) });
         closeShiftModal();
         await refreshPageData(false);
         showStatus('Смена назначена.', 'success');
+        showScopedStatus('shift-calendar-status', 'Смена назначена.', 'success');
         setTimeout(hideStatus, 1200);
     } catch (error) {
         console.error(error);
         showStatus(error.message || 'Не удалось назначить смену.', 'error');
+        showScopedStatus('shift-modal-status', error.message || 'Не удалось назначить смену.', 'error');
     } finally {
         setButtonLoading(button, false);
     }
@@ -563,6 +604,7 @@ qs('shift-modal-cancel-btn')?.addEventListener('click', closeShiftModal);
 qs('shift-modal')?.addEventListener('click', (event) => {
     if (event.target === qs('shift-modal')) closeShiftModal();
 });
+qs('shift-floating-add-btn')?.addEventListener('click', () => openShiftModal(shiftsState.selectedDate || todayIso()));
 document.addEventListener('click', (event) => {
     const wrap = qs('shift-date-picker-wrap');
     const popover = qs('shift-date-picker-popover');

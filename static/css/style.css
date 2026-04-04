@@ -1426,6 +1426,27 @@ body.modal-open {
     margin-top: auto;
 }
 
+.settings-bonus-checkbox {
+    margin-top: auto;
+    align-items: center;
+}
+
+.settings-threshold-grid {
+    display: grid;
+    gap: 12px;
+}
+
+.settings-threshold-row {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+    align-items: end;
+    padding: 14px;
+    border: 1px solid #dde6f1;
+    border-radius: 16px;
+    background: #fff;
+}
+
 .settings-rate-name {
     font-size: 15px;
     font-weight: 700;
@@ -2663,5 +2684,42 @@ body.modal-open {
     .shift-calendar-scroller .employee-shift-lines,
     .shift-calendar-scroller .employee-shift-line {
         display: none;
+    }
+}
+
+
+.shift-floating-add-btn {
+    position: fixed;
+    right: 18px;
+    bottom: 18px;
+    width: 56px;
+    height: 56px;
+    border: none;
+    border-radius: 999px;
+    background: #2563eb;
+    color: #fff;
+    font-size: 32px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 14px 28px rgba(37, 99, 235, 0.28);
+    z-index: 60;
+}
+
+.shift-floating-add-btn:hover {
+    background: #1d4ed8;
+}
+
+@media (max-width: 768px) {
+    .settings-threshold-row {
+        grid-template-columns: 1fr;
+    }
+
+    .shift-floating-add-btn {
+        right: 14px;
+        bottom: 14px;
+        width: 52px;
+        height: 52px;
     }
 }
