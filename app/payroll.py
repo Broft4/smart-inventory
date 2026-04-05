@@ -28,6 +28,7 @@ from app.models import (
     PayrollAuditLog,
     PayrollCategoryRateVersion,
     PayrollDailyMetricCache,
+    PayrollRecalcJob,
     PayrollSettingsVersion,
     Report,
     ReportTargetSnapshot,
@@ -38,6 +39,7 @@ from app.models import (
     User,
     WorkShift,
 )
+from app.database import AsyncSessionLocal
 from app.moysklad import DEFAULT_CATEGORY_NAME, ms_client
 
 logger = logging.getLogger(__name__)
@@ -60,6 +62,7 @@ SALES_METRICS_TTL_SECONDS = 90
 PAYROLL_DAILY_CACHE_RECENT_TTL_SECONDS = 900
 _sales_metrics_cache: dict[tuple[int, str, str], tuple[float, dict[date, dict[str, Any]]]] = {}
 _category_lookup_cache: dict[str, tuple[float, dict[str, dict[str, str]]]] = {}
+_payroll_recalc_tasks: dict[int, asyncio.Task[Any]] = {}
 
 
 def _ms_client_enabled(token: str | None = None, location: str | None = None) -> bool:
@@ -206,6 +209,165 @@ def get_moscow_today() -> date:
     return _now_msk().date()
 
 
+
+
+
+def _serialize_recalc_job(job: PayrollRecalcJob, point: LocationPoint | None = None) -> dict[str, Any]:
+    result: dict[str, Any]
+    try:
+        result = json.loads(job.result_json or '{}')
+        if not isinstance(result, dict):
+            result = {}
+    except Exception:
+        result = {}
+    return {
+        'job_id': job.id,
+        'location': point.name if point else None,
+        'settings_version_id': job.settings_version_id,
+        'date_from': job.date_from.isoformat(),
+        'date_to': job.date_to.isoformat(),
+        'status': job.status,
+        'progress_current': int(job.progress_current or 0),
+        'progress_total': int(job.progress_total or 0),
+        'message': job.message,
+        'error_text': job.error_text,
+        'result': result,
+        'created_at': _datetime_to_str(job.created_at),
+        'started_at': _datetime_to_str(job.started_at),
+        'finished_at': _datetime_to_str(job.finished_at),
+    }
+
+
+async def _update_recalc_job_progress(job_id: int, *, status: str | None = None, current: int | None = None, total: int | None = None, message: str | None = None, error_text: str | None = None, result: dict[str, Any] | None = None) -> None:
+    async with AsyncSessionLocal() as db:
+        job = await db.get(PayrollRecalcJob, job_id)
+        if job is None:
+            return
+        now = datetime.utcnow()
+        if status is not None:
+            job.status = status
+            if status == 'running' and job.started_at is None:
+                job.started_at = now
+            if status in {'done', 'failed', 'cancelled'}:
+                job.finished_at = now
+        if current is not None:
+            job.progress_current = max(int(current), 0)
+        if total is not None:
+            job.progress_total = max(int(total), 0)
+        if message is not None:
+            job.message = message
+        if error_text is not None:
+            job.error_text = error_text
+        if result is not None:
+            job.result_json = json.dumps(result, ensure_ascii=False)
+        job.updated_at = now
+        await db.commit()
+
+
+async def _run_payroll_recalc_job(job_id: int) -> None:
+    try:
+        await _update_recalc_job_progress(job_id, status='running', current=0, message='Запущен пересчёт закрытых смен...')
+        async with AsyncSessionLocal() as db:
+            job = await db.get(PayrollRecalcJob, job_id)
+            if job is None:
+                return
+            point = await db.get(LocationPoint, job.location_point_id)
+            if point is None:
+                await _update_recalc_job_progress(job_id, status='failed', error_text='Точка для пересчёта не найдена.')
+                return
+
+            async def progress(current: int, total: int) -> None:
+                await _update_recalc_job_progress(job_id, current=current, total=total, message=f'Пересчитываем смены: {current} из {total}.')
+
+            result = await rebuild_closed_shift_snapshots(
+                job.date_from,
+                job.date_to,
+                db,
+                location=point.name,
+                force_refresh_metrics=True,
+                progress_callback=progress,
+            )
+            await _update_recalc_job_progress(
+                job_id,
+                status='done',
+                current=int(result.get('processed') or 0),
+                total=int(result.get('processed') or 0),
+                message='Пересчёт завершён.',
+                result=result,
+            )
+    except Exception as exc:
+        logger.exception('Фоновый пересчёт зарплаты завершился ошибкой. job_id=%s', job_id)
+        await _update_recalc_job_progress(job_id, status='failed', message='Ошибка пересчёта.', error_text=str(exc))
+    finally:
+        _payroll_recalc_tasks.pop(job_id, None)
+
+
+async def _enqueue_payroll_recalc_job(point: LocationPoint, settings_version_id: int | None, date_from: date, date_to: date, requested_by_user_id: int | None) -> PayrollRecalcJob:
+    async with AsyncSessionLocal() as db:
+        active_job = await db.scalar(
+            select(PayrollRecalcJob)
+            .where(
+                PayrollRecalcJob.location_point_id == point.id,
+                PayrollRecalcJob.date_from == date_from,
+                PayrollRecalcJob.date_to == date_to,
+                PayrollRecalcJob.status.in_(['queued', 'running']),
+            )
+            .order_by(PayrollRecalcJob.id.desc())
+            .limit(1)
+        )
+        if active_job is None:
+            active_job = PayrollRecalcJob(
+                location_point_id=point.id,
+                settings_version_id=settings_version_id,
+                requested_by_user_id=requested_by_user_id,
+                date_from=date_from,
+                date_to=date_to,
+                status='queued',
+                progress_current=0,
+                progress_total=0,
+                message='Задача поставлена в очередь на пересчёт.',
+                result_json='{}',
+                updated_at=datetime.utcnow(),
+            )
+            db.add(active_job)
+            await db.commit()
+            await db.refresh(active_job)
+        elif settings_version_id and active_job.settings_version_id != settings_version_id:
+            active_job.settings_version_id = settings_version_id
+            active_job.updated_at = datetime.utcnow()
+            await db.commit()
+            await db.refresh(active_job)
+    if active_job.id not in _payroll_recalc_tasks or _payroll_recalc_tasks[active_job.id].done():
+        _payroll_recalc_tasks[active_job.id] = asyncio.create_task(_run_payroll_recalc_job(active_job.id))
+    return active_job
+
+
+async def resume_pending_payroll_recalc_jobs() -> None:
+    async with AsyncSessionLocal() as db:
+        pending_jobs = (
+            await db.scalars(
+                select(PayrollRecalcJob)
+                .where(PayrollRecalcJob.status.in_(['queued', 'running']))
+                .order_by(PayrollRecalcJob.id.asc())
+            )
+        ).all()
+    for job in pending_jobs:
+        if job.id in _payroll_recalc_tasks and not _payroll_recalc_tasks[job.id].done():
+            continue
+        _payroll_recalc_tasks[job.id] = asyncio.create_task(_run_payroll_recalc_job(job.id))
+
+
+async def get_payroll_recalc_status(location: str, db: AsyncSession, current_user: User, job_id: int | None = None) -> dict[str, Any]:
+    await ensure_user_can_access_location(current_user, location, db)
+    point = await _get_location_point_by_name(location, db)
+    query = select(PayrollRecalcJob).where(PayrollRecalcJob.location_point_id == point.id)
+    if job_id is not None:
+        query = query.where(PayrollRecalcJob.id == job_id)
+    query = query.order_by(PayrollRecalcJob.id.desc()).limit(1)
+    job = await db.scalar(query)
+    if job is None:
+        return {'location': point.name, 'job': None}
+    return {'location': point.name, 'job': _serialize_recalc_job(job, point)}
 
 def _normalize_location(location: str) -> str:
     return location.strip().title()
@@ -706,8 +868,28 @@ async def _list_location_admins(point: LocationPoint, db: AsyncSession) -> list[
     ).all()
 
 
-async def _collect_payroll_category_catalog(point: LocationPoint, db: AsyncSession) -> dict[str, Any]:
-    normalized = _normalize_location(point.name)
+async def get_location_payroll_setup(location: str, db: AsyncSession, current_user: User) -> dict[str, Any]:
+    await ensure_user_can_access_location(current_user, location, db)
+    point = await _get_location_point_by_name(location, db)
+    settings = await _ensure_default_payroll_settings(point, db)
+    rates = await _get_settings_rates(settings.id, db)
+    employees = await _list_location_employees(point, db)
+    admins = await _list_location_admins(point, db)
+    category_catalog = await get_payroll_category_catalog(point.name, db, current_user)
+    return {
+        'location': point.name,
+        'location_id': point.id,
+        'settings': _serialize_settings_version_payload(settings, rates),
+        'category_catalog': category_catalog.get('categories', []),
+        'employees': [{'id': item.id, 'full_name': item.full_name} for item in employees],
+        'admins': [{'id': item.id, 'full_name': item.full_name, 'role': item.role} for item in admins],
+    }
+
+
+async def get_payroll_category_catalog(location: str, db: AsyncSession, current_user: User) -> dict[str, Any]:
+    await ensure_user_can_access_location(current_user, location, db)
+    point = await _get_location_point_by_name(location, db)
+    normalized = _normalize_location(location)
     categories: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     seen_names: dict[str, str] = {}
@@ -720,27 +902,49 @@ async def _collect_payroll_category_catalog(point: LocationPoint, db: AsyncSessi
         name_key = _normalize_category_name_key(normalized_name)
         if normalized_id in seen_ids:
             return
-        if name_key in seen_names:
+        # Если уже есть та же категория по имени с осмысленным id, не плодим дубликаты с другим id.
+        if name_key and name_key in seen_names:
             return
         seen_ids.add(normalized_id)
-        seen_names[name_key] = normalized_id
+        if name_key:
+            seen_names[name_key] = normalized_id
         categories.append({'id': normalized_id, 'name': normalized_name})
 
-    # 1) Берём категории из сохранённых данных: правил, ревизий, снимков закрытых смен.
-    settings_versions = (
-        await db.scalars(
-            select(PayrollSettingsVersion)
+    # 1) Категории из всех сохраненных версий правил по точке.
+    historical_rate_rows = (
+        await db.execute(
+            select(PayrollCategoryRateVersion.category_id, PayrollCategoryRateVersion.category_name)
+            .join(PayrollSettingsVersion, PayrollCategoryRateVersion.settings_version_id == PayrollSettingsVersion.id)
             .where(PayrollSettingsVersion.location_point_id == point.id)
-            .order_by(PayrollSettingsVersion.effective_from.desc(), PayrollSettingsVersion.id.desc())
-            .limit(50)
+            .order_by(PayrollCategoryRateVersion.category_name.asc())
         )
     ).all()
-    for settings in settings_versions:
-        rates = await _get_settings_rates(settings.id, db)
-        for item in rates.values():
-            _append_category(item.get('category_id'), item.get('category_name'))
+    for category_id, category_name in historical_rate_rows:
+        _append_category(category_id, category_name)
 
+    # 1.1) Категории из истории сохранений правил, включая нулевые проценты.
+    audit_rows = (
+        await db.scalars(
+            select(PayrollAuditLog)
+            .where(
+                PayrollAuditLog.location_point_id == point.id,
+                PayrollAuditLog.entity_type == 'payroll_settings',
+            )
+            .order_by(PayrollAuditLog.id.desc())
+            .limit(200)
+        )
+    ).all()
+    for audit_row in audit_rows:
+        try:
+            details = json.loads(audit_row.details_json or '{}')
+        except (TypeError, ValueError, json.JSONDecodeError):
+            details = {}
+        for item in details.get('category_rates') or []:
+            _append_category(item.get('category_id') or item.get('id'), item.get('category_name') or item.get('name'))
+
+    # 1.2) Категории из локальной истории ревизий/снапшотов по этой точке.
     revision_queries = [
+        select(SelectionTarget.category_id, SelectionTarget.category_name).where(SelectionTarget.location == normalized),
         select(SelectionTargetDay.category_id, SelectionTargetDay.category_name).where(SelectionTargetDay.location == normalized),
         select(CategoryAssignment.category_id, CategoryAssignment.category_name).where(CategoryAssignment.location == normalized),
         select(ReportTargetSnapshot.category_id, ReportTargetSnapshot.category_name)
@@ -754,6 +958,7 @@ async def _collect_payroll_category_catalog(point: LocationPoint, db: AsyncSessi
         for category_id, category_name in (await db.execute(query.distinct())).all():
             _append_category(category_id, category_name)
 
+    # 1.3) Категории из снимков закрытых смен — это помогает, даже если по текущей дате продаж нет.
     snapshot_rows = (
         await db.execute(
             select(ShiftPayrollCategorySnapshot.category_id, ShiftPayrollCategorySnapshot.category_name)
@@ -765,6 +970,7 @@ async def _collect_payroll_category_catalog(point: LocationPoint, db: AsyncSessi
     for category_id, category_name in snapshot_rows:
         _append_category(category_id, category_name)
 
+    # 2) Категории из кеша метрик продаж — здесь бывают категории, которых уже нет в остатках.
     metric_rows = (
         await db.scalars(
             select(PayrollDailyMetricCache)
@@ -781,10 +987,12 @@ async def _collect_payroll_category_catalog(point: LocationPoint, db: AsyncSessi
         for item in parsed_categories or []:
             _append_category(item.get('category_id'), item.get('category_name'))
 
+    # 3) Пытаемся подтянуть полный каталог из МоегоСклада.
     try:
         if _ms_client_enabled(token=_point_ms_token(point), location=normalized):
             token = _point_ms_token(point)
             folder_map = await ms_client._get_folder_map(token=token, location=normalized)
+            # Берём верхнюю категорию для каждой папки, а не только "явные" корни.
             for folder_id, folder in folder_map.items():
                 chain = ms_client._resolve_folder_chain(str(folder_id or '').strip(), folder_map)
                 if not chain:
@@ -811,32 +1019,6 @@ async def _collect_payroll_category_catalog(point: LocationPoint, db: AsyncSessi
 
     categories.sort(key=lambda item: item['name'].lower())
     return {'location': normalized, 'categories': categories}
-
-
-async def get_location_payroll_setup(location: str, db: AsyncSession, current_user: User) -> dict[str, Any]:
-    await ensure_user_can_access_location(current_user, location, db)
-    point = await _get_location_point_by_name(location, db)
-    settings = await _ensure_default_payroll_settings(point, db)
-    rates = await _get_settings_rates(settings.id, db)
-    employees = await _list_location_employees(point, db)
-    admins = await _list_location_admins(point, db)
-    category_catalog = await _collect_payroll_category_catalog(point, db)
-    return {
-        'location': point.name,
-        'location_id': point.id,
-        'settings': _serialize_settings_version_payload(settings, rates),
-        'employees': [{'id': item.id, 'full_name': item.full_name} for item in employees],
-        'admins': [{'id': item.id, 'full_name': item.full_name} for item in admins],
-        'categories': category_catalog.get('categories', []),
-    }
-
-
-async def get_payroll_category_catalog(location: str, db: AsyncSession, current_user: User) -> dict[str, Any]:
-    await ensure_user_can_access_location(current_user, location, db)
-    point = await _get_location_point_by_name(location, db)
-    return await _collect_payroll_category_catalog(point, db)
-
-    
 
 
 async def update_location_payroll_settings(payload: PayrollSettingsUpdateRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
@@ -953,7 +1135,6 @@ async def update_location_payroll_settings(payload: PayrollSettingsUpdateRequest
     )
     await db.commit()
 
-    rebuild_result: dict[str, Any] | None = None
     today = get_moscow_today()
     rebuild_until = await db.scalar(
         select(func.max(WorkShift.shift_date))
@@ -965,22 +1146,25 @@ async def update_location_payroll_settings(payload: PayrollSettingsUpdateRequest
         )
     )
     rebuild_to = rebuild_until or today
+    recalc_job_payload: dict[str, Any] | None = None
     if payload.effective_from <= rebuild_to:
-        rebuild_result = await rebuild_closed_shift_snapshots(payload.effective_from, rebuild_to, db, location=point.name, force_refresh_metrics=True)
+        recalc_job = await _enqueue_payroll_recalc_job(point, version.id, payload.effective_from, rebuild_to, current_user.id)
+        recalc_job_payload = _serialize_recalc_job(recalc_job, point)
 
     saved_settings = await db.get(PayrollSettingsVersion, version.id)
     saved_rates = await _get_settings_rates(version.id, db)
     setup = await get_location_payroll_setup(point.name, db, current_user)
     setup['settings'] = _serialize_settings_version_payload(saved_settings or version, saved_rates)
-    rebuild_date_to = rebuild_to if payload.effective_from <= rebuild_to else payload.effective_from
-    setup['rebuild_closed_shifts'] = rebuild_result or {
-        'date_from': payload.effective_from.isoformat(),
-        'date_to': rebuild_date_to.isoformat(),
-        'location': point.name,
-        'processed': 0,
-        'updated': 0,
-        'details': [],
-    }
+    setup['recalc_job'] = recalc_job_payload
+    if recalc_job_payload is None:
+        setup['rebuild_closed_shifts'] = {
+            'date_from': payload.effective_from.isoformat(),
+            'date_to': rebuild_to.isoformat(),
+            'location': point.name,
+            'processed': 0,
+            'updated': 0,
+            'details': [],
+        }
     return setup
 
 
@@ -2710,7 +2894,15 @@ async def refresh_payroll_metrics_cache(date_from: date, date_to: date, db: Asyn
     }
 
 
-async def rebuild_closed_shift_snapshots(date_from: date, date_to: date, db: AsyncSession, location: str | None = None, *, force_refresh_metrics: bool = False) -> dict[str, Any]:
+async def rebuild_closed_shift_snapshots(
+    date_from: date,
+    date_to: date,
+    db: AsyncSession,
+    location: str | None = None,
+    *,
+    force_refresh_metrics: bool = False,
+    progress_callback: Any | None = None,
+) -> dict[str, Any]:
     query = (
         select(WorkShift)
         .where(
@@ -2802,6 +2994,10 @@ async def rebuild_closed_shift_snapshots(date_from: date, date_to: date, db: Asy
             'cost_amount': computed.cost_amount,
             'gross_profit_amount': computed.gross_profit_amount,
         })
+        if progress_callback is not None:
+            callback_result = progress_callback(updated, len(shifts))
+            if asyncio.iscoroutine(callback_result):
+                await callback_result
 
     await db.commit()
     return {

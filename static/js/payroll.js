@@ -17,7 +17,9 @@ const payrollState = {
         sort: 'earning_desc',
     },
     employeeView: 'salary',
-    settingsDraft: null,
+    activeRecalcJob: null,
+    recalcPollTimer: null,
+    lastViewportWidth: window.innerWidth || 0,
 };
 
 function qs(id) {
@@ -87,82 +89,6 @@ function monthLabel(monthValue) {
     return new Intl.DateTimeFormat('ru-RU', { month: 'long', year: 'numeric' }).format(new Date(year, month - 1, 1));
 }
 
-function monthOptionsAroundToday({ past = 12, future = 3 } = {}) {
-    const now = new Date();
-    const baseYear = now.getFullYear();
-    const baseMonth = now.getMonth();
-    const options = [];
-    for (let offset = -past; offset <= future; offset += 1) {
-        const current = new Date(baseYear, baseMonth + offset, 1);
-        const value = `${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, '0')}`;
-        options.push({ value, label: monthLabel(value) });
-    }
-    return options;
-}
-
-function populateMonthSelect(inputId, selectedValue = monthIso()) {
-    const select = qs(inputId);
-    if (!select || select.tagName !== 'SELECT') return;
-    const currentValue = selectedValue || select.value || monthIso();
-    const options = monthOptionsAroundToday();
-    select.innerHTML = options.map(({ value, label }) => `<option value="${value}">${escapeHtml(label)}</option>`).join('');
-    if (options.some((item) => item.value === currentValue)) {
-        select.value = currentValue;
-    }
-}
-
-
-function captureSettingsDraftFromUi() {
-    if (!isAdminRole() || !qs('admin-settings-card') || qs('admin-settings-card').classList.contains('hidden')) return null;
-    const draft = {
-        effective_from: qs('settings-effective-from')?.value || '',
-        exit_amount: qs('settings-exit')?.value ?? '',
-        bonus_threshold: qs('settings-threshold')?.value ?? '',
-        bonus_amount: qs('settings-bonus')?.value ?? '',
-        other_rate_percent: qs('settings-other-rate')?.value ?? '',
-        responsible_admin_user_id: qs('settings-admin-select')?.value || '',
-        category_rates: [...document.querySelectorAll('[data-category-rate-id]')].map((input) => ({
-            category_id: input.dataset.categoryRateId,
-            rate_percent: input.value,
-        })),
-        excluded_bonus_category_ids: [...document.querySelectorAll('[data-bonus-category-id]:checked')]
-            .map((input) => input.dataset.bonusCategoryId)
-            .filter(Boolean),
-    };
-    if (isSuperadminRole() && document.querySelector('.settings-threshold-row')) {
-        draft.manager_salary_brackets = collectManagerBracketsFromUi();
-    }
-    return draft;
-}
-
-function applySettingsDraftToUi(draft) {
-    if (!draft) return;
-    if (qs('settings-effective-from')) qs('settings-effective-from').value = draft.effective_from || '';
-    if (qs('settings-exit')) qs('settings-exit').value = draft.exit_amount ?? '';
-    if (qs('settings-threshold')) qs('settings-threshold').value = draft.bonus_threshold ?? '';
-    if (qs('settings-bonus')) qs('settings-bonus').value = draft.bonus_amount ?? '';
-    if (qs('settings-other-rate')) qs('settings-other-rate').value = draft.other_rate_percent ?? '';
-    if (qs('settings-admin-select')) qs('settings-admin-select').value = draft.responsible_admin_user_id || '';
-
-    const rateMap = new Map((draft.category_rates || []).map((item) => [String(item.category_id || ''), item.rate_percent]));
-    document.querySelectorAll('[data-category-rate-id]').forEach((input) => {
-        const key = String(input.dataset.categoryRateId || '');
-        if (rateMap.has(key)) input.value = rateMap.get(key);
-    });
-    const excluded = new Set(draft.excluded_bonus_category_ids || []);
-    document.querySelectorAll('[data-bonus-category-id]').forEach((input) => {
-        input.checked = excluded.has(String(input.dataset.bonusCategoryId || ''));
-    });
-}
-
-function rememberSettingsDraft() {
-    payrollState.settingsDraft = captureSettingsDraftFromUi();
-}
-
-function resetSettingsDraft() {
-    payrollState.settingsDraft = null;
-}
-
 function setButtonLoading(button, isLoading, loadingLabel = 'Сохраняем...') {
     if (!button) return;
     const loader = button.querySelector('.btn-loader');
@@ -193,6 +119,76 @@ function hideStatus() {
     box.classList.add('hidden');
     box.textContent = '';
     box.className = 'inventory-status hidden';
+}
+
+
+function normalizeCategoryDisplayNet(category) {
+    const raw = Number(category?.net_sales_amount || 0);
+    if ((category?.is_other_category || category?.category_id === '__other__') && raw < 0) {
+        return 0;
+    }
+    return raw;
+}
+
+function stopRecalcPolling() {
+    if (payrollState.recalcPollTimer) {
+        clearTimeout(payrollState.recalcPollTimer);
+        payrollState.recalcPollTimer = null;
+    }
+}
+
+async function refreshAfterRecalcFinished() {
+    await Promise.allSettled([
+        loadShiftCalendar(),
+        loadExpenseTemplatesAndEntries(),
+        loadSummary(),
+        loadAudit(),
+    ]);
+}
+
+async function pollRecalcStatus(jobId) {
+    const location = selectedLocation();
+    if (!location || !jobId) return;
+    stopRecalcPolling();
+    try {
+        const payload = await api(`/api/payroll/recalc-status?location=${encodeURIComponent(location)}&job_id=${jobId}`);
+        const job = payload?.job || null;
+        payrollState.activeRecalcJob = job;
+        if (!job) return;
+        if (job.status === 'done') {
+            const processed = Number(job?.result?.updated || job?.result?.processed || 0);
+            const message = processed > 0
+                ? `Настройки сохранены. Пересчёт завершён, обновлено смен: ${processed}.`
+                : 'Настройки сохранены. Пересчёт завершён.';
+            showStatus(message, 'success');
+            showScopedStatus('settings-status', message, 'success');
+            await refreshAfterRecalcFinished();
+            stopRecalcPolling();
+            return;
+        }
+        if (job.status === 'failed') {
+            const message = job.error_text || job.message || 'Не удалось пересчитать смены по новым правилам.';
+            showStatus(message, 'error');
+            showScopedStatus('settings-status', message, 'error');
+            stopRecalcPolling();
+            return;
+        }
+        const progressTotal = Number(job.progress_total || 0);
+        const progressCurrent = Number(job.progress_current || 0);
+        const progressText = progressTotal > 0
+            ? `Идёт пересчёт закрытых смен: ${progressCurrent} из ${progressTotal}.`
+            : (job.message || 'Идёт пересчёт закрытых смен...');
+        showStatus(progressText, 'loading');
+        showScopedStatus('settings-status', progressText, 'loading');
+        payrollState.recalcPollTimer = setTimeout(() => {
+            pollRecalcStatus(jobId).catch((error) => console.error(error));
+        }, 2500);
+    } catch (error) {
+        console.error(error);
+        payrollState.recalcPollTimer = setTimeout(() => {
+            pollRecalcStatus(jobId).catch((pollError) => console.error(pollError));
+        }, 4000);
+    }
 }
 
 function showScopedStatus(id, message, tone = 'loading') {
@@ -249,7 +245,7 @@ function setDefaultDates() {
     if (qs('payroll-date-to')) qs('payroll-date-to').value = todayIso();
     if (qs('settings-effective-from')) qs('settings-effective-from').value = todayIso();
     if (qs('shift-month-input')) qs('shift-month-input').value = monthIso();
-    populateMonthSelect('expenses-month-input', monthIso());
+    if (qs('expenses-month-input')) qs('expenses-month-input').value = monthIso();
     if (qs('shift-date-input')) qs('shift-date-input').value = todayIso();
 }
 
@@ -384,16 +380,15 @@ function setEmployeePayrollView(view) {
 
 function mergeCategoryCatalog(...sources) {
     const result = [];
-    const seenIds = new Set();
-    const seenNames = new Set();
+    const seen = new Set();
     sources.flat().forEach((item) => {
         if (!item) return;
         const id = String(item.category_id || item.id || '').trim();
         const name = String(item.category_name || item.name || '').trim();
         const nameKey = normalizeSearch(name);
-        if (!id || !name || seenIds.has(id) || seenNames.has(nameKey)) return;
-        seenIds.add(id);
-        seenNames.add(nameKey);
+        if (!id || !name || seen.has(id) || seen.has(`name:${nameKey}`)) return;
+        seen.add(id);
+        seen.add(`name:${nameKey}`);
         result.push({ id, name });
     });
     result.sort((left, right) => left.name.localeCompare(right.name, 'ru'));
@@ -432,7 +427,7 @@ function renderShiftCategoryBreakdown(categories = []) {
                             <td data-label="%">${Number(category.rate_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%</td>
                             <td data-label="Продажи">${formatMoney(category.sales_amount || 0)}</td>
                             <td data-label="Возвраты">${formatMoney(category.return_amount || 0)}</td>
-                            <td data-label="Чистая сумма">${formatMoney(category.net_sales_amount || 0)}</td>
+                            <td data-label="Чистая сумма">${formatMoney(normalizeCategoryDisplayNet(category))}</td>
                             <td data-label="Начислено"><strong>${formatMoney(category.earning_amount || 0)}</strong></td>
                         </tr>
                     `).join('')}
@@ -569,7 +564,7 @@ function renderPayrollCategoryTable(categories = payrollState.summary?.categorie
                 <td data-label="%">${Number(category.rate_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%</td>
                 <td data-label="Продажи">${formatMoney(category.sales_amount)}</td>
                 <td data-label="Возвраты">${formatMoney(category.return_amount)}</td>
-                <td data-label="Чистая сумма">${formatMoney(category.net_sales_amount)}</td>
+                <td data-label="Чистая сумма">${formatMoney(normalizeCategoryDisplayNet(category))}</td>
                 <td data-label="Начислено"><strong>${formatMoney(category.earning_amount)}</strong></td>
             </tr>
         `).join('')
@@ -742,26 +737,21 @@ window.removeManagerBracket = function removeManagerBracket(index) {
     renderManagerBrackets();
 };
 
-function renderSettings(options = {}) {
-    const { preserveDraft = false } = options;
+function renderSettings() {
     const card = qs('admin-settings-card');
     if (!isAdminRole()) {
         card.classList.add('hidden');
         return;
     }
     card.classList.remove('hidden');
-    const draft = preserveDraft ? (payrollState.settingsDraft || captureSettingsDraftFromUi()) : null;
     const settings = payrollState.settings || {};
-    if (draft?.manager_salary_brackets && isSuperadminRole()) {
-        payrollState.settings = { ...settings, manager_salary_brackets: draft.manager_salary_brackets };
-    }
     const selectedBonusCategories = new Set(settings.bonus_category_ids || []);
     qs('settings-effective-from').value = settings.effective_from || todayIso();
     qs('settings-exit').value = settings.exit_amount ?? 2000;
     qs('settings-threshold').value = settings.bonus_threshold ?? 40000;
     qs('settings-bonus').value = settings.bonus_amount ?? 500;
     qs('settings-other-rate').value = settings.other_rate_percent ?? 3;
-    qs('settings-admin-select').innerHTML = ['<option value="">—</option>', ...payrollState.admins.map(admin => `<option value="${admin.id}">${escapeHtml(admin.full_name)} (${roleDisplayName('admin')})</option>`)].join('');
+    qs('settings-admin-select').innerHTML = ['<option value="">—</option>', ...payrollState.admins.map(admin => `<option value="${admin.id}">${escapeHtml(admin.full_name)} (${roleDisplayName(admin.role)})</option>`)].join('');
     if (settings.responsible_admin_user_id) qs('settings-admin-select').value = String(settings.responsible_admin_user_id);
     const existing = new Map((settings.category_rates || []).map(item => [item.category_id, item.rate_percent]));
     qs('settings-category-rates').innerHTML = payrollState.categoryCatalog.map(category => {
@@ -789,7 +779,6 @@ function renderSettings(options = {}) {
         </label>
     `}).join('');
     renderManagerBrackets();
-    applySettingsDraftToUi(draft);
 }
 
 
@@ -1042,12 +1031,13 @@ function renderAudit() {
 async function loadSetupForLocation() {
     const location = selectedLocation();
     if (!location) return;
+    stopRecalcPolling();
+    payrollState.activeRecalcJob = null;
     const setup = await api(`/api/payroll/settings?location=${encodeURIComponent(location)}`);
     payrollState.settings = setup.settings;
     payrollState.employees = setup.employees || [];
     payrollState.admins = setup.admins || [];
-    mergeCategoryCatalog(setup.categories || [], payrollState.settings?.category_rates || []);
-    resetSettingsDraft();
+    mergeCategoryCatalog(setup.category_catalog || [], payrollState.settings?.category_rates || []);
     renderUsersForLocation();
     renderSettings();
 
@@ -1056,21 +1046,9 @@ async function loadSetupForLocation() {
         loadExpenseTemplatesAndEntries(),
         loadAudit(),
     ]);
-}
 
-async function refreshCategoryCatalogForLocation({ showWarning = false, preserveSettingsDraft = false } = {}) {
-    const location = selectedLocation();
-    if (!location) return;
-    try {
-        if (preserveSettingsDraft) rememberSettingsDraft();
-        const categories = await api(`/api/payroll/categories?location=${encodeURIComponent(location)}`);
-        mergeCategoryCatalog(payrollState.categoryCatalog || [], categories.categories || []);
-        renderSettings({ preserveDraft: preserveSettingsDraft });
-    } catch (error) {
-        console.error(error);
-        if (showWarning) {
-            showStatus('Категории для точки временно не загрузились полностью. Используются сохранённые категории из правил и истории точки.', 'warning');
-        }
+    if (setup?.recalc_job?.job_id) {
+        pollRecalcStatus(setup.recalc_job.job_id).catch((error) => console.error(error));
     }
 }
 
@@ -1158,17 +1136,6 @@ window.addManagerBracket = function addManagerBracket() {
     renderManagerBrackets();
 };
 
-window.openShiftModal = function openShiftModal(dateValue) {
-    if (qs('shift-modal-date-input')) qs('shift-modal-date-input').value = dateValue || todayIso();
-    hideScopedStatus('shift-modal-status');
-    qs('shift-modal')?.classList.remove('hidden');
-};
-
-function closeShiftModal() {
-    qs('shift-modal')?.classList.add('hidden');
-    hideScopedStatus('shift-modal-status');
-}
-
 async function saveSettings() {
     const button = qs('save-settings-btn');
     const categoryRates = [...document.querySelectorAll('[data-category-rate-id]')]
@@ -1199,37 +1166,36 @@ async function saveSettings() {
         category_rates: categoryRates,
     };
     showStatus('Сохраняем новую версию правил...', 'loading');
-    showScopedStatus('settings-status', 'Сохраняем правила и пересчитываем смены...', 'loading');
+    showScopedStatus('settings-status', 'Сохраняем правила...', 'loading');
     setButtonLoading(button, true, 'Сохраняем...');
     try {
         const response = await api('/api/payroll/settings', { method: 'PUT', body: JSON.stringify(payload) });
         payrollState.settings = response.settings || payrollState.settings;
         payrollState.employees = response.employees || payrollState.employees;
         payrollState.admins = response.admins || payrollState.admins;
-        mergeCategoryCatalog(response.categories || payrollState.categoryCatalog || [], payrollState.settings?.category_rates || []);
-        resetSettingsDraft();
+        mergeCategoryCatalog(response.category_catalog || [], payrollState.settings?.category_rates || [], payrollState.categoryCatalog || []);
         renderUsersForLocation();
         renderSettings();
         await Promise.all([
-            loadShiftCalendar(),
-            loadExpenseTemplatesAndEntries(),
             loadSummary(),
+            loadExpenseTemplatesAndEntries(),
             loadAudit(),
+            loadShiftCalendar(),
         ]);
-        const rebuildProcessed = Number(response?.rebuild_closed_shifts?.processed || 0);
-        const rebuiltCount = Number(response?.rebuild_closed_shifts?.updated || 0);
-        const rebuildFrom = response?.rebuild_closed_shifts?.date_from ? formatDateRu(response.rebuild_closed_shifts.date_from) : '';
-        const rebuildTo = response?.rebuild_closed_shifts?.date_to ? formatDateRu(response.rebuild_closed_shifts.date_to) : '';
-        let successMessage = 'Версия правил сохранена.';
-        if (rebuiltCount > 0) {
-            successMessage = rebuildFrom && rebuildTo
-                ? `Версия правил сохранена. Закрытые смены пересчитаны за период ${rebuildFrom} — ${rebuildTo}: ${rebuiltCount}.`
-                : `Версия правил сохранена. Пересчитано закрытых смен: ${rebuiltCount}.`;
-        } else if (rebuildProcessed === 0 && payload.effective_from) {
-            successMessage = `Версия правил сохранена. Новые правила применяются с ${formatDateRu(payload.effective_from)}.`;
+        const recalcJobId = response?.recalc_job?.job_id;
+        if (recalcJobId) {
+            payrollState.activeRecalcJob = response.recalc_job;
+            const queuedMessage = 'Версия правил сохранена. Запущен живой пересчёт смен по выбранному периоду...';
+            showStatus(queuedMessage, 'loading');
+            showScopedStatus('settings-status', queuedMessage, 'loading');
+            pollRecalcStatus(recalcJobId).catch((error) => console.error(error));
+        } else {
+            const successMessage = payload.effective_from
+                ? `Версия правил сохранена. Новые правила применяются с ${formatDateRu(payload.effective_from)}.`
+                : 'Версия правил сохранена.';
+            showStatus(successMessage, 'success');
+            showScopedStatus('settings-status', successMessage, 'success');
         }
-        showStatus(successMessage, 'success');
-        showScopedStatus('settings-status', successMessage, 'success');
     } catch (error) {
         console.error(error);
         showStatus(error.message || 'Не удалось сохранить правила.', 'error');
@@ -1240,6 +1206,23 @@ async function saveSettings() {
 }
 
 window.saveSettings = saveSettings;
+window.openShiftModal = openShiftModal;
+
+function openShiftModal(dateValue) {
+    const modal = qs('shift-modal');
+    if (!modal) return;
+    qs('shift-modal-date-input').value = dateValue || todayIso();
+    if (qs('shift-modal-employee-select') && qs('shift-employee-select')) {
+        qs('shift-modal-employee-select').value = qs('shift-employee-select').value || '';
+    }
+    modal.classList.remove('hidden');
+}
+
+function closeShiftModal() {
+    const modal = qs('shift-modal');
+    if (!modal) return;
+    modal.classList.add('hidden');
+}
 
 async function saveShiftFromModal() {
     const button = qs('shift-modal-save-btn');
@@ -1427,9 +1410,6 @@ async function createManualExpense() {
     }
 }
 
-window.createExpenseTemplate = createExpenseTemplate;
-window.createManualExpense = createManualExpense;
-
 window.deleteExpenseEntry = async function deleteExpenseEntry(id) {
     if (!confirm('Удалить этот свободный расход?')) return;
     try {
@@ -1493,11 +1473,6 @@ qs('payroll-location-select').addEventListener('change', async () => {
     await loadSetupForLocation();
     await loadSummary();
 });
-document.querySelectorAll('#admin-settings-card input, #admin-settings-card select, #admin-settings-card textarea').forEach((field) => {
-    field.addEventListener('input', rememberSettingsDraft, { passive: true });
-    field.addEventListener('change', rememberSettingsDraft, { passive: true });
-});
-
 qs('payroll-employee-select')?.addEventListener('change', loadSummary);
 qs('settings-add-manager-bracket-btn')?.addEventListener('click', () => window.addManagerBracket());
 qs('add-shift-btn')?.addEventListener('click', addShift);
@@ -1537,10 +1512,10 @@ document.addEventListener('keydown', (event) => {
     }
 });
 
-let lastViewportWidth = window.innerWidth;
 window.addEventListener('resize', () => {
-    if (window.innerWidth === lastViewportWidth) return;
-    lastViewportWidth = window.innerWidth;
+    const nextWidth = window.innerWidth || 0;
+    if (nextWidth === payrollState.lastViewportWidth) return;
+    payrollState.lastViewportWidth = nextWidth;
     if (payrollState.summary) {
         renderSummary(payrollState.summary);
     }

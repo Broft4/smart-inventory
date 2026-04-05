@@ -454,3 +454,25 @@ class PayrollAuditLog(Base):
     action_type: Mapped[str] = mapped_column(String(50), nullable=False)
     details_json: Mapped[str] = mapped_column(Text, nullable=False, default='{}')
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+
+class PayrollRecalcJob(Base):
+    __tablename__ = 'payroll_recalc_jobs'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    location_point_id: Mapped[int] = mapped_column(ForeignKey('location_points.id', ondelete='CASCADE'), nullable=False, index=True)
+    settings_version_id: Mapped[int | None] = mapped_column(ForeignKey('payroll_settings_versions.id', ondelete='SET NULL'), nullable=True, index=True)
+    requested_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    date_from: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    date_to: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), default='queued', nullable=False, index=True)
+    progress_current: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    progress_total: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    message: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_json: Mapped[str] = mapped_column(Text, default='{}', nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)

@@ -81,6 +81,7 @@ from app.payroll import (
     get_location_payroll_setup,
     get_manager_payroll_summary,
     get_payroll_category_catalog,
+    get_payroll_recalc_status,
     get_user_accessible_locations as get_payroll_accessible_locations,
     list_expense_templates,
     list_monthly_expenses,
@@ -90,6 +91,7 @@ from app.payroll import (
     update_location_payroll_settings,
     update_monthly_expense_entry,
     upsert_work_shift,
+    resume_pending_payroll_recalc_jobs,
 )
 from app.schemas import (
     AdminCycleTargetsResponse,
@@ -163,6 +165,7 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(bootstrap_payroll_schema)
     async with AsyncSession(bind=engine, expire_on_commit=False) as session:
         await ensure_default_admin(session)
+    await resume_pending_payroll_recalc_jobs()
     try:
         yield
     finally:
@@ -747,6 +750,12 @@ async def api_payroll_settings(location: str, user: User = Depends(require_user)
 async def api_payroll_settings_update(payload: PayrollSettingsUpdateRequest, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
     return await update_location_payroll_settings(payload, db, user)
 
+
+
+
+@app.get('/api/payroll/recalc-status')
+async def api_payroll_recalc_status(location: str, job_id: int | None = None, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
+    return await get_payroll_recalc_status(location, db, user, job_id=job_id)
 
 @app.get('/api/payroll/shifts')
 async def api_payroll_shifts(location: str, date_from: date, date_to: date, employee_user_id: int | None = None, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
