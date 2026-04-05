@@ -212,9 +212,9 @@
                     <div id="expenses-status" class="inventory-status hidden"></div>
                     <div class="expense-create-card">
                         <div class="payroll-filter-grid expense-create-grid">
-                            <label>Месяц шаблонов и расходов<select id="expenses-month-input"></select><small class="muted-text field-hint">Шаблон создаётся для конкретного месяца, а потом автоматически формирует запись расхода в этом месяце. Это нужно, чтобы можно было менять суммы по месяцам и хранить историю.</small></label>
+                            <label>Месяц<input type="month" id="expenses-month-input"></label>
                             <label>Новый шаблон<input type="text" id="expense-template-name" placeholder="Например, аренда"></label>
-                            <label>Тип<select id="expense-template-type"><option value="dynamic">Динамический</option><option value="static">Статический</option></select><small class="muted-text field-hint">Динамический — сумма может отличаться каждый месяц. Статический — обычно одна и та же сумма.</small></label>
+                            <label>Тип<select id="expense-template-type"><option value="dynamic">Динамический</option><option value="static">Статический</option></select></label>
                             <label>Сумма по умолчанию<input type="number" id="expense-template-default" min="0" step="0.01"></label>
                             <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline"><input type="checkbox" id="expense-template-employee"> По умолчанию относить к сотруднику</label>
                         </div>
@@ -261,46 +261,36 @@
                         </div>
                         <div id="expense-template-tbody" class="expense-template-grid"></div>
                     </div>
-                    <details class="expense-section expense-section--collapsible">
-                        <summary class="expense-section-head expense-section-head--stacked expense-section-summary">
+                    <div class="expense-section">
+                        <div class="expense-section-head expense-section-head--stacked">
                             <div>
                                 <h3>Расходы за месяц</h3>
                                 <p class="muted-text">Оплата, сотрудник, комментарий и удержание из зарплаты настраиваются по каждой записи отдельно.</p>
                             </div>
-                            <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
-                        </summary>
-                        <div class="expense-section-filters">
-                            <label>Источник<select id="expense-source-filter"><option value="all">Все</option><option value="manual">Свободные</option><option value="template">По шаблону</option></select></label>
-                            <label>Статус оплаты<select id="expense-payment-filter"><option value="all">Все</option><option value="paid">Уже оплачены</option><option value="unpaid">Нужно оплатить</option></select></label>
-                            <div id="expense-filter-meta" class="muted-text expense-filter-meta">Показано расходов: 0</div>
                         </div>
                         <div id="expense-entry-tbody" class="expense-entry-grid"></div>
-                    </details>
+                    </div>
                 </div>
             </div>
         </details>
     </section>
 
     <section class="category-card{% if user.role not in ['admin', 'superadmin'] %} hidden{% endif %}" id="audit-card">
-        <details class="payroll-collapse" id="audit-details">
-            <summary class="report-summary-header payroll-collapse-summary">
-                <div>
-                    <h2>Журнал изменений</h2>
-                    <p class="muted-text">События сгруппированы по дням. По умолчанию журнал свернут.</p>
-                </div>
-                <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
-            </summary>
-            <div class="payroll-collapse-body">
-                <div class="audit-filter-bar">
-                    <label>Дата<input type="date" id="audit-date-filter"></label>
-                    <label>Сотрудник<select id="audit-employee-filter"><option value="">Все сотрудники</option></select></label>
-                    <div class="audit-filter-actions">
-                        <button id="audit-clear-filters-btn" type="button" class="btn secondary btn-inline">Сбросить фильтры</button>
-                    </div>
-                </div>
-                <div id="audit-log-list" class="audit-log-list"></div>
+        <div class="report-summary-header">
+            <div>
+                <h2>Журнал изменений</h2>
+                <p class="muted-text">События сгруппированы по дням. По умолчанию журнал свернут.</p>
             </div>
-        </details>
+            <button id="audit-toggle-btn" type="button" class="btn secondary btn-inline">Развернуть журнал</button>
+        </div>
+        <div class="audit-filter-bar">
+            <label>Дата<input type="date" id="audit-date-filter"></label>
+            <label>Сотрудник<select id="audit-employee-filter"><option value="">Все сотрудники</option></select></label>
+            <div class="audit-filter-actions">
+                <button id="audit-clear-filters-btn" type="button" class="btn secondary btn-inline">Сбросить фильтры</button>
+            </div>
+        </div>
+        <div id="audit-log-list" class="audit-log-list hidden"></div>
     </section>
 
     <script>

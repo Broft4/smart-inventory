@@ -1979,55 +1979,6 @@ body.modal-open {
     gap: 14px;
 }
 
-.field-hint {
-    display: block;
-    margin-top: 6px;
-    line-height: 1.35;
-}
-
-.expense-section--collapsible {
-    padding: 0;
-    overflow: hidden;
-}
-
-.expense-section-summary {
-    padding: 18px;
-    margin-bottom: 0;
-    cursor: pointer;
-    list-style: none;
-}
-
-.expense-section-summary::-webkit-details-marker {
-    display: none;
-}
-
-.expense-section--collapsible[open] .expense-section-summary {
-    border-bottom: 1px solid #e7edf4;
-}
-
-.expense-section--collapsible[open] #expense-entry-tbody,
-.expense-section--collapsible[open] .expense-section-filters {
-    padding-left: 18px;
-    padding-right: 18px;
-}
-
-.expense-section--collapsible[open] #expense-entry-tbody {
-    padding-bottom: 18px;
-}
-
-.expense-section-filters {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 14px;
-    align-items: end;
-    padding-top: 18px;
-    padding-bottom: 14px;
-}
-
-.expense-filter-meta {
-    align-self: center;
-}
-
 .expense-template-grid {
     grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
 }
@@ -3030,17 +2981,5 @@ body.modal-open {
         bottom: max(6px, env(safe-area-inset-bottom));
         width: 50px;
         height: 50px;
-    }
-}
-
-@media (max-width: 900px) {
-    .expense-section-filters {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-}
-
-@media (max-width: 640px) {
-    .expense-section-filters {
-        grid-template-columns: 1fr;
     }
 }

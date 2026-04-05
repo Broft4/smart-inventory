@@ -17,10 +17,7 @@ const payrollState = {
         sort: 'earning_desc',
     },
     employeeView: 'salary',
-    expenseFilters: {
-        source: 'all',
-        payment: 'all',
-    },
+    settingsDraft: null,
 };
 
 function qs(id) {
@@ -91,38 +88,55 @@ function monthLabel(monthValue) {
 }
 
 
-function monthOptionsAroundToday(rangeBefore = 6, rangeAfter = 12) {
-    const base = new Date();
-    base.setDate(1);
-    const options = [];
-    for (let offset = -rangeBefore; offset <= rangeAfter; offset += 1) {
-        const date = new Date(base.getFullYear(), base.getMonth() + offset, 1);
-        const value = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-        options.push({ value, label: monthLabel(value) });
+function captureSettingsDraftFromUi() {
+    if (!isAdminRole() || !qs('admin-settings-card') || qs('admin-settings-card').classList.contains('hidden')) return null;
+    const draft = {
+        effective_from: qs('settings-effective-from')?.value || '',
+        exit_amount: qs('settings-exit')?.value ?? '',
+        bonus_threshold: qs('settings-threshold')?.value ?? '',
+        bonus_amount: qs('settings-bonus')?.value ?? '',
+        other_rate_percent: qs('settings-other-rate')?.value ?? '',
+        responsible_admin_user_id: qs('settings-admin-select')?.value || '',
+        category_rates: [...document.querySelectorAll('[data-category-rate-id]')].map((input) => ({
+            category_id: input.dataset.categoryRateId,
+            rate_percent: input.value,
+        })),
+        excluded_bonus_category_ids: [...document.querySelectorAll('[data-bonus-category-id]:checked')]
+            .map((input) => input.dataset.bonusCategoryId)
+            .filter(Boolean),
+    };
+    if (isSuperadminRole() && document.querySelector('.settings-threshold-row')) {
+        draft.manager_salary_brackets = collectManagerBracketsFromUi();
     }
-    return options;
+    return draft;
 }
 
-function populateMonthSelect(selectId, selectedValue = monthIso()) {
-    const select = qs(selectId);
-    if (!select || select.tagName !== 'SELECT') return;
-    const options = monthOptionsAroundToday(12, 12);
-    select.innerHTML = options.map(option => `<option value="${option.value}">${escapeHtml(option.label)}</option>`).join('');
-    select.value = options.some(option => option.value === selectedValue) ? selectedValue : monthIso();
+function applySettingsDraftToUi(draft) {
+    if (!draft) return;
+    if (qs('settings-effective-from')) qs('settings-effective-from').value = draft.effective_from || '';
+    if (qs('settings-exit')) qs('settings-exit').value = draft.exit_amount ?? '';
+    if (qs('settings-threshold')) qs('settings-threshold').value = draft.bonus_threshold ?? '';
+    if (qs('settings-bonus')) qs('settings-bonus').value = draft.bonus_amount ?? '';
+    if (qs('settings-other-rate')) qs('settings-other-rate').value = draft.other_rate_percent ?? '';
+    if (qs('settings-admin-select')) qs('settings-admin-select').value = draft.responsible_admin_user_id || '';
+
+    const rateMap = new Map((draft.category_rates || []).map((item) => [String(item.category_id || ''), item.rate_percent]));
+    document.querySelectorAll('[data-category-rate-id]').forEach((input) => {
+        const key = String(input.dataset.categoryRateId || '');
+        if (rateMap.has(key)) input.value = rateMap.get(key);
+    });
+    const excluded = new Set(draft.excluded_bonus_category_ids || []);
+    document.querySelectorAll('[data-bonus-category-id]').forEach((input) => {
+        input.checked = excluded.has(String(input.dataset.bonusCategoryId || ''));
+    });
 }
 
-function safeStorageGet(key) {
-    try {
-        return window.localStorage.getItem(key);
-    } catch {
-        return null;
-    }
+function rememberSettingsDraft() {
+    payrollState.settingsDraft = captureSettingsDraftFromUi();
 }
 
-function safeStorageSet(key, value) {
-    try {
-        window.localStorage.setItem(key, value);
-    } catch {}
+function resetSettingsDraft() {
+    payrollState.settingsDraft = null;
 }
 
 function setButtonLoading(button, isLoading, loadingLabel = 'Сохраняем...') {
@@ -211,7 +225,7 @@ function setDefaultDates() {
     if (qs('payroll-date-to')) qs('payroll-date-to').value = todayIso();
     if (qs('settings-effective-from')) qs('settings-effective-from').value = todayIso();
     if (qs('shift-month-input')) qs('shift-month-input').value = monthIso();
-    populateMonthSelect('expenses-month-input', safeStorageGet('payroll:expensesMonth') || monthIso());
+    if (qs('expenses-month-input')) qs('expenses-month-input').value = monthIso();
     if (qs('shift-date-input')) qs('shift-date-input').value = todayIso();
 }
 
@@ -271,11 +285,8 @@ function renderLocations() {
     const locations = normalizeLocationList(payrollState.locations.length ? payrollState.locations : fallbackLocations());
     payrollState.locations = locations;
     select.innerHTML = locations.map(location => `<option value="${location}">${location}</option>`).join('');
-    const rememberedLocation = safeStorageGet('payroll:selectedLocation');
     const defaultLocation = payrollState.user.default_location || payrollState.user.location || locations[0] || '';
-    if (rememberedLocation && locations.includes(rememberedLocation)) {
-        select.value = rememberedLocation;
-    } else if (defaultLocation && locations.includes(defaultLocation)) {
+    if (defaultLocation && locations.includes(defaultLocation)) {
         select.value = defaultLocation;
     } else if (locations[0]) {
         select.value = locations[0];
@@ -349,16 +360,13 @@ function setEmployeePayrollView(view) {
 
 function mergeCategoryCatalog(...sources) {
     const result = [];
-    const seenIds = new Set();
-    const seenNames = new Set();
+    const seen = new Set();
     sources.flat().forEach((item) => {
         if (!item) return;
         const id = String(item.category_id || item.id || '').trim();
         const name = String(item.category_name || item.name || '').trim();
-        const nameKey = normalizeSearch(name);
-        if (!id || !name || seenIds.has(id) || (nameKey && seenNames.has(nameKey))) return;
-        seenIds.add(id);
-        if (nameKey) seenNames.add(nameKey);
+        if (!id || !name || seen.has(id)) return;
+        seen.add(id);
         result.push({ id, name });
     });
     result.sort((left, right) => left.name.localeCompare(right.name, 'ru'));
@@ -707,22 +715,26 @@ window.removeManagerBracket = function removeManagerBracket(index) {
     renderManagerBrackets();
 };
 
-function renderSettings() {
+function renderSettings(options = {}) {
+    const { preserveDraft = false } = options;
     const card = qs('admin-settings-card');
     if (!isAdminRole()) {
         card.classList.add('hidden');
         return;
     }
     card.classList.remove('hidden');
+    const draft = preserveDraft ? (payrollState.settingsDraft || captureSettingsDraftFromUi()) : null;
     const settings = payrollState.settings || {};
+    if (draft?.manager_salary_brackets && isSuperadminRole()) {
+        payrollState.settings = { ...settings, manager_salary_brackets: draft.manager_salary_brackets };
+    }
     const selectedBonusCategories = new Set(settings.bonus_category_ids || []);
     qs('settings-effective-from').value = settings.effective_from || todayIso();
     qs('settings-exit').value = settings.exit_amount ?? 2000;
     qs('settings-threshold').value = settings.bonus_threshold ?? 40000;
     qs('settings-bonus').value = settings.bonus_amount ?? 500;
     qs('settings-other-rate').value = settings.other_rate_percent ?? 3;
-    const adminOptions = ['<option value="">—</option>', ...payrollState.admins.map(admin => `<option value="${admin.id}">${escapeHtml(admin.full_name)} (${roleDisplayName(admin.role || 'admin')})</option>`)].join('');
-    qs('settings-admin-select').innerHTML = adminOptions;
+    qs('settings-admin-select').innerHTML = ['<option value="">—</option>', ...payrollState.admins.map(admin => `<option value="${admin.id}">${escapeHtml(admin.full_name)} (${roleDisplayName('admin')})</option>`)].join('');
     if (settings.responsible_admin_user_id) qs('settings-admin-select').value = String(settings.responsible_admin_user_id);
     const existing = new Map((settings.category_rates || []).map(item => [item.category_id, item.rate_percent]));
     qs('settings-category-rates').innerHTML = payrollState.categoryCatalog.map(category => {
@@ -750,6 +762,7 @@ function renderSettings() {
         </label>
     `}).join('');
     renderManagerBrackets();
+    applySettingsDraftToUi(draft);
 }
 
 
@@ -845,36 +858,9 @@ function renderTemplates() {
 }
 
 
-
-function expenseMatchesFilters(entry) {
-    const sourceFilter = payrollState.expenseFilters.source || 'all';
-    const paymentFilter = payrollState.expenseFilters.payment || 'all';
-    if (sourceFilter === 'manual' && !entry.is_manual) return false;
-    if (sourceFilter === 'template' && entry.is_manual) return false;
-    if (paymentFilter === 'paid' && !entry.is_paid) return false;
-    if (paymentFilter === 'unpaid' && entry.is_paid) return false;
-    return true;
-}
-
-function renderExpenseFiltersMeta(total, shown) {
-    const meta = qs('expense-filter-meta');
-    if (meta) {
-        meta.textContent = `Показано расходов: ${shown} из ${total}`;
-    }
-}
-
-function applyExpenseFiltersFromUi() {
-    payrollState.expenseFilters.source = qs('expense-source-filter')?.value || 'all';
-    payrollState.expenseFilters.payment = qs('expense-payment-filter')?.value || 'all';
-    renderExpenses();
-}
-
 function renderExpenses() {
     const employeeOptions = ['<option value="">Без привязки</option>', ...payrollState.employees.map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}</option>`)].join('');
-    const totalEntries = payrollState.expenses || [];
-    const visibleEntries = totalEntries.filter(expenseMatchesFilters);
-    renderExpenseFiltersMeta(totalEntries.length, visibleEntries.length);
-    qs('expense-entry-tbody').innerHTML = visibleEntries.map(entry => `
+    qs('expense-entry-tbody').innerHTML = (payrollState.expenses || []).map(entry => `
         <article class="expense-entry-card ${entry.is_manual ? 'manual' : ''}">
             <div class="expense-entry-head">
                 <div>
@@ -915,7 +901,7 @@ function renderExpenses() {
             <div id="expense-status-${entry.id}" class="inventory-status hidden save-action-status"></div>
         </article>
     `).join('') || '<div class="empty-text">Нет расходов за выбранный месяц.</div>';
-    visibleEntries.forEach(entry => {
+    (payrollState.expenses || []).forEach(entry => {
         const select = document.querySelector(`[data-expense-employee="${entry.id}"]`);
         if (select && entry.assigned_employee_user_id) select.value = String(entry.assigned_employee_user_id);
     });
@@ -1029,53 +1015,32 @@ function renderAudit() {
 async function loadSetupForLocation() {
     const location = selectedLocation();
     if (!location) return;
-    safeStorageSet('payroll:selectedLocation', location);
-
-    const [setupResult, categoriesResult] = await Promise.allSettled([
-        api(`/api/payroll/settings?location=${encodeURIComponent(location)}`),
-        api(`/api/payroll/categories?location=${encodeURIComponent(location)}`),
-    ]);
-
-    if (setupResult.status !== 'fulfilled') {
-        throw setupResult.reason;
-    }
-
-    const setup = setupResult.value;
+    const setup = await api(`/api/payroll/settings?location=${encodeURIComponent(location)}`);
     payrollState.settings = setup.settings;
     payrollState.employees = setup.employees || [];
     payrollState.admins = setup.admins || [];
-    const categories = categoriesResult.status === 'fulfilled' ? (categoriesResult.value.categories || []) : [];
-    mergeCategoryCatalog(categories, payrollState.settings?.category_rates || [], payrollState.categoryCatalog || []);
+    mergeCategoryCatalog(payrollState.settings?.category_rates || []);
+    resetSettingsDraft();
     renderUsersForLocation();
     renderSettings();
 
-    const [shiftsResult, expensesResult, auditResult] = await Promise.allSettled([
+    await refreshCategoryCatalogForLocation({ showWarning: true, preserveSettingsDraft: true });
+
+    await Promise.all([
         loadShiftCalendar(),
         loadExpenseTemplatesAndEntries(),
         loadAudit(),
     ]);
-
-    if (categoriesResult.status !== 'fulfilled') {
-        showStatus('Категории для точки временно загрузились не полностью. Используются сохранённые категории из правил и истории.', 'warning');
-    }
-    if (expensesResult.status !== 'fulfilled') {
-        showStatus(expensesResult.reason?.message || 'Не удалось загрузить расходы точки.', 'warning');
-    }
-    if (auditResult.status !== 'fulfilled') {
-        showStatus(auditResult.reason?.message || 'Не удалось загрузить журнал изменений.', 'warning');
-    }
-    if (shiftsResult.status !== 'fulfilled') {
-        showStatus(shiftsResult.reason?.message || 'Не удалось загрузить календарь смен.', 'warning');
-    }
 }
 
-async function refreshCategoryCatalogForLocation({ showWarning = false } = {}) {
+async function refreshCategoryCatalogForLocation({ showWarning = false, preserveSettingsDraft = false } = {}) {
     const location = selectedLocation();
     if (!location) return;
     try {
+        if (preserveSettingsDraft) rememberSettingsDraft();
         const categories = await api(`/api/payroll/categories?location=${encodeURIComponent(location)}`);
         mergeCategoryCatalog(payrollState.categoryCatalog || [], categories.categories || []);
-        renderSettings();
+        renderSettings({ preserveDraft: preserveSettingsDraft });
     } catch (error) {
         console.error(error);
         if (showWarning) {
@@ -1131,7 +1096,6 @@ async function loadExpenseTemplatesAndEntries() {
     if (!isAdminRole()) return;
     const location = selectedLocation();
     const month = selectedMonthStart('expenses-month-input');
-    safeStorageSet('payroll:expensesMonth', month.slice(0, 7));
     const templates = await api(`/api/payroll/expense-templates?location=${encodeURIComponent(location)}`);
     payrollState.templates = templates.templates || [];
     renderTemplates();
@@ -1169,15 +1133,26 @@ window.addManagerBracket = function addManagerBracket() {
     renderManagerBrackets();
 };
 
+window.openShiftModal = function openShiftModal(dateValue) {
+    if (qs('shift-modal-date-input')) qs('shift-modal-date-input').value = dateValue || todayIso();
+    hideScopedStatus('shift-modal-status');
+    qs('shift-modal')?.classList.remove('hidden');
+};
+
+function closeShiftModal() {
+    qs('shift-modal')?.classList.add('hidden');
+    hideScopedStatus('shift-modal-status');
+}
+
 async function saveSettings() {
     const button = qs('save-settings-btn');
     const categoryRates = [...document.querySelectorAll('[data-category-rate-id]')]
         .map(input => ({
             category_id: input.dataset.categoryRateId,
             category_name: input.dataset.categoryRateName,
-            rate_percent: input.value === '' ? 0 : Number(input.value),
+            rate_percent: input.value === '' ? null : Number(input.value),
         }))
-        .filter(item => Number.isFinite(item.rate_percent));
+        .filter(item => item.rate_percent !== null && Number.isFinite(item.rate_percent));
     const excludedBonusCategoryIds = new Set(
         [...document.querySelectorAll('[data-bonus-category-id]:checked')]
             .map(input => input.dataset.bonusCategoryId)
@@ -1207,9 +1182,10 @@ async function saveSettings() {
         payrollState.employees = response.employees || payrollState.employees;
         payrollState.admins = response.admins || payrollState.admins;
         mergeCategoryCatalog(payrollState.categoryCatalog || [], payrollState.settings?.category_rates || []);
+        resetSettingsDraft();
         renderUsersForLocation();
         renderSettings();
-        await refreshCategoryCatalogForLocation();
+        await refreshCategoryCatalogForLocation({ preserveSettingsDraft: false });
         await Promise.all([
             loadShiftCalendar(),
             loadExpenseTemplatesAndEntries(),
@@ -1240,31 +1216,6 @@ async function saveSettings() {
 }
 
 window.saveSettings = saveSettings;
-
-function openShiftModal(shiftDate = todayIso()) {
-    const modal = qs('shift-modal');
-    const modalDateInput = qs('shift-modal-date-input');
-    const modalEmployeeSelect = qs('shift-modal-employee-select');
-    if (modal && modalDateInput && modalEmployeeSelect) {
-        modalDateInput.value = shiftDate;
-        if (!modalEmployeeSelect.value && modalEmployeeSelect.options.length) {
-            modalEmployeeSelect.value = modalEmployeeSelect.options[0].value;
-        }
-        modal.classList.remove('hidden');
-        return;
-    }
-    const inlineDateInput = qs('shift-date-input');
-    if (inlineDateInput) inlineDateInput.value = shiftDate;
-    inlineDateInput?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-}
-
-function closeShiftModal() {
-    const modal = qs('shift-modal');
-    if (!modal) return;
-    modal.classList.add('hidden');
-}
-
-window.openShiftModal = openShiftModal;
 
 async function saveShiftFromModal() {
     const button = qs('shift-modal-save-btn');
@@ -1515,13 +1466,16 @@ qs('payroll-location-select').addEventListener('change', async () => {
     await loadSetupForLocation();
     await loadSummary();
 });
+document.querySelectorAll('#admin-settings-card input, #admin-settings-card select, #admin-settings-card textarea').forEach((field) => {
+    field.addEventListener('input', rememberSettingsDraft, { passive: true });
+    field.addEventListener('change', rememberSettingsDraft, { passive: true });
+});
+
 qs('payroll-employee-select')?.addEventListener('change', loadSummary);
 qs('settings-add-manager-bracket-btn')?.addEventListener('click', () => window.addManagerBracket());
 qs('add-shift-btn')?.addEventListener('click', addShift);
 qs('shift-month-input')?.addEventListener('change', loadShiftCalendar);
 qs('expenses-month-input')?.addEventListener('change', loadExpenseTemplatesAndEntries);
-qs('expense-source-filter')?.addEventListener('change', applyExpenseFiltersFromUi);
-qs('expense-payment-filter')?.addEventListener('change', applyExpenseFiltersFromUi);
 qs('create-expense-template-btn')?.addEventListener('click', createExpenseTemplate);
 qs('create-manual-expense-btn')?.addEventListener('click', createManualExpense);
 qs('payroll-category-search')?.addEventListener('input', applyPayrollCategoryFiltersFromUi);

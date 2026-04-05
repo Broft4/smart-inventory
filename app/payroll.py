@@ -718,7 +718,7 @@ async def get_location_payroll_setup(location: str, db: AsyncSession, current_us
         'location_id': point.id,
         'settings': _serialize_settings_version_payload(settings, rates),
         'employees': [{'id': item.id, 'full_name': item.full_name} for item in employees],
-        'admins': [{'id': item.id, 'full_name': item.full_name, 'role': item.role} for item in admins],
+        'admins': [{'id': item.id, 'full_name': item.full_name} for item in admins],
     }
 
 
@@ -984,7 +984,7 @@ async def update_location_payroll_settings(payload: PayrollSettingsUpdateRequest
     )
     rebuild_to = rebuild_until or today
     if payload.effective_from <= rebuild_to:
-        rebuild_result = await rebuild_closed_shift_snapshots(payload.effective_from, rebuild_to, db, location=point.name)
+        rebuild_result = await rebuild_closed_shift_snapshots(payload.effective_from, rebuild_to, db, location=point.name, force_refresh_metrics=True)
 
     saved_settings = await db.get(PayrollSettingsVersion, version.id)
     saved_rates = await _get_settings_rates(version.id, db)
@@ -2100,7 +2100,7 @@ async def _ensure_shift_snapshots_for_point(point: LocationPoint, db: AsyncSessi
         await close_shift(shift.id, db, actor_user=None, auto=True)
 
 
-async def _build_computed_shift(shift: WorkShift, db: AsyncSession) -> ShiftComputedPayroll:
+async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_refresh_metrics: bool = False) -> ShiftComputedPayroll:
     point = await db.get(LocationPoint, shift.location_point_id)
     employee = await db.get(User, shift.employee_user_id)
     if not point or not employee:
@@ -2161,7 +2161,7 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession) -> ShiftComp
     bonus_category_ids = _load_bonus_category_ids(settings)
     rate_map = await _get_settings_rates(settings.id, db)
     rate_name_map = _build_category_rate_name_map(rate_map)
-    day_metrics_by_date = await _load_point_sales_metrics(point, shift.shift_date, shift.shift_date, db)
+    day_metrics_by_date = await _load_point_sales_metrics(point, shift.shift_date, shift.shift_date, db, force_refresh=force_refresh_metrics)
     day_metrics = day_metrics_by_date.get(shift.shift_date, {
         'categories': [],
         'gross_sales_amount': 0.0,
@@ -2253,7 +2253,7 @@ async def close_shift(shift_id: int, db: AsyncSession, actor_user: User | None, 
         if actor_user.role in {'admin', 'superadmin'}:
             await ensure_user_can_access_location(actor_user, point.name, db)
     if shift.status == 'closed':
-        computed = await _build_computed_shift(shift, db)
+        computed = await _build_computed_shift(shift, db, force_refresh_metrics=force_refresh_metrics)
         return {'success': True, 'message': 'Смена уже закрыта.', 'shift': _serialize_computed_shift(computed)}
 
     computed = await _build_computed_shift(shift, db)
@@ -2728,7 +2728,7 @@ async def refresh_payroll_metrics_cache(date_from: date, date_to: date, db: Asyn
     }
 
 
-async def rebuild_closed_shift_snapshots(date_from: date, date_to: date, db: AsyncSession, location: str | None = None) -> dict[str, Any]:
+async def rebuild_closed_shift_snapshots(date_from: date, date_to: date, db: AsyncSession, location: str | None = None, *, force_refresh_metrics: bool = False) -> dict[str, Any]:
     query = (
         select(WorkShift)
         .where(
