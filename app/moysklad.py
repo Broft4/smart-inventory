@@ -71,8 +71,8 @@ class MoySkladClient:
         self._inventory_cache: dict[tuple[str, str | None], CacheEntry] = {}
         self._inventory_locks: dict[tuple[str, str | None], asyncio.Lock] = {}
 
-        self._folders_cache: CacheEntry | None = None
-        self._folders_lock = asyncio.Lock()
+        self._folders_cache: dict[tuple[str, str | None], CacheEntry] = {}
+        self._folders_locks: dict[tuple[str, str | None], asyncio.Lock] = {}
 
         self._assortment_cache: dict[str, CacheEntry] = {}
         self._assortment_locks: dict[str, asyncio.Lock] = {}
@@ -663,12 +663,17 @@ class MoySkladClient:
         raise ValueError(f'Для точки {location} не найден склад в МойСклад.')
 
     async def _get_folder_map(self, token: str | None = None, location: str | None = None) -> dict[str, dict[str, Any]]:
-        if self._cache_alive(self._folders_cache):
-            return self._folders_cache.value
+        normalized_location = _normalize_location(location) if location else ''
+        cache_key = (normalized_location, _normalize_optional_ms_value(token))
+        cached = self._folders_cache.get(cache_key)
+        if self._cache_alive(cached):
+            return cached.value
 
-        async with self._folders_lock:
-            if self._cache_alive(self._folders_cache):
-                return self._folders_cache.value
+        lock = self._folders_locks.setdefault(cache_key, asyncio.Lock())
+        async with lock:
+            cached = self._folders_cache.get(cache_key)
+            if self._cache_alive(cached):
+                return cached.value
 
             rows = await self.get_all_pages('entity/productfolder', token=token, location=location)
             folder_by_id: dict[str, dict[str, Any]] = {}
@@ -678,11 +683,11 @@ class MoySkladClient:
                 if folder_id:
                     folder_by_id[folder_id] = folder
 
-            self._folders_cache = CacheEntry(
+            self._folders_cache[cache_key] = CacheEntry(
                 value=folder_by_id,
                 expires_at=monotonic() + self.folder_cache_ttl,
             )
-            logger.info('Закешировано %s папок МоегоСклада', len(folder_by_id))
+            logger.info('Закешировано %s папок МоегоСклада для точки %s', len(folder_by_id), normalized_location or 'default')
             return folder_by_id
 
     async def _get_assortment_row_by_meta(self, assortment_meta: dict[str, Any] | None, *, token: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
@@ -1290,6 +1295,8 @@ class MoySkladClient:
         if not location:
             self._inventory_cache.clear()
             self._inventory_locks.clear()
+            self._folders_cache.clear()
+            self._folders_locks.clear()
             self._financials_by_location_cache.clear()
             self._financial_result_cache.clear()
             self._financial_result_locks.clear()
@@ -1301,6 +1308,9 @@ class MoySkladClient:
         for key in [key for key in self._inventory_cache if isinstance(key, tuple) and key[0] == normalized]:
             self._inventory_cache.pop(key, None)
             self._inventory_locks.pop(key, None)
+        for key in [key for key in self._folders_cache if isinstance(key, tuple) and key[0] == normalized]:
+            self._folders_cache.pop(key, None)
+            self._folders_locks.pop(key, None)
         for key in [key for key in self._financials_by_location_cache if isinstance(key, tuple) and key[0] == normalized]:
             self._financials_by_location_cache.pop(key, None)
         for key in [key for key in self._financial_result_cache if key.startswith(normalized_prefix)]:

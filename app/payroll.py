@@ -20,6 +20,8 @@ from fastapi import HTTPException
 from app.config import settings
 from app.models import (
     AdminLocationAccess,
+    CategoryAssignment,
+    CheckResult,
     ExpenseTemplate,
     LocationPoint,
     MonthlyExpenseEntry,
@@ -27,6 +29,10 @@ from app.models import (
     PayrollCategoryRateVersion,
     PayrollDailyMetricCache,
     PayrollSettingsVersion,
+    Report,
+    ReportTargetSnapshot,
+    SelectionTarget,
+    SelectionTargetDay,
     ShiftPayrollCategorySnapshot,
     ShiftPayrollSnapshot,
     User,
@@ -393,6 +399,38 @@ def _normalize_bonus_category_ids(raw_rows: Any) -> list[str]:
 
 
 
+def _normalize_category_name_key(value: Any) -> str:
+    return ' '.join(str(value or '').strip().lower().replace('ё', 'е').split())
+
+
+
+def _build_category_rate_name_map(rate_map: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    output: dict[str, dict[str, Any]] = {}
+    for row in rate_map.values():
+        key = _normalize_category_name_key((row or {}).get('category_name'))
+        if key and key not in output:
+            output[key] = row
+    return output
+
+
+
+def _get_rate_info_for_category(
+    category_id: str | None,
+    category_name: str | None,
+    rate_map: dict[str, dict[str, Any]],
+    rate_name_map: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    normalized_id = str(category_id or '').strip()
+    if normalized_id and normalized_id in rate_map:
+        return rate_map[normalized_id]
+    name_key = _normalize_category_name_key(category_name)
+    if not name_key:
+        return None
+    lookup = rate_name_map or _build_category_rate_name_map(rate_map)
+    return lookup.get(name_key)
+
+
+
 def _manager_rate_for_profit(net_profit: float, brackets: list[dict[str, float]] | None = None) -> float:
     for row in _normalize_manager_salary_brackets(brackets):
         threshold = float(row.get('threshold') or 0)
@@ -659,7 +697,7 @@ async def _list_location_admins(point: LocationPoint, db: AsyncSession) -> list[
             select(User)
             .join(AdminLocationAccess, AdminLocationAccess.admin_user_id == User.id)
             .where(
-                User.role == 'admin',
+                User.role.in_(['admin', 'superadmin']),
                 User.is_active.is_(True),
                 AdminLocationAccess.location_point_id == point.id,
             )
@@ -680,7 +718,7 @@ async def get_location_payroll_setup(location: str, db: AsyncSession, current_us
         'location_id': point.id,
         'settings': _serialize_settings_version_payload(settings, rates),
         'employees': [{'id': item.id, 'full_name': item.full_name} for item in employees],
-        'admins': [{'id': item.id, 'full_name': item.full_name} for item in admins],
+        'admins': [{'id': item.id, 'full_name': item.full_name, 'role': item.role} for item in admins],
     }
 
 
@@ -689,17 +727,26 @@ async def get_payroll_category_catalog(location: str, db: AsyncSession, current_
     point = await _get_location_point_by_name(location, db)
     normalized = _normalize_location(location)
     categories: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    seen_ids: set[str] = set()
+    seen_names: dict[str, str] = {}
 
     def _append_category(category_id: Any, category_name: Any) -> None:
         normalized_id = str(category_id or '').strip()
         normalized_name = str(category_name or '').strip()
-        if not normalized_id or not normalized_name or normalized_name == DEFAULT_CATEGORY_NAME or normalized_id in seen:
+        if not normalized_id or not normalized_name or normalized_id == '__other__' or normalized_name == DEFAULT_CATEGORY_NAME:
             return
-        seen.add(normalized_id)
+        name_key = _normalize_category_name_key(normalized_name)
+        if normalized_id in seen_ids:
+            return
+        # Если уже есть та же категория по имени с осмысленным id, не плодим дубликаты с другим id.
+        if name_key and name_key in seen_names:
+            return
+        seen_ids.add(normalized_id)
+        if name_key:
+            seen_names[name_key] = normalized_id
         categories.append({'id': normalized_id, 'name': normalized_name})
 
-    # 1) Берём уже сохранённые категории из всех версий правил по точке.
+    # 1) Категории из всех сохраненных версий правил по точке.
     historical_rate_rows = (
         await db.execute(
             select(PayrollCategoryRateVersion.category_id, PayrollCategoryRateVersion.category_name)
@@ -711,13 +758,61 @@ async def get_payroll_category_catalog(location: str, db: AsyncSession, current_
     for category_id, category_name in historical_rate_rows:
         _append_category(category_id, category_name)
 
-    # 2) Добавляем категории из кеша метрик продаж — здесь бывают категории, которых уже нет в остатках.
+    # 1.1) Категории из истории сохранений правил, включая нулевые проценты.
+    audit_rows = (
+        await db.scalars(
+            select(PayrollAuditLog)
+            .where(
+                PayrollAuditLog.location_point_id == point.id,
+                PayrollAuditLog.entity_type == 'payroll_settings',
+            )
+            .order_by(PayrollAuditLog.id.desc())
+            .limit(200)
+        )
+    ).all()
+    for audit_row in audit_rows:
+        try:
+            details = json.loads(audit_row.details_json or '{}')
+        except (TypeError, ValueError, json.JSONDecodeError):
+            details = {}
+        for item in details.get('category_rates') or []:
+            _append_category(item.get('category_id') or item.get('id'), item.get('category_name') or item.get('name'))
+
+    # 1.2) Категории из локальной истории ревизий/снапшотов по этой точке.
+    revision_queries = [
+        select(SelectionTarget.category_id, SelectionTarget.category_name).where(SelectionTarget.location == normalized),
+        select(SelectionTargetDay.category_id, SelectionTargetDay.category_name).where(SelectionTargetDay.location == normalized),
+        select(CategoryAssignment.category_id, CategoryAssignment.category_name).where(CategoryAssignment.location == normalized),
+        select(ReportTargetSnapshot.category_id, ReportTargetSnapshot.category_name)
+        .join(Report, Report.id == ReportTargetSnapshot.report_id)
+        .where(Report.location == normalized),
+        select(CheckResult.category_id, CheckResult.category_name)
+        .join(Report, Report.id == CheckResult.report_id)
+        .where(Report.location == normalized),
+    ]
+    for query in revision_queries:
+        for category_id, category_name in (await db.execute(query.distinct())).all():
+            _append_category(category_id, category_name)
+
+    # 1.3) Категории из снимков закрытых смен — это помогает, даже если по текущей дате продаж нет.
+    snapshot_rows = (
+        await db.execute(
+            select(ShiftPayrollCategorySnapshot.category_id, ShiftPayrollCategorySnapshot.category_name)
+            .join(ShiftPayrollSnapshot, ShiftPayrollCategorySnapshot.snapshot_id == ShiftPayrollSnapshot.id)
+            .where(ShiftPayrollSnapshot.location_point_id == point.id)
+            .order_by(ShiftPayrollCategorySnapshot.category_name.asc())
+        )
+    ).all()
+    for category_id, category_name in snapshot_rows:
+        _append_category(category_id, category_name)
+
+    # 2) Категории из кеша метрик продаж — здесь бывают категории, которых уже нет в остатках.
     metric_rows = (
         await db.scalars(
             select(PayrollDailyMetricCache)
             .where(PayrollDailyMetricCache.location_point_id == point.id)
             .order_by(PayrollDailyMetricCache.metric_date.desc(), PayrollDailyMetricCache.id.desc())
-            .limit(370)
+            .limit(730)
         )
     ).all()
     for metric_row in metric_rows:
@@ -728,19 +823,18 @@ async def get_payroll_category_catalog(location: str, db: AsyncSession, current_
         for item in parsed_categories or []:
             _append_category(item.get('category_id'), item.get('category_name'))
 
-    # 3) Пытаемся подтянуть полный каталог из МоегоСклада: верхние папки + текущие категории из inventory.
+    # 3) Пытаемся подтянуть полный каталог из МоегоСклада.
     try:
         if _ms_client_enabled(token=_point_ms_token(point), location=normalized):
             token = _point_ms_token(point)
             folder_map = await ms_client._get_folder_map(token=token, location=normalized)
-            for folder in folder_map.values():
-                folder_id = str(folder.get('id') or '').strip()
-                folder_name = str(folder.get('name') or '').strip()
-                parent = folder.get('productFolder') or {}
-                parent_meta = parent.get('meta') or {}
-                parent_id = str(parent.get('id') or parent_meta.get('id') or ms_client._extract_id_from_href(parent_meta.get('href')) or '').strip()
-                if folder_id and folder_name and not parent_id:
-                    _append_category(f"cat-{normalized.lower()}-{folder_id}", folder_name)
+            # Берём верхнюю категорию для каждой папки, а не только "явные" корни.
+            for folder_id, folder in folder_map.items():
+                chain = ms_client._resolve_folder_chain(str(folder_id or '').strip(), folder_map)
+                if not chain:
+                    continue
+                top_category = chain[0]
+                _append_category(f"cat-{normalized.lower()}-{top_category['id']}", top_category['name'])
 
             inventory = await ms_client.get_inventory(normalized, **_point_ms_kwargs(point))
             for category in inventory.get('categories', []):
@@ -771,7 +865,7 @@ async def update_location_payroll_settings(payload: PayrollSettingsUpdateRequest
 
     if payload.responsible_admin_user_id:
         admin_user = await db.get(User, payload.responsible_admin_user_id)
-        if not admin_user or admin_user.role != 'admin' or not admin_user.is_active:
+        if not admin_user or admin_user.role not in {'admin', 'superadmin'} or not admin_user.is_active:
             raise HTTPException(status_code=400, detail='Ответственный управляющий не найден.')
         has_access = await db.scalar(
             select(func.count())
@@ -847,13 +941,14 @@ async def update_location_payroll_settings(payload: PayrollSettingsUpdateRequest
             rate_percent = 0.0
         normalized_rate = max(rate_percent, 0.0)
         normalized_rates.append({'category_id': category_id, 'category_name': category_name, 'rate_percent': normalized_rate})
-        if normalized_rate > 0:
-            db.add(PayrollCategoryRateVersion(
-                settings_version_id=version.id,
-                category_id=category_id,
-                category_name=category_name,
-                rate_percent=normalized_rate,
-            ))
+        # Сохраняем и нулевые проценты тоже: это позволяет не терять полный список категорий
+        # после перезагрузки страницы и стабильно хранить флаги бонуса к выходу.
+        db.add(PayrollCategoryRateVersion(
+            settings_version_id=version.id,
+            category_id=category_id,
+            category_name=category_name,
+            rate_percent=normalized_rate,
+        ))
 
     await _log_payroll_action(
         db,
@@ -878,14 +973,24 @@ async def update_location_payroll_settings(payload: PayrollSettingsUpdateRequest
 
     rebuild_result: dict[str, Any] | None = None
     today = get_moscow_today()
-    if payload.effective_from <= today:
-        rebuild_result = await rebuild_closed_shift_snapshots(payload.effective_from, today, db, location=point.name)
+    rebuild_until = await db.scalar(
+        select(func.max(WorkShift.shift_date))
+        .where(
+            WorkShift.location_point_id == point.id,
+            WorkShift.is_deleted.is_(False),
+            WorkShift.status == 'closed',
+            WorkShift.shift_date >= payload.effective_from,
+        )
+    )
+    rebuild_to = rebuild_until or today
+    if payload.effective_from <= rebuild_to:
+        rebuild_result = await rebuild_closed_shift_snapshots(payload.effective_from, rebuild_to, db, location=point.name)
 
     saved_settings = await db.get(PayrollSettingsVersion, version.id)
     saved_rates = await _get_settings_rates(version.id, db)
     setup = await get_location_payroll_setup(point.name, db, current_user)
     setup['settings'] = _serialize_settings_version_payload(saved_settings or version, saved_rates)
-    rebuild_date_to = today if payload.effective_from <= today else payload.effective_from
+    rebuild_date_to = rebuild_to if payload.effective_from <= rebuild_to else payload.effective_from
     setup['rebuild_closed_shifts'] = rebuild_result or {
         'date_from': payload.effective_from.isoformat(),
         'date_to': rebuild_date_to.isoformat(),
@@ -2055,6 +2160,7 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession) -> ShiftComp
     settings = await _get_settings_for_date(point, shift.shift_date, db)
     bonus_category_ids = _load_bonus_category_ids(settings)
     rate_map = await _get_settings_rates(settings.id, db)
+    rate_name_map = _build_category_rate_name_map(rate_map)
     day_metrics_by_date = await _load_point_sales_metrics(point, shift.shift_date, shift.shift_date, db)
     day_metrics = day_metrics_by_date.get(shift.shift_date, {
         'categories': [],
@@ -2076,7 +2182,7 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession) -> ShiftComp
         return_amount = round(float(row['return_amount']) * share_ratio, 2)
         net_sales_amount = round(float(row['net_sales_amount']) * share_ratio, 2)
         category_id = row['category_id']
-        rate_info = rate_map.get(category_id)
+        rate_info = _get_rate_info_for_category(category_id, row.get('category_name'), rate_map, rate_name_map)
         rate_percent, is_other_category = _resolve_category_rate_percent(rate_info, settings.other_rate_percent)
         earning_amount = round(max(net_sales_amount, 0) * (rate_percent / 100.0), 2)
         category_earnings_total += earning_amount
@@ -2505,13 +2611,22 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
 
     current_settings = await _get_settings_for_date(point, date_to, db)
     manager_salary_brackets = _load_manager_salary_brackets(current_settings)
-    rate_map = await _get_settings_rates(current_settings.id, db)
+    settings_cache: dict[int, tuple[PayrollSettingsVersion, dict[str, dict[str, Any]], dict[str, dict[str, Any]]]] = {}
     category_totals: dict[str, dict[str, Any]] = {}
-    for metrics in day_metrics.values():
+    for metric_day, metrics in day_metrics.items():
+        day_settings = await _get_settings_for_date(point, metric_day, db)
+        cache_item = settings_cache.get(day_settings.id)
+        if cache_item is None:
+            day_rate_map = await _get_settings_rates(day_settings.id, db)
+            day_rate_name_map = _build_category_rate_name_map(day_rate_map)
+            cache_item = (day_settings, day_rate_map, day_rate_name_map)
+            settings_cache[day_settings.id] = cache_item
+        _, day_rate_map, day_rate_name_map = cache_item
         for row in metrics.get('categories') or []:
             category_id = str(row.get('category_id') or '__other__')
             category_name = str(row.get('category_name') or DEFAULT_CATEGORY_NAME)
-            rate_percent, is_other_category = _resolve_category_rate_percent(rate_map.get(category_id), current_settings.other_rate_percent)
+            rate_info = _get_rate_info_for_category(category_id, category_name, day_rate_map, day_rate_name_map)
+            rate_percent, is_other_category = _resolve_category_rate_percent(rate_info, day_settings.other_rate_percent)
             net_amount = float(row.get('net_sales_amount') or 0)
             earning_amount = round(max(net_amount, 0.0) * (rate_percent / 100.0), 2)
             bucket = category_totals.setdefault(category_id, {
@@ -2528,6 +2643,7 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
             bucket['return_amount'] += float(row.get('return_amount') or 0)
             bucket['net_sales_amount'] += net_amount
             bucket['earning_amount'] += earning_amount
+            # Для периода с несколькими версиями правил показываем последнюю ставку, действовавшую в этом периоде.
             bucket['rate_percent'] = rate_percent
             bucket['is_other_category'] = is_other_category
 

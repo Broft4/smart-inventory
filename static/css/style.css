@@ -1809,6 +1809,12 @@ body.modal-open {
     margin-bottom: 6px;
 }
 
+.shift-calendar-entry-head-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
 .shift-calendar-entry-head strong {
     font-size: 13px;
     line-height: 1.25;
@@ -1853,6 +1859,34 @@ body.modal-open {
 
 .shift-calendar-add-btn:hover {
     background: #1d4ed8;
+}
+
+.shift-calendar-mobile-actions {
+    display: none;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.shift-calendar-mobile-remove-btn {
+    display: none;
+    width: 24px;
+    height: 24px;
+    min-width: 24px;
+    border: none;
+    border-radius: 999px;
+    background: #dc3545;
+    color: #fff;
+    font-size: 18px;
+    line-height: 1;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+}
+
+.shift-calendar-mobile-remove-btn--inline {
+    width: 26px;
+    height: 26px;
+    min-width: 26px;
 }
 
 .shift-modal-card {
@@ -1943,6 +1977,55 @@ body.modal-open {
 .expense-entry-grid {
     display: grid;
     gap: 14px;
+}
+
+.field-hint {
+    display: block;
+    margin-top: 6px;
+    line-height: 1.35;
+}
+
+.expense-section--collapsible {
+    padding: 0;
+    overflow: hidden;
+}
+
+.expense-section-summary {
+    padding: 18px;
+    margin-bottom: 0;
+    cursor: pointer;
+    list-style: none;
+}
+
+.expense-section-summary::-webkit-details-marker {
+    display: none;
+}
+
+.expense-section--collapsible[open] .expense-section-summary {
+    border-bottom: 1px solid #e7edf4;
+}
+
+.expense-section--collapsible[open] #expense-entry-tbody,
+.expense-section--collapsible[open] .expense-section-filters {
+    padding-left: 18px;
+    padding-right: 18px;
+}
+
+.expense-section--collapsible[open] #expense-entry-tbody {
+    padding-bottom: 18px;
+}
+
+.expense-section-filters {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px;
+    align-items: end;
+    padding-top: 18px;
+    padding-bottom: 14px;
+}
+
+.expense-filter-meta {
+    align-self: center;
 }
 
 .expense-template-grid {
@@ -2326,6 +2409,10 @@ body.modal-open {
     border-top: 1px dashed #d7e0ef;
 }
 
+.employee-shift-open-btn {
+    white-space: nowrap;
+}
+
 @media (max-width: 768px) {
     .employee-shift-calendar-grid .shift-calendar-cell {
         min-height: 150px;
@@ -2337,6 +2424,10 @@ body.modal-open {
 
     .employee-shift-line strong {
         font-size: 16px;
+    }
+
+    .shift-calendar-scroller .shift-calendar-mobile-remove-btn--inline {
+        display: inline-flex;
     }
 }
 
@@ -2389,6 +2480,16 @@ body.modal-open {
     .shift-calendar-scroller .shift-calendar-empty,
     .shift-calendar-scroller .employee-shift-line {
         font-size: 11px;
+    }
+
+    .shift-calendar-scroller .employee-shift-open-btn {
+        font-size: 11px;
+        min-height: 30px;
+        padding: 7px 8px;
+    }
+
+    .shift-calendar-scroller .shift-calendar-mobile-remove-btn--inline {
+        display: inline-flex;
     }
 }
 
@@ -2818,11 +2919,28 @@ body.modal-open {
         display: flex;
     }
 
+    .shift-calendar-scroller .shift-calendar-mobile-actions {
+        display: flex;
+    }
+
     .shift-calendar-scroller .shift-calendar-mini-chip,
     .shift-calendar-scroller .shift-calendar-mini-more {
         min-width: 18px;
         height: 18px;
         font-size: 9px;
+    }
+
+    .shift-calendar-scroller .shift-calendar-mobile-remove-btn {
+        display: inline-flex;
+        width: 18px;
+        height: 18px;
+        min-width: 18px;
+        font-size: 13px;
+        box-shadow: none;
+    }
+
+    .shift-calendar-scroller .shift-calendar-mobile-remove-btn--inline {
+        display: none;
     }
 
     .shift-calendar-scroller .employee-shift-calendar-cell {
@@ -2842,6 +2960,26 @@ body.modal-open {
     .shift-calendar-scroller .employee-shift-line {
         display: none;
     }
+
+    .shift-calendar-scroller .employee-shift-open-btn {
+        font-size: 10px;
+        min-height: 24px;
+        padding: 5px 6px;
+    }
+}
+
+.payroll-collapse--nested {
+    border: 1px solid #e7edf4;
+    border-radius: 16px;
+    background: #fbfcff;
+}
+
+.payroll-collapse--nested .payroll-collapse-summary {
+    padding: 16px 18px;
+}
+
+.payroll-collapse--nested .payroll-collapse-body {
+    padding-top: 0;
 }
 
 
@@ -2892,5 +3030,17 @@ body.modal-open {
         bottom: max(6px, env(safe-area-inset-bottom));
         width: 50px;
         height: 50px;
+    }
+}
+
+@media (max-width: 900px) {
+    .expense-section-filters {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 640px) {
+    .expense-section-filters {
+        grid-template-columns: 1fr;
     }
 }

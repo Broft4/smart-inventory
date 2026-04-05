@@ -27,6 +27,10 @@ function qs(id) {
     return document.getElementById(id);
 }
 
+function isAdminRole() {
+    return ['admin', 'superadmin'].includes(shiftsState.user.role);
+}
+
 function formatMoney(value) {
     const num = Number(value || 0);
     return `${num.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`;
@@ -389,43 +393,105 @@ function renderShiftCalendar() {
     }
 
     const today = todayIso();
+    const adminMode = isAdminRole();
+
     days.forEach(day => {
         const dayNumber = Number(String(day.date).slice(8, 10));
         const shiftCount = (day.shifts || []).length;
-        const miniChips = shiftCount
-            ? `<div class="shift-calendar-mini-list">${day.shifts.slice(0, 4).map(shift => `
-                <span class="shift-calendar-mini-chip ${shift.is_closed ? 'closed' : 'open'}" title="${escapeHtml(shift.employee_name)}">${escapeHtml(initialsFromName(shift.employee_name))}</span>
-            `).join('')}${shiftCount > 4 ? `<span class="shift-calendar-mini-more">+${shiftCount - 4}</span>` : ''}</div>`
-            : '<div class="shift-calendar-empty-day">Смен нет</div>';
-        const shiftCards = shiftCount
-            ? `${miniChips}${day.shifts.map(shift => `
-                <div class="shift-calendar-entry ${shift.is_closed ? 'closed' : 'open'}">
-                    <div class="shift-calendar-entry-head">
-                        <strong>${escapeHtml(shift.employee_name)}</strong>
-                        <span class="payroll-chip ${shift.is_closed ? 'green' : 'orange'}">${shift.is_closed ? 'Закрыта' : 'Открыта'}</span>
+
+        if (adminMode) {
+            const mobileRemoveButtons = shiftCount
+                ? `<div class="shift-calendar-mobile-actions">${day.shifts.map(shift => `
+                    <button
+                        type="button"
+                        class="shift-calendar-mobile-remove-btn"
+                        onclick="deleteShift(${shift.id})"
+                        aria-label="Убрать смену ${escapeHtml(shift.employee_name)}"
+                        title="Убрать смену ${escapeHtml(shift.employee_name)}"
+                    >−</button>
+                `).join('')}</div>`
+                : '';
+            const miniChips = shiftCount
+                ? `<div class="shift-calendar-mini-list">${day.shifts.slice(0, 4).map(shift => `
+                    <span class="shift-calendar-mini-chip ${shift.is_closed ? 'closed' : 'open'}" title="${escapeHtml(shift.employee_name)}">${escapeHtml(initialsFromName(shift.employee_name))}</span>
+                `).join('')}${shiftCount > 4 ? `<span class="shift-calendar-mini-more">+${shiftCount - 4}</span>` : ''}</div>`
+                : '<div class="shift-calendar-empty-day">Смен нет</div>';
+            const shiftCards = shiftCount
+                ? `${miniChips}${day.shifts.map(shift => `
+                    <div class="shift-calendar-entry ${shift.is_closed ? 'closed' : 'open'}">
+                        <div class="shift-calendar-entry-head">
+                            <strong>${escapeHtml(shift.employee_name)}</strong>
+                            <div class="shift-calendar-entry-head-actions">
+                                <span class="payroll-chip ${shift.is_closed ? 'green' : 'orange'}">${shift.is_closed ? 'Закрыта' : 'Открыта'}</span>
+                                <button
+                                    type="button"
+                                    class="shift-calendar-mobile-remove-btn shift-calendar-mobile-remove-btn--inline"
+                                    onclick="deleteShift(${shift.id})"
+                                    aria-label="Убрать смену ${escapeHtml(shift.employee_name)}"
+                                    title="Убрать смену ${escapeHtml(shift.employee_name)}"
+                                >−</button>
+                            </div>
+                        </div>
+                        <div class="shift-calendar-entry-meta">${formatMoney(shift.gross_salary_amount)}</div>
+                        <div class="shift-calendar-entry-actions">
+                            ${!shift.is_closed ? `<button type="button" class="btn secondary btn-inline" onclick="closeAdminShift(${shift.id})">Закрыть</button>` : ''}
+                            <button type="button" class="btn danger btn-inline" onclick="deleteShift(${shift.id})">Убрать</button>
+                        </div>
                     </div>
-                    <div class="shift-calendar-entry-meta">${formatMoney(shift.gross_salary_amount)}</div>
-                    <div class="shift-calendar-entry-actions">
-                        ${!shift.is_closed ? `<button type="button" class="btn secondary btn-inline" onclick="closeAdminShift(${shift.id})">Закрыть</button>` : ''}
-                        <button type="button" class="btn danger btn-inline" onclick="deleteShift(${shift.id})">Убрать</button>
+                `).join('')}`
+                : '<div class="shift-calendar-empty-day">Смен нет</div>';
+
+            cells.push(`
+                <article class="shift-calendar-cell ${day.date === today ? 'shift-calendar-cell--today' : ''}">
+                    <div class="shift-calendar-cell-head">
+                        <div class="shift-calendar-day-meta">
+                            <strong>${dayNumber}</strong>
+                            <span>${formatDateRu(day.date)}</span>
+                        </div>
+                        <div class="shift-calendar-head-actions">
+                            <span class="shift-calendar-count">${shiftCount}</span>
+                            <button type="button" class="shift-calendar-add-btn" onclick="openShiftModal('${day.date}')" aria-label="Назначить смену на ${formatDateRu(day.date)}">+</button>
+                        </div>
                     </div>
-                </div>
-            `).join('')}`
-            : '<div class="shift-calendar-empty-day">Смен нет</div>';
+                    <div class="shift-calendar-cell-body">${shiftCards}${mobileRemoveButtons}</div>
+                </article>
+            `);
+            return;
+        }
+
+        const shift = shiftCount ? day.shifts[0] : null;
+        const selectable = isShiftDaySelectable(day);
+        let body = '<div class="shift-calendar-empty-day">Смены нет</div>';
+        if (shift) {
+            const statusLabel = shift.is_closed ? 'Завершена' : (day.date > today ? 'Назначена' : (day.date === today ? 'Сегодня' : 'Открыта'));
+            const statusClass = shift.is_closed ? 'closed' : (day.date > today ? 'planned' : 'open');
+            const lines = [
+                `<div class="employee-shift-line"><span>Выход</span><strong>${formatMoney(shift.exit_amount || 0)}</strong></div>`,
+                `<div class="employee-shift-line"><span>Бонус</span><strong>${formatMoney(shift.bonus_amount || 0)}</strong></div>`,
+                `<div class="employee-shift-line"><span>Категории</span><strong>${formatMoney(shift.category_earnings_total || 0)}</strong></div>`,
+            ];
+            if (shift.is_closed || day.date <= today) {
+                lines.push(`<div class="employee-shift-line total"><span>${shift.is_closed ? 'Итог' : 'Промежуточно'}</span><strong>${formatMoney(shift.gross_salary_amount || 0)}</strong></div>`);
+            }
+            body = `
+                <div class="employee-shift-status ${statusClass}">${statusLabel}</div>
+                <div class="employee-shift-lines">${lines.join('')}</div>
+                ${selectable ? `<button type="button" class="btn secondary btn-inline employee-shift-open-btn" onclick="openShiftDay('${day.date}')">Открыть детали</button>` : ''}
+            `;
+        }
 
         cells.push(`
-            <article class="shift-calendar-cell ${day.date === today ? 'shift-calendar-cell--today' : ''}">
+            <article class="shift-calendar-cell employee-shift-calendar-cell ${day.date === today ? 'shift-calendar-cell--today' : ''}">
                 <div class="shift-calendar-cell-head">
                     <div class="shift-calendar-day-meta">
                         <strong>${dayNumber}</strong>
                         <span>${formatDateRu(day.date)}</span>
                     </div>
                     <div class="shift-calendar-head-actions">
-                        <span class="shift-calendar-count">${shiftCount}</span>
-                        <button type="button" class="shift-calendar-add-btn" onclick="openShiftModal('${day.date}')" aria-label="Назначить смену на ${formatDateRu(day.date)}">+</button>
+                        <span class="shift-calendar-count">${shiftCount ? '1' : '0'}</span>
                     </div>
                 </div>
-                <div class="shift-calendar-cell-body">${shiftCards}</div>
+                <div class="shift-calendar-cell-body">${body}</div>
             </article>
         `);
     });

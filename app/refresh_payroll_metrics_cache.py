@@ -90,6 +90,7 @@ async def _run() -> None:
                 date_to,
                 db,
                 location=args.location,
+                force_refresh_metrics=bool(args.force_refresh),
             )
 
     print(json.dumps(payload, ensure_ascii=False, indent=2))

@@ -17,6 +17,10 @@ const payrollState = {
         sort: 'earning_desc',
     },
     employeeView: 'salary',
+    expenseFilters: {
+        source: 'all',
+        payment: 'all',
+    },
 };
 
 function qs(id) {
@@ -84,6 +88,41 @@ function monthLabel(monthValue) {
     const [year, month] = String(monthValue || monthIso()).split('-').map(Number);
     if (!year || !month) return '';
     return new Intl.DateTimeFormat('ru-RU', { month: 'long', year: 'numeric' }).format(new Date(year, month - 1, 1));
+}
+
+
+function monthOptionsAroundToday(rangeBefore = 6, rangeAfter = 12) {
+    const base = new Date();
+    base.setDate(1);
+    const options = [];
+    for (let offset = -rangeBefore; offset <= rangeAfter; offset += 1) {
+        const date = new Date(base.getFullYear(), base.getMonth() + offset, 1);
+        const value = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+        options.push({ value, label: monthLabel(value) });
+    }
+    return options;
+}
+
+function populateMonthSelect(selectId, selectedValue = monthIso()) {
+    const select = qs(selectId);
+    if (!select || select.tagName !== 'SELECT') return;
+    const options = monthOptionsAroundToday(12, 12);
+    select.innerHTML = options.map(option => `<option value="${option.value}">${escapeHtml(option.label)}</option>`).join('');
+    select.value = options.some(option => option.value === selectedValue) ? selectedValue : monthIso();
+}
+
+function safeStorageGet(key) {
+    try {
+        return window.localStorage.getItem(key);
+    } catch {
+        return null;
+    }
+}
+
+function safeStorageSet(key, value) {
+    try {
+        window.localStorage.setItem(key, value);
+    } catch {}
 }
 
 function setButtonLoading(button, isLoading, loadingLabel = 'Сохраняем...') {
@@ -172,7 +211,7 @@ function setDefaultDates() {
     if (qs('payroll-date-to')) qs('payroll-date-to').value = todayIso();
     if (qs('settings-effective-from')) qs('settings-effective-from').value = todayIso();
     if (qs('shift-month-input')) qs('shift-month-input').value = monthIso();
-    if (qs('expenses-month-input')) qs('expenses-month-input').value = monthIso();
+    populateMonthSelect('expenses-month-input', safeStorageGet('payroll:expensesMonth') || monthIso());
     if (qs('shift-date-input')) qs('shift-date-input').value = todayIso();
 }
 
@@ -232,8 +271,11 @@ function renderLocations() {
     const locations = normalizeLocationList(payrollState.locations.length ? payrollState.locations : fallbackLocations());
     payrollState.locations = locations;
     select.innerHTML = locations.map(location => `<option value="${location}">${location}</option>`).join('');
+    const rememberedLocation = safeStorageGet('payroll:selectedLocation');
     const defaultLocation = payrollState.user.default_location || payrollState.user.location || locations[0] || '';
-    if (defaultLocation && locations.includes(defaultLocation)) {
+    if (rememberedLocation && locations.includes(rememberedLocation)) {
+        select.value = rememberedLocation;
+    } else if (defaultLocation && locations.includes(defaultLocation)) {
         select.value = defaultLocation;
     } else if (locations[0]) {
         select.value = locations[0];
@@ -270,12 +312,19 @@ function syncEmployeePayrollTabs() {
     const calendarCard = qs('employee-calendar-card');
     const detailCard = qs('employee-shift-details-card');
     const adminShiftCard = qs('payroll-period-shifts-card');
-    if (!switcher || isAdminRole()) {
+    if (isAdminRole()) {
         switcher?.classList.add('hidden');
         salaryCard?.classList.remove('hidden');
         calendarCard?.classList.add('hidden');
         detailCard?.classList.add('hidden');
         adminShiftCard?.classList.remove('hidden');
+        return;
+    }
+    if (!switcher) {
+        salaryCard?.classList.remove('hidden');
+        calendarCard?.classList.add('hidden');
+        detailCard?.classList.add('hidden');
+        adminShiftCard?.classList.add('hidden');
         return;
     }
 
@@ -300,13 +349,16 @@ function setEmployeePayrollView(view) {
 
 function mergeCategoryCatalog(...sources) {
     const result = [];
-    const seen = new Set();
+    const seenIds = new Set();
+    const seenNames = new Set();
     sources.flat().forEach((item) => {
         if (!item) return;
         const id = String(item.category_id || item.id || '').trim();
         const name = String(item.category_name || item.name || '').trim();
-        if (!id || !name || seen.has(id)) return;
-        seen.add(id);
+        const nameKey = normalizeSearch(name);
+        if (!id || !name || seenIds.has(id) || (nameKey && seenNames.has(nameKey))) return;
+        seenIds.add(id);
+        if (nameKey) seenNames.add(nameKey);
         result.push({ id, name });
     });
     result.sort((left, right) => left.name.localeCompare(right.name, 'ru'));
@@ -363,10 +415,9 @@ function renderShiftDetailsInto(containerId, summary, { audience = 'admin' } = {
         container.innerHTML = '<div class="muted-text">За выбранный период смен не найдено.</div>';
         return;
     }
-    container.innerHTML = days.map((day, index) => {
-        const isOpen = days.length === 1 || index === 0;
+    container.innerHTML = days.map((day) => {
         return `
-            <details class="payroll-day-card payroll-day-card--accordion" ${isOpen ? 'open' : ''}>
+            <details class="payroll-day-card payroll-day-card--accordion">
                 <summary class="payroll-day-toggle">
                     <div>
                         <strong>${escapeHtml(day.shift_date || '')}</strong>
@@ -420,7 +471,7 @@ function renderSummary(summary) {
         } else if (isAdminRole()) {
             daysContainer.innerHTML = `<div class="muted-text">Найдено смен: <strong>${shiftCount}</strong>. Ниже есть отдельный блок с подробной детализацией по каждой смене за выбранный период.</div>`;
         } else {
-            daysContainer.innerHTML = `<div class="muted-text">Найдено смен: <strong>${shiftCount}</strong>. Во вкладке <strong>«Зарплата»</strong> остаётся общий итог за период, а во вкладке <strong>«Смены»</strong> показаны календарь и подробности по каждой смене.</div>`;
+            daysContainer.innerHTML = `<div class="muted-text">Найдено смен: <strong>${shiftCount}</strong>. Здесь показан общий итог по зарплате за период. Календарь и подробности по каждой смене доступны на отдельной странице <strong>«Смены»</strong>.</div>`;
         }
     }
 
@@ -670,7 +721,8 @@ function renderSettings() {
     qs('settings-threshold').value = settings.bonus_threshold ?? 40000;
     qs('settings-bonus').value = settings.bonus_amount ?? 500;
     qs('settings-other-rate').value = settings.other_rate_percent ?? 3;
-    qs('settings-admin-select').innerHTML = ['<option value="">—</option>', ...payrollState.admins.map(admin => `<option value="${admin.id}">${escapeHtml(admin.full_name)} (${roleDisplayName('admin')})</option>`)].join('');
+    const adminOptions = ['<option value="">—</option>', ...payrollState.admins.map(admin => `<option value="${admin.id}">${escapeHtml(admin.full_name)} (${roleDisplayName(admin.role || 'admin')})</option>`)].join('');
+    qs('settings-admin-select').innerHTML = adminOptions;
     if (settings.responsible_admin_user_id) qs('settings-admin-select').value = String(settings.responsible_admin_user_id);
     const existing = new Map((settings.category_rates || []).map(item => [item.category_id, item.rate_percent]));
     qs('settings-category-rates').innerHTML = payrollState.categoryCatalog.map(category => {
@@ -793,9 +845,36 @@ function renderTemplates() {
 }
 
 
+
+function expenseMatchesFilters(entry) {
+    const sourceFilter = payrollState.expenseFilters.source || 'all';
+    const paymentFilter = payrollState.expenseFilters.payment || 'all';
+    if (sourceFilter === 'manual' && !entry.is_manual) return false;
+    if (sourceFilter === 'template' && entry.is_manual) return false;
+    if (paymentFilter === 'paid' && !entry.is_paid) return false;
+    if (paymentFilter === 'unpaid' && entry.is_paid) return false;
+    return true;
+}
+
+function renderExpenseFiltersMeta(total, shown) {
+    const meta = qs('expense-filter-meta');
+    if (meta) {
+        meta.textContent = `Показано расходов: ${shown} из ${total}`;
+    }
+}
+
+function applyExpenseFiltersFromUi() {
+    payrollState.expenseFilters.source = qs('expense-source-filter')?.value || 'all';
+    payrollState.expenseFilters.payment = qs('expense-payment-filter')?.value || 'all';
+    renderExpenses();
+}
+
 function renderExpenses() {
     const employeeOptions = ['<option value="">Без привязки</option>', ...payrollState.employees.map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}</option>`)].join('');
-    qs('expense-entry-tbody').innerHTML = (payrollState.expenses || []).map(entry => `
+    const totalEntries = payrollState.expenses || [];
+    const visibleEntries = totalEntries.filter(expenseMatchesFilters);
+    renderExpenseFiltersMeta(totalEntries.length, visibleEntries.length);
+    qs('expense-entry-tbody').innerHTML = visibleEntries.map(entry => `
         <article class="expense-entry-card ${entry.is_manual ? 'manual' : ''}">
             <div class="expense-entry-head">
                 <div>
@@ -836,7 +915,7 @@ function renderExpenses() {
             <div id="expense-status-${entry.id}" class="inventory-status hidden save-action-status"></div>
         </article>
     `).join('') || '<div class="empty-text">Нет расходов за выбранный месяц.</div>';
-    (payrollState.expenses || []).forEach(entry => {
+    visibleEntries.forEach(entry => {
         const select = document.querySelector(`[data-expense-employee="${entry.id}"]`);
         if (select && entry.assigned_employee_user_id) select.value = String(entry.assigned_employee_user_id);
     });
@@ -950,28 +1029,59 @@ function renderAudit() {
 async function loadSetupForLocation() {
     const location = selectedLocation();
     if (!location) return;
-    const setup = await api(`/api/payroll/settings?location=${encodeURIComponent(location)}`);
+    safeStorageSet('payroll:selectedLocation', location);
+
+    const [setupResult, categoriesResult] = await Promise.allSettled([
+        api(`/api/payroll/settings?location=${encodeURIComponent(location)}`),
+        api(`/api/payroll/categories?location=${encodeURIComponent(location)}`),
+    ]);
+
+    if (setupResult.status !== 'fulfilled') {
+        throw setupResult.reason;
+    }
+
+    const setup = setupResult.value;
     payrollState.settings = setup.settings;
     payrollState.employees = setup.employees || [];
     payrollState.admins = setup.admins || [];
-    mergeCategoryCatalog(payrollState.settings?.category_rates || []);
+    const categories = categoriesResult.status === 'fulfilled' ? (categoriesResult.value.categories || []) : [];
+    mergeCategoryCatalog(categories, payrollState.settings?.category_rates || [], payrollState.categoryCatalog || []);
     renderUsersForLocation();
     renderSettings();
 
+    const [shiftsResult, expensesResult, auditResult] = await Promise.allSettled([
+        loadShiftCalendar(),
+        loadExpenseTemplatesAndEntries(),
+        loadAudit(),
+    ]);
+
+    if (categoriesResult.status !== 'fulfilled') {
+        showStatus('Категории для точки временно загрузились не полностью. Используются сохранённые категории из правил и истории.', 'warning');
+    }
+    if (expensesResult.status !== 'fulfilled') {
+        showStatus(expensesResult.reason?.message || 'Не удалось загрузить расходы точки.', 'warning');
+    }
+    if (auditResult.status !== 'fulfilled') {
+        showStatus(auditResult.reason?.message || 'Не удалось загрузить журнал изменений.', 'warning');
+    }
+    if (shiftsResult.status !== 'fulfilled') {
+        showStatus(shiftsResult.reason?.message || 'Не удалось загрузить календарь смен.', 'warning');
+    }
+}
+
+async function refreshCategoryCatalogForLocation({ showWarning = false } = {}) {
+    const location = selectedLocation();
+    if (!location) return;
     try {
         const categories = await api(`/api/payroll/categories?location=${encodeURIComponent(location)}`);
         mergeCategoryCatalog(payrollState.categoryCatalog || [], categories.categories || []);
         renderSettings();
     } catch (error) {
         console.error(error);
-        showStatus('Категории из МойСклад временно не загрузились. Используются сохранённые категории из правил.', 'warning');
+        if (showWarning) {
+            showStatus('Категории для точки временно не загрузились полностью. Используются сохранённые категории из правил и истории точки.', 'warning');
+        }
     }
-
-    await Promise.all([
-        loadShiftCalendar(),
-        loadExpenseTemplatesAndEntries(),
-        loadAudit(),
-    ]);
 }
 
 async function loadSummary() {
@@ -1021,6 +1131,7 @@ async function loadExpenseTemplatesAndEntries() {
     if (!isAdminRole()) return;
     const location = selectedLocation();
     const month = selectedMonthStart('expenses-month-input');
+    safeStorageSet('payroll:expensesMonth', month.slice(0, 7));
     const templates = await api(`/api/payroll/expense-templates?location=${encodeURIComponent(location)}`);
     payrollState.templates = templates.templates || [];
     renderTemplates();
@@ -1064,9 +1175,9 @@ async function saveSettings() {
         .map(input => ({
             category_id: input.dataset.categoryRateId,
             category_name: input.dataset.categoryRateName,
-            rate_percent: input.value === '' ? null : Number(input.value),
+            rate_percent: input.value === '' ? 0 : Number(input.value),
         }))
-        .filter(item => item.rate_percent !== null && Number.isFinite(item.rate_percent));
+        .filter(item => Number.isFinite(item.rate_percent));
     const excludedBonusCategoryIds = new Set(
         [...document.querySelectorAll('[data-bonus-category-id]:checked')]
             .map(input => input.dataset.bonusCategoryId)
@@ -1095,17 +1206,28 @@ async function saveSettings() {
         payrollState.settings = response.settings || payrollState.settings;
         payrollState.employees = response.employees || payrollState.employees;
         payrollState.admins = response.admins || payrollState.admins;
+        mergeCategoryCatalog(payrollState.categoryCatalog || [], payrollState.settings?.category_rates || []);
         renderUsersForLocation();
         renderSettings();
-        await loadSetupForLocation();
+        await refreshCategoryCatalogForLocation();
         await Promise.all([
+            loadShiftCalendar(),
+            loadExpenseTemplatesAndEntries(),
             loadSummary(),
             loadAudit(),
         ]);
+        const rebuildProcessed = Number(response?.rebuild_closed_shifts?.processed || 0);
         const rebuiltCount = Number(response?.rebuild_closed_shifts?.updated || 0);
-        const successMessage = rebuiltCount > 0
-            ? `Версия правил сохранена. Пересчитано закрытых смен: ${rebuiltCount}.`
-            : 'Версия правил сохранена.';
+        const rebuildFrom = response?.rebuild_closed_shifts?.date_from ? formatDateRu(response.rebuild_closed_shifts.date_from) : '';
+        const rebuildTo = response?.rebuild_closed_shifts?.date_to ? formatDateRu(response.rebuild_closed_shifts.date_to) : '';
+        let successMessage = 'Версия правил сохранена.';
+        if (rebuiltCount > 0) {
+            successMessage = rebuildFrom && rebuildTo
+                ? `Версия правил сохранена. Закрытые смены пересчитаны за период ${rebuildFrom} — ${rebuildTo}: ${rebuiltCount}.`
+                : `Версия правил сохранена. Пересчитано закрытых смен: ${rebuiltCount}.`;
+        } else if (rebuildProcessed === 0 && payload.effective_from) {
+            successMessage = `Версия правил сохранена. Новые правила применяются с ${formatDateRu(payload.effective_from)}.`;
+        }
         showStatus(successMessage, 'success');
         showScopedStatus('settings-status', successMessage, 'success');
     } catch (error) {
@@ -1118,6 +1240,30 @@ async function saveSettings() {
 }
 
 window.saveSettings = saveSettings;
+
+function openShiftModal(shiftDate = todayIso()) {
+    const modal = qs('shift-modal');
+    const modalDateInput = qs('shift-modal-date-input');
+    const modalEmployeeSelect = qs('shift-modal-employee-select');
+    if (modal && modalDateInput && modalEmployeeSelect) {
+        modalDateInput.value = shiftDate;
+        if (!modalEmployeeSelect.value && modalEmployeeSelect.options.length) {
+            modalEmployeeSelect.value = modalEmployeeSelect.options[0].value;
+        }
+        modal.classList.remove('hidden');
+        return;
+    }
+    const inlineDateInput = qs('shift-date-input');
+    if (inlineDateInput) inlineDateInput.value = shiftDate;
+    inlineDateInput?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function closeShiftModal() {
+    const modal = qs('shift-modal');
+    if (!modal) return;
+    modal.classList.add('hidden');
+}
+
 window.openShiftModal = openShiftModal;
 
 async function saveShiftFromModal() {
@@ -1374,6 +1520,8 @@ qs('settings-add-manager-bracket-btn')?.addEventListener('click', () => window.a
 qs('add-shift-btn')?.addEventListener('click', addShift);
 qs('shift-month-input')?.addEventListener('change', loadShiftCalendar);
 qs('expenses-month-input')?.addEventListener('change', loadExpenseTemplatesAndEntries);
+qs('expense-source-filter')?.addEventListener('change', applyExpenseFiltersFromUi);
+qs('expense-payment-filter')?.addEventListener('change', applyExpenseFiltersFromUi);
 qs('create-expense-template-btn')?.addEventListener('click', createExpenseTemplate);
 qs('create-manual-expense-btn')?.addEventListener('click', createManualExpense);
 qs('payroll-category-search')?.addEventListener('input', applyPayrollCategoryFiltersFromUi);

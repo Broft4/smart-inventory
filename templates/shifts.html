@@ -14,8 +14,8 @@
             <p class="muted-text">{{ user.full_name }}{% if default_location %} · базовая точка {{ default_location }}{% endif %}</p>
         </div>
         <div class="header-actions">
-            <a href="/admin" class="btn secondary btn-inline">Назад</a>
-            <a href="/payroll" class="btn secondary btn-inline">Бухгалтерия</a>
+            <a href="{{ '/admin' if user.role in ['admin', 'superadmin'] else '/' }}" class="btn secondary btn-inline">Назад</a>
+            <a href="/payroll" class="btn secondary btn-inline">{{ 'Бухгалтерия' if user.role in ['admin', 'superadmin'] else 'Зарплата' }}</a>
             <a href="/logout" id="logout-btn" class="btn secondary btn-inline">Выйти</a>
         </div>
     </header>
@@ -53,7 +53,7 @@
             <summary class="report-summary-header payroll-collapse-summary">
                 <div>
                     <h2>Календарь смен</h2>
-                    <p class="muted-text">Смены по точке за выбранный месяц. Здесь же можно быстро назначить, закрыть или убрать смену.</p>
+                    <p class="muted-text">{% if user.role in ['admin', 'superadmin'] %}Смены по точке за выбранный месяц. Здесь же можно быстро назначить, закрыть или убрать смену.{% else %}Ваш календарь смен за выбранный месяц. Здесь видно, когда смена назначена, открыта или уже закрыта.{% endif %}</p>
                 </div>
                 <span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span>
             </summary>
@@ -85,9 +85,11 @@
                     </div>
                     <div class="muted-text" id="shift-filter-caption">Показаны все даты за выбранный месяц.</div>
                 </div>
+                {% if user.role in ['admin', 'superadmin'] %}
                 <div class="shift-add-action-row">
                     <button type="button" id="shift-floating-add-btn" class="shift-floating-add-btn" aria-label="Назначить смену">+</button>
                 </div>
+                {% endif %}
             </div>
         </details>
     </section>
@@ -98,7 +100,7 @@
             <summary class="report-summary-header payroll-collapse-summary">
                 <div>
                     <h2>Смены</h2>
-                    <p class="muted-text">Здесь только детализация по сменам: суммы, бонус к выходу и общий бонус по категориям.</p>
+                    <p class="muted-text">{% if user.role in ['admin', 'superadmin'] %}Здесь только детализация по сменам: суммы, бонус к выходу и общий бонус по категориям.{% else %}Подробности по вашим сменам: что пришло из выхода, бонуса к выходу и начислений по категориям.{% endif %}</p>
                 </div>
                 <span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span>
             </summary>
@@ -108,7 +110,7 @@
         </details>
     </section>
 
-
+    {% if user.role in ['admin', 'superadmin'] %}
     <div id="shift-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="shift-modal-title">
         <div class="modal-card shift-modal-card">
             <div class="modal-header">
@@ -132,6 +134,7 @@
             <div id="shift-modal-status" class="inventory-status hidden save-action-status"></div>
         </div>
     </div>
+    {% endif %}
 
     <script>
         window.currentUser = {

@@ -182,7 +182,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260405-payroll-manager-ui-v6'
+templates.env.globals['asset_version'] = '20260405-employee-payroll-shifts-v8'
 
 
 @app.middleware('http')
@@ -275,8 +275,6 @@ async def inventory_page(request: Request, user: User | None = Depends(get_curre
 async def admin_page(request: Request, user: User | None = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     if not user:
         return RedirectResponse(url='/login', status_code=302)
-    if user.role not in {'admin', 'superadmin'}:
-        return RedirectResponse(url='/', status_code=302)
     accessible_locations = await get_user_accessible_locations(user, db)
     if accessible_locations:
         _spawn_prewarm(accessible_locations[0])
@@ -290,6 +288,8 @@ async def admin_page(request: Request, user: User | None = Depends(get_current_u
 async def payroll_page(request: Request, user: User | None = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     if not user:
         return RedirectResponse(url='/login', status_code=302)
+    if user.role == 'employee' and request.query_params.get('view') == 'shifts':
+        return RedirectResponse(url='/shifts', status_code=302)
     accessible_locations = await get_payroll_accessible_locations(user, db)
     location = accessible_locations[0] if accessible_locations else (user.location if user.location else None)
     return templates.TemplateResponse(
@@ -310,8 +310,6 @@ async def payroll_page(request: Request, user: User | None = Depends(get_current
 async def shifts_page(request: Request, user: User | None = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     if not user:
         return RedirectResponse(url='/login', status_code=302)
-    if user.role not in {'admin', 'superadmin'}:
-        return RedirectResponse(url='/', status_code=302)
     accessible_locations = await get_payroll_accessible_locations(user, db)
     location = accessible_locations[0] if accessible_locations else (user.location if user.location else None)
     return templates.TemplateResponse(
