@@ -63,7 +63,6 @@ PAYROLL_DAILY_CACHE_RECENT_TTL_SECONDS = 900
 _sales_metrics_cache: dict[tuple[int, str, str], tuple[float, dict[date, dict[str, Any]]]] = {}
 _category_lookup_cache: dict[str, tuple[float, dict[str, dict[str, str]]]] = {}
 _payroll_recalc_tasks: dict[int, asyncio.Task[Any]] = {}
-_payroll_recalc_runtime: dict[int, dict[str, Any]] = {}
 
 
 def _ms_client_enabled(token: str | None = None, location: str | None = None) -> bool:
@@ -95,33 +94,6 @@ def bootstrap_payroll_schema(connection) -> None:
             "ALTER TABLE payroll_settings_versions "
             f"ADD COLUMN manager_salary_brackets_json TEXT NOT NULL DEFAULT '{default_json}'"
         )
-connection.exec_driver_sql(
-    """
-    CREATE TABLE IF NOT EXISTS payroll_recalc_jobs (
-        id INTEGER PRIMARY KEY,
-        location_point_id INTEGER NOT NULL,
-        settings_version_id INTEGER NULL,
-        requested_by_user_id INTEGER NULL,
-        date_from DATE NOT NULL,
-        date_to DATE NOT NULL,
-        status VARCHAR(20) NOT NULL DEFAULT 'queued',
-        progress_current INTEGER NOT NULL DEFAULT 0,
-        progress_total INTEGER NOT NULL DEFAULT 0,
-        message VARCHAR(255) NULL,
-        error_text TEXT NULL,
-        result_json TEXT NOT NULL DEFAULT '{}',
-        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        started_at DATETIME NULL,
-        finished_at DATETIME NULL,
-        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY(location_point_id) REFERENCES location_points (id) ON DELETE CASCADE,
-        FOREIGN KEY(settings_version_id) REFERENCES payroll_settings_versions (id) ON DELETE SET NULL,
-        FOREIGN KEY(requested_by_user_id) REFERENCES users (id) ON DELETE SET NULL
-    )
-    """
-)
-connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_payroll_recalc_jobs_location_point_id ON payroll_recalc_jobs (location_point_id)")
-connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_payroll_recalc_jobs_status ON payroll_recalc_jobs (status)")
 
 
 class PayrollSettingsUpdateRequest(BaseModel):
@@ -240,7 +212,7 @@ def get_moscow_today() -> date:
 
 
 
-def _serialize_recalc_job(job: PayrollRecalcJob, point: LocationPoint | None = None, runtime: dict[str, Any] | None = None) -> dict[str, Any]:
+def _serialize_recalc_job(job: PayrollRecalcJob, point: LocationPoint | None = None) -> dict[str, Any]:
     result: dict[str, Any]
     try:
         result = json.loads(job.result_json or '{}')
@@ -248,22 +220,17 @@ def _serialize_recalc_job(job: PayrollRecalcJob, point: LocationPoint | None = N
             result = {}
     except Exception:
         result = {}
-    current = int(runtime.get('progress_current', job.progress_current or 0)) if runtime else int(job.progress_current or 0)
-    total = int(runtime.get('progress_total', job.progress_total or 0)) if runtime else int(job.progress_total or 0)
-    status = str(runtime.get('status', job.status)) if runtime else job.status
-    message = runtime.get('message', job.message) if runtime else job.message
-    error_text = runtime.get('error_text', job.error_text) if runtime else job.error_text
     return {
         'job_id': job.id,
         'location': point.name if point else None,
         'settings_version_id': job.settings_version_id,
         'date_from': job.date_from.isoformat(),
         'date_to': job.date_to.isoformat(),
-        'status': status,
-        'progress_current': current,
-        'progress_total': total,
-        'message': message,
-        'error_text': error_text,
+        'status': job.status,
+        'progress_current': int(job.progress_current or 0),
+        'progress_total': int(job.progress_total or 0),
+        'message': job.message,
+        'error_text': job.error_text,
         'result': result,
         'created_at': _datetime_to_str(job.created_at),
         'started_at': _datetime_to_str(job.started_at),
@@ -271,22 +238,7 @@ def _serialize_recalc_job(job: PayrollRecalcJob, point: LocationPoint | None = N
     }
 
 
-def _set_recalc_runtime(job_id: int, **fields: Any) -> None:
-    runtime = _payroll_recalc_runtime.get(job_id, {}).copy()
-    runtime.update({key: value for key, value in fields.items() if value is not None})
-    _payroll_recalc_runtime[job_id] = runtime
-
-
-async def _persist_recalc_job_state(
-    job_id: int,
-    *,
-    status: str | None = None,
-    current: int | None = None,
-    total: int | None = None,
-    message: str | None = None,
-    error_text: str | None = None,
-    result: dict[str, Any] | None = None,
-) -> None:
+async def _update_recalc_job_progress(job_id: int, *, status: str | None = None, current: int | None = None, total: int | None = None, message: str | None = None, error_text: str | None = None, result: dict[str, Any] | None = None) -> None:
     async with AsyncSessionLocal() as db:
         job = await db.get(PayrollRecalcJob, job_id)
         if job is None:
@@ -313,21 +265,19 @@ async def _persist_recalc_job_state(
 
 
 async def _run_payroll_recalc_job(job_id: int) -> None:
-    _set_recalc_runtime(job_id, status='running', progress_current=0, progress_total=0, message='Запущен пересчёт закрытых смен...')
     try:
-        await _persist_recalc_job_state(job_id, status='running', current=0, total=0, message='Запущен пересчёт закрытых смен...')
+        await _update_recalc_job_progress(job_id, status='running', current=0, message='Запущен пересчёт закрытых смен...')
         async with AsyncSessionLocal() as db:
             job = await db.get(PayrollRecalcJob, job_id)
             if job is None:
                 return
             point = await db.get(LocationPoint, job.location_point_id)
             if point is None:
-                _set_recalc_runtime(job_id, status='failed', message='Точка для пересчёта не найдена.', error_text='Точка для пересчёта не найдена.')
-                await _persist_recalc_job_state(job_id, status='failed', message='Точка для пересчёта не найдена.', error_text='Точка для пересчёта не найдена.')
+                await _update_recalc_job_progress(job_id, status='failed', error_text='Точка для пересчёта не найдена.')
                 return
 
-            def progress(current: int, total: int) -> None:
-                _set_recalc_runtime(job_id, status='running', progress_current=current, progress_total=total, message=f'Пересчитываем смены: {current} из {total}.')
+            async def progress(current: int, total: int) -> None:
+                await _update_recalc_job_progress(job_id, current=current, total=total, message=f'Пересчитываем смены: {current} из {total}.')
 
             result = await rebuild_closed_shift_snapshots(
                 job.date_from,
@@ -337,27 +287,19 @@ async def _run_payroll_recalc_job(job_id: int) -> None:
                 force_refresh_metrics=True,
                 progress_callback=progress,
             )
-            processed = int(result.get('processed') or 0)
-            _set_recalc_runtime(job_id, status='done', progress_current=processed, progress_total=processed, message='Пересчёт завершён.')
-            job.status = 'done'
-            job.progress_current = processed
-            job.progress_total = processed
-            job.message = 'Пересчёт завершён.'
-            job.error_text = None
-            job.result_json = json.dumps(result, ensure_ascii=False)
-            job.finished_at = datetime.utcnow()
-            job.updated_at = datetime.utcnow()
-            await db.commit()
+            await _update_recalc_job_progress(
+                job_id,
+                status='done',
+                current=int(result.get('processed') or 0),
+                total=int(result.get('processed') or 0),
+                message='Пересчёт завершён.',
+                result=result,
+            )
     except Exception as exc:
         logger.exception('Фоновый пересчёт зарплаты завершился ошибкой. job_id=%s', job_id)
-        _set_recalc_runtime(job_id, status='failed', message='Ошибка пересчёта.', error_text=str(exc))
-        try:
-            await _persist_recalc_job_state(job_id, status='failed', message='Ошибка пересчёта.', error_text=str(exc))
-        except Exception:
-            logger.exception('Не удалось сохранить статус ошибки фонового пересчёта. job_id=%s', job_id)
+        await _update_recalc_job_progress(job_id, status='failed', message='Ошибка пересчёта.', error_text=str(exc))
     finally:
         _payroll_recalc_tasks.pop(job_id, None)
-        _payroll_recalc_runtime.pop(job_id, None)
 
 
 async def _enqueue_payroll_recalc_job(point: LocationPoint, settings_version_id: int | None, date_from: date, date_to: date, requested_by_user_id: int | None) -> PayrollRecalcJob:
@@ -425,8 +367,7 @@ async def get_payroll_recalc_status(location: str, db: AsyncSession, current_use
     job = await db.scalar(query)
     if job is None:
         return {'location': point.name, 'job': None}
-    runtime = _payroll_recalc_runtime.get(job.id)
-    return {'location': point.name, 'job': _serialize_recalc_job(job, point, runtime)}
+    return {'location': point.name, 'job': _serialize_recalc_job(job, point)}
 
 def _normalize_location(location: str) -> str:
     return location.strip().title()
@@ -935,16 +876,6 @@ async def get_location_payroll_setup(location: str, db: AsyncSession, current_us
     employees = await _list_location_employees(point, db)
     admins = await _list_location_admins(point, db)
     category_catalog = await get_payroll_category_catalog(point.name, db, current_user)
-    active_job = await db.scalar(
-        select(PayrollRecalcJob)
-        .where(
-            PayrollRecalcJob.location_point_id == point.id,
-            PayrollRecalcJob.status.in_(['queued', 'running']),
-        )
-        .order_by(PayrollRecalcJob.id.desc())
-        .limit(1)
-    )
-    runtime = _payroll_recalc_runtime.get(active_job.id) if active_job is not None else None
     return {
         'location': point.name,
         'location_id': point.id,
@@ -952,7 +883,6 @@ async def get_location_payroll_setup(location: str, db: AsyncSession, current_us
         'category_catalog': category_catalog.get('categories', []),
         'employees': [{'id': item.id, 'full_name': item.full_name} for item in employees],
         'admins': [{'id': item.id, 'full_name': item.full_name, 'role': item.role} for item in admins],
-        'recalc_job': _serialize_recalc_job(active_job, point, runtime) if active_job is not None else None,
     }
 
 
@@ -2089,9 +2019,7 @@ async def _load_point_sales_metrics_live(point: LocationPoint, date_from: date, 
 
         sales_delta = round(gross_sales_amount - category_sales_sum, 2)
         return_delta = round(return_amount - category_return_sum, 2)
-        positive_sales_delta = sales_delta if sales_delta > 0 else 0.0
-        positive_return_delta = return_delta if return_delta > 0 else 0.0
-        if abs(positive_sales_delta) > 0.009 or abs(positive_return_delta) > 0.009:
+        if abs(sales_delta) > 0.009 or abs(return_delta) > 0.009:
             other_bucket = next((item for item in categories if item['category_id'] == '__other__'), None)
             if other_bucket is None:
                 other_bucket = {
@@ -2103,14 +2031,14 @@ async def _load_point_sales_metrics_live(point: LocationPoint, date_from: date, 
                     'cost_amount': 0.0,
                 }
                 categories.append(other_bucket)
-            other_bucket['sales_amount'] = round(float(other_bucket.get('sales_amount') or 0.0) + positive_sales_delta, 2)
-            other_bucket['return_amount'] = round(float(other_bucket.get('return_amount') or 0.0) + positive_return_delta, 2)
-            other_bucket['net_sales_amount'] = round(max(float(other_bucket.get('sales_amount') or 0.0) - float(other_bucket.get('return_amount') or 0.0), 0.0), 2)
+            other_bucket['sales_amount'] = round(float(other_bucket.get('sales_amount') or 0.0) + sales_delta, 2)
+            other_bucket['return_amount'] = round(float(other_bucket.get('return_amount') or 0.0) + return_delta, 2)
+            other_bucket['net_sales_amount'] = round(float(other_bucket.get('sales_amount') or 0.0) - float(other_bucket.get('return_amount') or 0.0), 2)
             if not _is_tobacco_category(DEFAULT_CATEGORY_NAME):
-                non_tobacco_net += round(max(positive_sales_delta - positive_return_delta, 0.0), 2)
+                non_tobacco_net += round(sales_delta - return_delta, 2)
 
         if not categories and (gross_sales_amount > 0 or return_amount > 0 or abs(cost_amount) > 0.009):
-            synthetic_net = round(max(gross_sales_amount - return_amount, 0.0), 2)
+            synthetic_net = round(gross_sales_amount - return_amount, 2)
             if not _is_tobacco_category(DEFAULT_CATEGORY_NAME):
                 non_tobacco_net += synthetic_net
             categories.append({

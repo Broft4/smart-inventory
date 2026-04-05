@@ -1176,6 +1176,12 @@ async function saveSettings() {
         mergeCategoryCatalog(response.category_catalog || [], payrollState.settings?.category_rates || [], payrollState.categoryCatalog || []);
         renderUsersForLocation();
         renderSettings();
+        await Promise.all([
+            loadSummary(),
+            loadExpenseTemplatesAndEntries(),
+            loadAudit(),
+            loadShiftCalendar(),
+        ]);
         const recalcJobId = response?.recalc_job?.job_id;
         if (recalcJobId) {
             payrollState.activeRecalcJob = response.recalc_job;
@@ -1184,12 +1190,6 @@ async function saveSettings() {
             showScopedStatus('settings-status', queuedMessage, 'loading');
             pollRecalcStatus(recalcJobId).catch((error) => console.error(error));
         } else {
-            await Promise.all([
-                loadSummary(),
-                loadExpenseTemplatesAndEntries(),
-                loadAudit(),
-                loadShiftCalendar(),
-            ]);
             const successMessage = payload.effective_from
                 ? `Версия правил сохранена. Новые правила применяются с ${formatDateRu(payload.effective_from)}.`
                 : 'Версия правил сохранена.';

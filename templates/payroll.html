@@ -206,15 +206,15 @@
 
     <section class="category-card{% if user.role not in ['admin', 'superadmin'] %} hidden{% endif %}" id="expenses-card">
         <details class="payroll-collapse">
-            <summary class="report-summary-header payroll-collapse-summary"><div><h2>Расходы</h2><p class="muted-text">Шаблоны расходов на месяц и фактические суммы по точке. Месяц нужен, чтобы открыть конкретный журнал начислений и оплат за выбранный месяц.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span></summary>
+            <summary class="report-summary-header payroll-collapse-summary"><div><h2>Расходы</h2><p class="muted-text">Шаблоны расходов на месяц и фактические суммы по точке.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span></summary>
             <div class="payroll-collapse-body">
                 <div class="expense-layout">
                     <div id="expenses-status" class="inventory-status hidden"></div>
                     <div class="expense-create-card">
                         <div class="payroll-filter-grid expense-create-grid">
-                            <label>Месяц<select id="expenses-month-input"></select></label>
+                            <label>Месяц<input type="month" id="expenses-month-input"></label>
                             <label>Новый шаблон<input type="text" id="expense-template-name" placeholder="Например, аренда"></label>
-                            <label>Тип<select id="expense-template-type"><option value="dynamic">Динамический — сумма может меняться каждый месяц</option><option value="static">Статический — фиксированная сумма каждый месяц</option></select></label>
+                            <label>Тип<select id="expense-template-type"><option value="dynamic">Динамический</option><option value="static">Статический</option></select></label>
                             <label>Сумма по умолчанию<input type="number" id="expense-template-default" min="0" step="0.01"></label>
                             <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline"><input type="checkbox" id="expense-template-employee"> По умолчанию относить к сотруднику</label>
                         </div>
