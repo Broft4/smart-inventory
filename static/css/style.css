@@ -1488,6 +1488,26 @@ body.modal-open {
     gap: 14px;
 }
 
+.payroll-view-switcher-card {
+    padding-top: 14px;
+    padding-bottom: 14px;
+}
+
+.payroll-view-switch {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.payroll-view-btn {
+    min-width: 140px;
+    justify-content: center;
+}
+
+.save-action-status {
+    margin-top: 10px;
+}
+
 .payroll-day-card,
 .audit-log-card,
 .expense-template-card,
@@ -1498,19 +1518,104 @@ body.modal-open {
     background: #fff;
 }
 
+.payroll-day-card--accordion {
+    padding: 0;
+    overflow: hidden;
+}
+
+.payroll-day-card--accordion[open] {
+    border-color: rgba(37, 99, 235, 0.22);
+    box-shadow: 0 12px 28px rgba(37, 99, 235, 0.08);
+}
+
+.payroll-day-toggle,
 .payroll-day-header,
 .audit-log-head {
     display: flex;
     justify-content: space-between;
     align-items: center;
     gap: 12px;
+}
+
+.payroll-day-header {
     margin-bottom: 12px;
+}
+
+.payroll-day-toggle {
+    list-style: none;
+    cursor: pointer;
+    padding: 16px;
+}
+
+.payroll-day-toggle::-webkit-details-marker {
+    display: none;
+}
+
+.payroll-day-toggle-side,
+.payroll-day-header-side {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.payroll-day-total-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 7px 12px;
+    border-radius: 999px;
+    background: #eef4ff;
+    color: #1f4aa8;
+    font-size: 15px;
+    font-weight: 800;
+    white-space: nowrap;
+}
+
+.payroll-day-accordion-body {
+    padding: 0 16px 16px;
+    border-top: 1px solid #e7edf4;
+}
+
+.payroll-shift-section-head {
+    margin: 16px 0 12px;
+}
+
+.payroll-shift-section-head h3 {
+    margin: 0 0 4px;
+    font-size: 18px;
+}
+
+.payroll-shift-categories-wrap {
+    margin-top: 10px;
 }
 
 .payroll-day-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
     gap: 12px;
+}
+
+.payroll-day-grid--emphasis > div {
+    padding: 14px;
+    border-radius: 14px;
+    background: #f8fbff;
+    border: 1px solid #e1ebfb;
+}
+
+.payroll-day-grid--emphasis .summary-label {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 13px;
+    font-weight: 700;
+    color: #60708c;
+}
+
+.payroll-day-grid--emphasis strong {
+    font-size: 20px;
+    font-weight: 800;
+    color: #19345d;
 }
 
 .payroll-chip {
@@ -2191,25 +2296,33 @@ body.modal-open {
     gap: 8px;
 }
 
+.employee-shift-lines--highlight {
+    margin-top: 14px;
+}
+
 .employee-shift-line {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    font-size: 13px;
+    font-size: 15px;
+    font-weight: 600;
 }
 
 .employee-shift-line span {
-    color: #6b7a96;
+    color: #54657f;
+    font-weight: 700;
 }
 
 .employee-shift-line strong {
     color: #1d2d44;
     white-space: nowrap;
+    font-size: 17px;
+    font-weight: 800;
 }
 
 .employee-shift-line.total {
-    padding-top: 8px;
+    padding-top: 10px;
     border-top: 1px dashed #d7e0ef;
 }
 
@@ -2219,7 +2332,11 @@ body.modal-open {
     }
 
     .employee-shift-line {
-        font-size: 12px;
+        font-size: 14px;
+    }
+
+    .employee-shift-line strong {
+        font-size: 16px;
     }
 }
 
@@ -2505,6 +2622,16 @@ body.modal-open {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
+    .payroll-view-switch {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .payroll-view-btn {
+        min-width: 0;
+        width: 100%;
+    }
+
     .payroll-page .category-card,
     .payroll-page .auth-card {
         padding: 16px;
@@ -2577,6 +2704,36 @@ body.modal-open {
         color: #6b7a96;
         font-weight: 700;
         flex: 0 0 auto;
+    }
+
+    .payroll-day-toggle,
+    .payroll-day-header {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .payroll-day-toggle-side,
+    .payroll-day-header-side {
+        width: 100%;
+        justify-content: space-between;
+    }
+
+    .payroll-day-grid--emphasis {
+        grid-template-columns: 1fr 1fr;
+    }
+
+    .payroll-day-grid--emphasis strong {
+        font-size: 17px;
+    }
+
+    .employee-shift-line {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 4px;
+    }
+
+    .employee-shift-line strong {
+        font-size: 16px;
     }
 
     .shift-detail-actions {
@@ -2688,10 +2845,17 @@ body.modal-open {
 }
 
 
+
+.shift-add-action-row {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 16px;
+}
+
 .shift-floating-add-btn {
     position: fixed;
     right: 18px;
-    bottom: 18px;
+    bottom: 24px;
     width: 56px;
     height: 56px;
     border: none;
@@ -2716,10 +2880,17 @@ body.modal-open {
         grid-template-columns: 1fr;
     }
 
-    .shift-floating-add-btn {
-        right: 14px;
-        bottom: 14px;
-        width: 52px;
-        height: 52px;
+    
+.shift-add-action-row {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 16px;
+}
+
+.shift-floating-add-btn {
+        right: 10px;
+        bottom: max(6px, env(safe-area-inset-bottom));
+        width: 50px;
+        height: 50px;
     }
 }

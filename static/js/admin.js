@@ -286,6 +286,13 @@ function isSuperadmin() {
     return Boolean(window.currentAdmin?.is_superadmin || window.currentAdmin?.role === 'superadmin');
 }
 
+function roleDisplayName(role) {
+    if (role === 'superadmin') return 'Главный управляющий';
+    if (role === 'admin') return 'Управляющий';
+    if (role === 'employee') return 'Сотрудник';
+    return role || '—';
+}
+
 function setMultiSelectValues(select, values) {
     if (!select) return;
     const wanted = new Set((values || []).map(value => String(value)));
@@ -1100,7 +1107,7 @@ function renderUsers(users) {
             <div class="user-row">
                 <div>
                     <strong>${escapeHtml(user.full_name)}</strong>
-                    <div class="muted-text">${escapeHtml(user.username)} · ${escapeHtml(user.role)} · ${locationInfo}</div>
+                    <div class="muted-text">${escapeHtml(user.username)} · ${escapeHtml(roleDisplayName(user.role))} · ${locationInfo}</div>
                     <div class="muted-text">Дата рождения: ${escapeHtml(user.birth_date)} · ${user.is_active ? 'активен' : 'выключен'}</div>
                 </div>
                 <div class="user-row-actions">
@@ -2883,7 +2890,7 @@ async function submitDiscrepancyEditForm(event) {
 
     if (!password.trim()) {
         if (message) {
-            message.textContent = 'Введите пароль текущего администратора.';
+            message.textContent = 'Введите пароль текущего управляющего.';
             message.className = 'message';
         }
         passwordInput?.focus();

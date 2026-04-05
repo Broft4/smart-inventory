@@ -15,7 +15,10 @@
         </div>
         <div class="header-actions">
             <a href="{{ '/admin' if user.role in ['admin', 'superadmin'] else '/' }}" class="btn secondary btn-inline">Назад</a>
-            <button id="logout-btn" class="btn secondary btn-inline" type="button">Выйти</button>
+            {% if user.role in ['admin', 'superadmin'] %}
+            <a href="/shifts" class="btn secondary btn-inline">Смены</a>
+            {% endif %}
+            <a href="/logout" id="logout-btn" class="btn secondary btn-inline">Выйти</a>
         </div>
     </header>
 
@@ -23,7 +26,14 @@
         <div class="payroll-filter-grid payroll-filter-grid--with-actions">
             <label>
                 Точка
-                <select id="payroll-location-select"></select>
+                <select id="payroll-location-select">
+                    {% for location_name in accessible_locations %}
+                        <option value="{{ location_name }}"{% if location_name == default_location %} selected{% endif %}>{{ location_name }}</option>
+                    {% endfor %}
+                    {% if default_location and default_location not in accessible_locations %}
+                        <option value="{{ default_location }}" selected>{{ default_location }}</option>
+                    {% endif %}
+                </select>
             </label>
             <label id="payroll-employee-label" class="hidden">
                 Сотрудник
@@ -31,25 +41,33 @@
             </label>
             <label>
                 Дата с
-                <input type="date" id="payroll-date-from">
+                <input type="date" id="payroll-date-from" value="{{ today_iso }}">
             </label>
             <label>
                 Дата по
-                <input type="date" id="payroll-date-to">
+                <input type="date" id="payroll-date-to" value="{{ today_iso }}">
             </label>
             <div class="payroll-filter-actions-inline">
-                <button id="payroll-load-btn" type="button" class="btn primary btn-inline">Показать</button>
-                <button id="payroll-export-btn" type="button" class="btn secondary btn-inline">Скачать Excel</button>
+                <button id="payroll-load-btn" type="button" class="btn primary btn-inline" onclick="window.payrollLoadSummary && window.payrollLoadSummary(); return false;">Показать</button>
             </div>
         </div>
         <div id="payroll-status" class="inventory-status hidden"></div>
     </section>
 
+    {% if user.role == 'employee' %}
+    <section class="category-card payroll-view-switcher-card" id="employee-payroll-switcher">
+        <div class="employee-view-switch payroll-view-switch" role="tablist" aria-label="Разделы бухгалтерии">
+            <button type="button" class="employee-view-btn payroll-view-btn active" data-payroll-view="salary" aria-pressed="true">Зарплата</button>
+            <button type="button" class="employee-view-btn payroll-view-btn" data-payroll-view="shifts" aria-pressed="false">Смены</button>
+        </div>
+    </section>
+    {% endif %}
+
     <section class="category-card hidden" id="manager-summary-card">
         <details class="payroll-collapse">
             <summary class="report-summary-header payroll-collapse-summary">
                 <div>
-                    <h2>Зарплата администратора и прибыль точки</h2>
+                    <h2>Зарплата управляющего и прибыль точки</h2>
                     <p class="muted-text">Расчёт по точке за выбранный период.</p>
                 </div>
                 <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
@@ -61,21 +79,21 @@
                     <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Себестоимость</span><strong id="manager-cost">0 ₽</strong></div>
                     <div class="summary-kpi-card warning"><span class="summary-kpi-label">Зарплаты сотрудников</span><strong id="manager-employee-salary">0 ₽</strong></div>
                     <div class="summary-kpi-card warning"><span class="summary-kpi-label">Расходы точки</span><strong id="manager-expenses">0 ₽</strong></div>
-                    <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Прибыль до зарплаты админа</span><strong id="manager-profit">0 ₽</strong></div>
-                    <div class="summary-kpi-card plus"><span class="summary-kpi-label">Зарплата админа</span><strong id="manager-salary">0 ₽</strong></div>
-                    <div class="summary-kpi-card plus"><span class="summary-kpi-label">Прибыль после зарплаты админа</span><strong id="manager-profit-after-manager">0 ₽</strong></div>
+                    <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Прибыль до зарплаты управляющего</span><strong id="manager-profit">0 ₽</strong></div>
+                    <div class="summary-kpi-card plus"><span class="summary-kpi-label">Зарплата управляющего</span><strong id="manager-salary">0 ₽</strong></div>
+                    <div class="summary-kpi-card plus"><span class="summary-kpi-label">Прибыль после зарплаты управляющего</span><strong id="manager-profit-after-manager">0 ₽</strong></div>
                 </div>
                 <div class="muted-text" id="manager-responsible-line"></div>
             </div>
         </details>
     </section>
 
-    <section class="category-card payroll-summary-card">
+    <section class="category-card payroll-summary-card" id="payroll-summary-card">
         <details class="payroll-collapse">
             <summary class="report-summary-header payroll-collapse-summary">
                 <div>
                     <h2>Итог за период</h2>
-                    <p class="muted-text">Без дублей: итог по сменам сверху, сводка по категориям за период ниже.</p>
+                    <p class="muted-text">Здесь общий итог за период и сводка по категориям. Подробные смены выводятся ниже отдельным блоком.</p>
                 </div>
                 <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
             </summary>
@@ -89,21 +107,21 @@
                     <div class="summary-kpi-card plus"><span class="summary-kpi-label">К выплате</span><strong id="kpi-payout">0 ₽</strong></div>
                 </div>
 
-                <div id="payroll-days-container" class="payroll-days-container"></div>
+                <div id="payroll-days-container" class="payroll-days-container payroll-days-container--note-only"></div>
 
                 <div class="payroll-category-filters">
                     <label>Поиск
-                        <input type="text" id="payroll-category-search" placeholder="Категория..." autocomplete="off">
+                        <input type="text" id="payroll-category-search" placeholder="Категория..." autocomplete="off" oninput="window.applyPayrollCategoryFiltersFromUi && window.applyPayrollCategoryFiltersFromUi()">
                     </label>
                     <label>Показывать
-                        <select id="payroll-category-view">
+                        <select id="payroll-category-view" onchange="window.applyPayrollCategoryFiltersFromUi && window.applyPayrollCategoryFiltersFromUi()">
                             <option value="all">Все категории</option>
                             <option value="earned">Только с начислением</option>
                             <option value="sales">Только с продажами</option>
                         </select>
                     </label>
                     <label>Сортировка
-                        <select id="payroll-category-sort">
+                        <select id="payroll-category-sort" onchange="window.applyPayrollCategoryFiltersFromUi && window.applyPayrollCategoryFiltersFromUi()">
                             <option value="earning_desc">Сначала больше начислено</option>
                             <option value="sales_desc">Сначала больше продаж</option>
                             <option value="name_asc">По алфавиту</option>
@@ -130,6 +148,21 @@
         </details>
     </section>
 
+    <section class="category-card hidden" id="payroll-period-shifts-card">
+        <details id="payroll-period-shifts-details" class="payroll-collapse">
+            <summary class="report-summary-header payroll-collapse-summary">
+                <div>
+                    <h2>Детализация по сменам за период</h2>
+                    <p class="muted-text">По каждой смене видно, сколько начислено по категориям, сколько дал бонус к выходу и какой итог вышел.</p>
+                </div>
+                <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
+            </summary>
+            <div class="payroll-collapse-body">
+                <div id="payroll-period-shifts-container" class="payroll-days-container"></div>
+            </div>
+        </details>
+    </section>
+
     <section class="category-card hidden" id="employee-calendar-card">
         <details id="employee-calendar-details" class="payroll-collapse">
             <summary class="report-summary-header payroll-collapse-summary">
@@ -150,6 +183,21 @@
         </details>
     </section>
 
+    <section class="category-card hidden" id="employee-shift-details-card">
+        <details id="employee-shift-details-details" class="payroll-collapse">
+            <summary class="report-summary-header payroll-collapse-summary">
+                <div>
+                    <h2>Подробно по сменам</h2>
+                    <p class="muted-text">Подробные итоги по каждой вашей смене: бонус к выходу, начисления по категориям и сумма за смену.</p>
+                </div>
+                <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
+            </summary>
+            <div class="payroll-collapse-body">
+                <div id="employee-shift-details-container" class="payroll-days-container"></div>
+            </div>
+        </details>
+    </section>
+
     <section class="category-card hidden" id="admin-settings-card">
         <details class="payroll-collapse">
             <summary class="report-summary-header payroll-collapse-summary"><div><h2>Настройки зарплаты точки</h2><p class="muted-text">Версионные правила: новые изменения не переписывают прошлые закрытые смены.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span></summary>
@@ -160,7 +208,7 @@
                     <label>Порог бонуса<input type="number" id="settings-threshold" min="0" step="0.01"></label>
                     <label>Сумма бонуса<input type="number" id="settings-bonus" min="0" step="0.01"></label>
                     <label>Процент «Все остальное»<input type="number" id="settings-other-rate" min="0" step="0.01"></label>
-                    <label>Ответственный админ<select id="settings-admin-select"></select></label>
+                    <label>Ответственный управляющий<select id="settings-admin-select"></select></label>
                 </div>
                 <div class="payroll-settings-rates-card">
                     <div class="payroll-settings-rates-head">
@@ -174,15 +222,20 @@
                 <div class="payroll-settings-rates-card hidden" id="settings-manager-brackets-card">
                     <div class="payroll-settings-rates-head">
                         <div>
-                            <h3>Зарплата администратора по чистой прибыли</h3>
-                            <p class="muted-text">Только для суперадмина. Порог считается по чистой прибыли после расходов точки и зарплат сотрудников.</p>
+                            <h3>Зарплата управляющего по чистой прибыли</h3>
+                            <p class="muted-text">Только для главного управляющего. Порог считается по чистой прибыли после расходов точки и зарплат сотрудников.</p>
                         </div>
                         <button type="button" class="btn secondary btn-inline" id="settings-add-manager-bracket-btn">Добавить порог</button>
                     </div>
                     <div id="settings-manager-brackets" class="settings-threshold-grid"></div>
                 </div>
-                <div class="admin-toolbar-actions"><button id="save-settings-btn" type="button" class="btn primary btn-inline">Сохранить версию правил</button></div>
-                <div id="settings-status" class="inventory-status hidden"></div>
+                <div class="admin-toolbar-actions">
+                    <button id="save-settings-btn" type="button" class="btn primary btn-inline btn-with-loader" onclick="window.saveSettings && window.saveSettings(); return false;">
+                        <span class="btn-loader hidden" aria-hidden="true"></span>
+                        <span class="btn-label">Сохранить версию правил</span>
+                    </button>
+                </div>
+                <div id="settings-status" class="inventory-status hidden save-action-status"></div>
             </div>
         </details>
     </section>
@@ -201,7 +254,13 @@
                             <label>Сумма по умолчанию<input type="number" id="expense-template-default" min="0" step="0.01"></label>
                             <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline"><input type="checkbox" id="expense-template-employee"> По умолчанию относить к сотруднику</label>
                         </div>
-                        <div class="admin-toolbar-actions"><button id="create-expense-template-btn" type="button" class="btn secondary btn-inline">Добавить шаблон</button></div>
+                        <div class="admin-toolbar-actions">
+                            <button id="create-expense-template-btn" type="button" class="btn secondary btn-inline btn-with-loader">
+                                <span class="btn-loader hidden" aria-hidden="true"></span>
+                                <span class="btn-label">Добавить шаблон</span>
+                            </button>
+                        </div>
+                        <div id="create-expense-template-status" class="inventory-status hidden save-action-status"></div>
                     </div>
 
                     <div class="expense-create-card">
@@ -219,7 +278,13 @@
                             <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline"><input type="checkbox" id="manual-expense-apply"> Вычитать из зарплаты сотрудника</label>
                             <label class="expense-comment-field expense-comment-field--full">Комментарий<textarea id="manual-expense-comment" rows="3" placeholder="Комментарий к расходу"></textarea></label>
                         </div>
-                        <div class="admin-toolbar-actions"><button id="create-manual-expense-btn" type="button" class="btn primary btn-inline">Добавить свободный расход</button></div>
+                        <div class="admin-toolbar-actions">
+                            <button id="create-manual-expense-btn" type="button" class="btn primary btn-inline btn-with-loader">
+                                <span class="btn-loader hidden" aria-hidden="true"></span>
+                                <span class="btn-label">Добавить свободный расход</span>
+                            </button>
+                        </div>
+                        <div id="create-manual-expense-status" class="inventory-status hidden save-action-status"></div>
                     </div>
 
                     <div class="expense-section">
@@ -270,7 +335,8 @@
             full_name: {{ user.full_name | tojson }},
             role: {{ user.role | tojson }},
             location: {{ user.location | tojson }},
-            default_location: {{ default_location | tojson }}
+            default_location: {{ default_location | tojson }},
+            accessible_locations: {{ accessible_locations | tojson }}
         };
     </script>
     <script src="/static/js/payroll.js?v={{ asset_version }}"></script>

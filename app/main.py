@@ -182,7 +182,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260327-shifts-month-select-v3'
+templates.env.globals['asset_version'] = '20260405-payroll-manager-ui-v6'
 
 
 @app.middleware('http')
@@ -240,13 +240,13 @@ async def require_user(user: User | None = Depends(get_current_user)) -> User:
 
 async def require_admin_or_superadmin(user: User = Depends(require_user)) -> User:
     if user.role not in {'admin', 'superadmin'}:
-        raise HTTPException(status_code=403, detail='Доступ только для администратора.')
+        raise HTTPException(status_code=403, detail='Доступ только для управляющего.')
     return user
 
 
 async def require_superadmin(user: User = Depends(require_user)) -> User:
     if user.role != 'superadmin':
-        raise HTTPException(status_code=403, detail='Доступ только для главного администратора.')
+        raise HTTPException(status_code=403, detail='Доступ только для главного управляющего.')
     return user
 
 
@@ -292,7 +292,18 @@ async def payroll_page(request: Request, user: User | None = Depends(get_current
         return RedirectResponse(url='/login', status_code=302)
     accessible_locations = await get_payroll_accessible_locations(user, db)
     location = accessible_locations[0] if accessible_locations else (user.location if user.location else None)
-    return templates.TemplateResponse(request, 'payroll.html', {'user': user, 'default_location': location})
+    return templates.TemplateResponse(
+        request,
+        'payroll.html',
+        {
+            'user': user,
+            'default_location': location,
+            'accessible_locations': accessible_locations,
+            'today_iso': date.today().isoformat(),
+            'current_year': date.today().year,
+            'current_month': f"{date.today().month:02d}",
+        },
+    )
 
 
 @app.get('/shifts')
@@ -303,7 +314,18 @@ async def shifts_page(request: Request, user: User | None = Depends(get_current_
         return RedirectResponse(url='/', status_code=302)
     accessible_locations = await get_payroll_accessible_locations(user, db)
     location = accessible_locations[0] if accessible_locations else (user.location if user.location else None)
-    return templates.TemplateResponse(request, 'shifts.html', {'user': user, 'default_location': location})
+    return templates.TemplateResponse(
+        request,
+        'shifts.html',
+        {
+            'user': user,
+            'default_location': location,
+            'accessible_locations': accessible_locations,
+            'today_iso': date.today().isoformat(),
+            'current_year': date.today().year,
+            'current_month': f"{date.today().month:02d}",
+        },
+    )
 
 
 @app.post('/api/login', response_model=LoginResponse)
@@ -325,6 +347,12 @@ async def api_login(payload: LoginRequest, request: Request, db: AsyncSession = 
 async def api_logout(request: Request):
     request.session.clear()
     return LogoutResponse()
+
+
+@app.get('/logout')
+async def logout_page(request: Request):
+    request.session.clear()
+    return RedirectResponse(url='/login', status_code=302)
 
 
 @app.get('/api/me', response_model=MeResponse)

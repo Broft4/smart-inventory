@@ -16,7 +16,7 @@
         <div class="header-actions">
             <a href="/admin" class="btn secondary btn-inline">Назад</a>
             <a href="/payroll" class="btn secondary btn-inline">Бухгалтерия</a>
-            <button id="logout-btn" class="btn secondary btn-inline" type="button">Выйти</button>
+            <a href="/logout" id="logout-btn" class="btn secondary btn-inline">Выйти</a>
         </div>
     </header>
 
@@ -24,18 +24,25 @@
         <div class="payroll-filter-grid payroll-filter-grid--with-actions payroll-filter-grid--shifts-top">
             <label>
                 Точка
-                <select id="shift-location-select"></select>
+                <select id="shift-location-select">
+                    {% for location_name in accessible_locations %}
+                        <option value="{{ location_name }}"{% if location_name == default_location %} selected{% endif %}>{{ location_name }}</option>
+                    {% endfor %}
+                    {% if default_location and default_location not in accessible_locations %}
+                        <option value="{{ default_location }}" selected>{{ default_location }}</option>
+                    {% endif %}
+                </select>
             </label>
             <label>
                 Год
-                <input type="number" id="shift-year-input" inputmode="numeric" min="2020" step="1">
+                <input type="number" id="shift-year-input" inputmode="numeric" min="2020" step="1" value="{{ current_year }}">
             </label>
             <label>
                 Месяц
                 <select id="shift-month-select"></select>
             </label>
             <div class="payroll-filter-actions-inline">
-                <button id="shift-load-btn" type="button" class="btn secondary btn-inline">Показать месяц</button>
+                <button id="shift-load-btn" type="button" class="btn secondary btn-inline" onclick="window.shiftsRefresh && window.shiftsRefresh(); return false;">Показать месяц</button>
             </div>
         </div>
         <div id="shift-status" class="inventory-status hidden"></div>
@@ -78,6 +85,9 @@
                     </div>
                     <div class="muted-text" id="shift-filter-caption">Показаны все даты за выбранный месяц.</div>
                 </div>
+                <div class="shift-add-action-row">
+                    <button type="button" id="shift-floating-add-btn" class="shift-floating-add-btn" aria-label="Назначить смену">+</button>
+                </div>
             </div>
         </details>
     </section>
@@ -88,7 +98,7 @@
             <summary class="report-summary-header payroll-collapse-summary">
                 <div>
                     <h2>Смены</h2>
-                    <p class="muted-text">Раздел перенесён из бухгалтерии: по каждой смене — выручка, бонус и итог.</p>
+                    <p class="muted-text">Здесь только детализация по сменам: суммы, бонус к выходу и общий бонус по категориям.</p>
                 </div>
                 <span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span>
             </summary>
@@ -98,8 +108,6 @@
         </details>
     </section>
 
-
-    <button type="button" id="shift-floating-add-btn" class="shift-floating-add-btn" aria-label="Назначить смену">+</button>
 
     <div id="shift-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="shift-modal-title">
         <div class="modal-card shift-modal-card">
@@ -114,7 +122,6 @@
                 <label>Дата смены<input type="date" id="shift-modal-date-input"></label>
                 <label>Сотрудник<select id="shift-modal-employee-select"></select></label>
             </div>
-            <div id="shift-modal-status" class="inventory-status hidden"></div>
             <div class="modal-actions shift-modal-actions">
                 <button type="button" class="btn secondary btn-inline" id="shift-modal-cancel-btn">Отмена</button>
                 <button id="shift-modal-save-btn" type="button" class="btn primary btn-inline btn-with-loader">
@@ -122,6 +129,7 @@
                     <span class="btn-label">Назначить смену</span>
                 </button>
             </div>
+            <div id="shift-modal-status" class="inventory-status hidden save-action-status"></div>
         </div>
     </div>
 
@@ -131,7 +139,8 @@
             full_name: {{ user.full_name | tojson }},
             role: {{ user.role | tojson }},
             location: {{ user.location | tojson }},
-            default_location: {{ default_location | tojson }}
+            default_location: {{ default_location | tojson }},
+            accessible_locations: {{ accessible_locations | tojson }}
         };
     </script>
     <script src="/static/js/shifts.js?v={{ asset_version }}"></script>

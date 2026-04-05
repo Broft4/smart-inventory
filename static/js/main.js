@@ -474,7 +474,7 @@ function categoryMetaText(category) {
     if (category.has_my_subcategories) return 'у вас есть закреплённые подкатегории';
     if (category.has_my_items) return 'у вас есть закреплённые товары';
     if (!category.selected_whole_category && (category.selected_subcategory_names || []).length) {
-        return 'администратор выбрал только часть категории';
+        return 'управляющий выбрал только часть категории';
     }
     if (category.is_blocked_by_other) return `категория занята: ${category.assigned_to}`;
     if (category.has_other_subcategories || category.has_other_items) return 'часть ветки занята другими';
@@ -644,7 +644,7 @@ function renderCategoryCard(category, query, modeOverride = null) {
     if (!category.is_diagnostic && category.can_take) {
         bodyHtml += `
             <div class="category-card">
-                <p class="muted-text">Категория целиком выбрана администратором и пока никем не взята в работу.</p>
+                <p class="muted-text">Категория целиком выбрана управляющим и пока никем не взята в работу.</p>
                 <button class="btn primary btn-inline" onclick="takeCategory('${category.id}')">Взять всю категорию</button>
             </div>
         `;
@@ -652,7 +652,7 @@ function renderCategoryCard(category, query, modeOverride = null) {
         const selectedNames = (category.selected_subcategory_names || []).map(name => `«${escapeHtml(name)}»`).join(', ');
         bodyHtml += `
             <div class="category-card">
-                <p class="muted-text">Администратор выбрал в этой категории только отдельные подкатегории. Целиком взять категорию нельзя — выберите одну из доступных подкатегорий ниже.</p>
+                <p class="muted-text">Управляющий выбрал в этой категории только отдельные подкатегории. Целиком взять категорию нельзя — выберите одну из доступных подкатегорий ниже.</p>
                 <div class="muted-text">Выбрано: ${selectedNames}</div>
             </div>
         `;

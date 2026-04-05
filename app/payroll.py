@@ -490,9 +490,23 @@ async def _get_location_point_by_name(location: str, db: AsyncSession) -> Locati
 
 
 async def get_user_accessible_locations(user: User, db: AsyncSession) -> list[str]:
+    fallback_location = _normalize_location(user.location) if user.location else ''
+
+    def _merge_locations(rows: list[LocationPoint]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            name = _normalize_location(getattr(row, 'name', '') or '')
+            if name and name not in seen:
+                seen.add(name)
+                result.append(name)
+        if fallback_location and fallback_location not in seen:
+            result.append(fallback_location)
+        return result
+
     if user.role == 'superadmin':
         rows = (await db.scalars(select(LocationPoint).order_by(LocationPoint.name.asc()))).all()
-        return [row.name for row in rows]
+        return _merge_locations(rows)
     if user.role == 'admin':
         rows = (
             await db.scalars(
@@ -502,8 +516,8 @@ async def get_user_accessible_locations(user: User, db: AsyncSession) -> list[st
                 .order_by(LocationPoint.name.asc())
             )
         ).all()
-        return [row.name for row in rows]
-    return [_normalize_location(user.location)] if user.location else []
+        return _merge_locations(rows)
+    return [fallback_location] if fallback_location else []
 
 
 async def ensure_user_can_access_location(user: User, location: str, db: AsyncSession) -> None:
@@ -599,6 +613,21 @@ async def _get_settings_rates(settings_version_id: int, db: AsyncSession) -> dic
     }
 
 
+def _serialize_settings_version_payload(settings: PayrollSettingsVersion, rates: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    return {
+        'id': settings.id,
+        'effective_from': settings.effective_from.isoformat(),
+        'exit_amount': round(float(settings.exit_amount or 0), 2),
+        'bonus_threshold': round(float(settings.bonus_threshold or 0), 2),
+        'bonus_amount': round(float(settings.bonus_amount or 0), 2),
+        'other_rate_percent': round(float(settings.other_rate_percent or 0), 2),
+        'bonus_category_ids': _load_bonus_category_ids(settings),
+        'manager_salary_brackets': _load_manager_salary_brackets(settings),
+        'responsible_admin_user_id': settings.responsible_admin_user_id,
+        'category_rates': sorted(rates.values(), key=lambda item: item['category_name'].lower()),
+    }
+
+
 def _resolve_category_rate_percent(rate_info: dict[str, Any] | None, other_rate_percent: float | None) -> tuple[float, bool]:
     try:
         explicit_rate = float((rate_info or {}).get('rate_percent') or 0)
@@ -649,18 +678,7 @@ async def get_location_payroll_setup(location: str, db: AsyncSession, current_us
     return {
         'location': point.name,
         'location_id': point.id,
-        'settings': {
-            'id': settings.id,
-            'effective_from': settings.effective_from.isoformat(),
-            'exit_amount': round(float(settings.exit_amount or 0), 2),
-            'bonus_threshold': round(float(settings.bonus_threshold or 0), 2),
-            'bonus_amount': round(float(settings.bonus_amount or 0), 2),
-            'other_rate_percent': round(float(settings.other_rate_percent or 0), 2),
-            'bonus_category_ids': _load_bonus_category_ids(settings),
-            'manager_salary_brackets': _load_manager_salary_brackets(settings),
-            'responsible_admin_user_id': settings.responsible_admin_user_id,
-            'category_rates': sorted(rates.values(), key=lambda item: item['category_name'].lower()),
-        },
+        'settings': _serialize_settings_version_payload(settings, rates),
         'employees': [{'id': item.id, 'full_name': item.full_name} for item in employees],
         'admins': [{'id': item.id, 'full_name': item.full_name} for item in admins],
     }
@@ -671,31 +689,90 @@ async def get_payroll_category_catalog(location: str, db: AsyncSession, current_
     point = await _get_location_point_by_name(location, db)
     normalized = _normalize_location(location)
     categories: list[dict[str, Any]] = []
-    if _ms_client_enabled(location=normalized):
-        inventory = await ms_client.get_inventory(normalized, **_point_ms_kwargs(point))
-        for category in inventory.get('categories', []):
-            if category.get('name') == DEFAULT_CATEGORY_NAME:
-                continue
-            categories.append({'id': category['id'], 'name': category['name']})
-    else:
-        from app.logic import MOCK_INVENTORY
-        inventory = MOCK_INVENTORY.get(normalized, {'categories': []})
-        for category in inventory.get('categories', []):
-            categories.append({'id': category['id'], 'name': category['name']})
+    seen: set[str] = set()
+
+    def _append_category(category_id: Any, category_name: Any) -> None:
+        normalized_id = str(category_id or '').strip()
+        normalized_name = str(category_name or '').strip()
+        if not normalized_id or not normalized_name or normalized_name == DEFAULT_CATEGORY_NAME or normalized_id in seen:
+            return
+        seen.add(normalized_id)
+        categories.append({'id': normalized_id, 'name': normalized_name})
+
+    # 1) Берём уже сохранённые категории из всех версий правил по точке.
+    historical_rate_rows = (
+        await db.execute(
+            select(PayrollCategoryRateVersion.category_id, PayrollCategoryRateVersion.category_name)
+            .join(PayrollSettingsVersion, PayrollCategoryRateVersion.settings_version_id == PayrollSettingsVersion.id)
+            .where(PayrollSettingsVersion.location_point_id == point.id)
+            .order_by(PayrollCategoryRateVersion.category_name.asc())
+        )
+    ).all()
+    for category_id, category_name in historical_rate_rows:
+        _append_category(category_id, category_name)
+
+    # 2) Добавляем категории из кеша метрик продаж — здесь бывают категории, которых уже нет в остатках.
+    metric_rows = (
+        await db.scalars(
+            select(PayrollDailyMetricCache)
+            .where(PayrollDailyMetricCache.location_point_id == point.id)
+            .order_by(PayrollDailyMetricCache.metric_date.desc(), PayrollDailyMetricCache.id.desc())
+            .limit(370)
+        )
+    ).all()
+    for metric_row in metric_rows:
+        try:
+            parsed_categories = json.loads(metric_row.categories_json or '[]')
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed_categories = []
+        for item in parsed_categories or []:
+            _append_category(item.get('category_id'), item.get('category_name'))
+
+    # 3) Пытаемся подтянуть полный каталог из МоегоСклада: верхние папки + текущие категории из inventory.
+    try:
+        if _ms_client_enabled(token=_point_ms_token(point), location=normalized):
+            token = _point_ms_token(point)
+            folder_map = await ms_client._get_folder_map(token=token, location=normalized)
+            for folder in folder_map.values():
+                folder_id = str(folder.get('id') or '').strip()
+                folder_name = str(folder.get('name') or '').strip()
+                parent = folder.get('productFolder') or {}
+                parent_meta = parent.get('meta') or {}
+                parent_id = str(parent.get('id') or parent_meta.get('id') or ms_client._extract_id_from_href(parent_meta.get('href')) or '').strip()
+                if folder_id and folder_name and not parent_id:
+                    _append_category(f"cat-{normalized.lower()}-{folder_id}", folder_name)
+
+            inventory = await ms_client.get_inventory(normalized, **_point_ms_kwargs(point))
+            for category in inventory.get('categories', []):
+                _append_category(category.get('id'), category.get('name'))
+        else:
+            from app.logic import MOCK_INVENTORY
+            inventory = MOCK_INVENTORY.get(normalized, {'categories': []})
+            for category in inventory.get('categories', []):
+                _append_category(category.get('id'), category.get('name'))
+    except Exception:
+        logger.exception('Не удалось полностью загрузить каталог категорий для точки %s. Используем сохранённые и кешированные категории.', normalized)
+
+    if not categories:
+        settings = await _ensure_default_payroll_settings(point, db)
+        rates = await _get_settings_rates(settings.id, db)
+        for item in rates.values():
+            _append_category(item.get('category_id'), item.get('category_name'))
+
     categories.sort(key=lambda item: item['name'].lower())
     return {'location': normalized, 'categories': categories}
 
 
 async def update_location_payroll_settings(payload: PayrollSettingsUpdateRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
     if current_user.role not in {'admin', 'superadmin'}:
-        raise HTTPException(status_code=403, detail='Изменять настройки зарплаты может только администратор.')
+        raise HTTPException(status_code=403, detail='Изменять настройки зарплаты может только управляющий.')
     await ensure_user_can_access_location(current_user, payload.location, db)
     point = await _get_location_point_by_name(payload.location, db)
 
     if payload.responsible_admin_user_id:
         admin_user = await db.get(User, payload.responsible_admin_user_id)
         if not admin_user or admin_user.role != 'admin' or not admin_user.is_active:
-            raise HTTPException(status_code=400, detail='Ответственный администратор не найден.')
+            raise HTTPException(status_code=400, detail='Ответственный управляющий не найден.')
         has_access = await db.scalar(
             select(func.count())
             .select_from(AdminLocationAccess)
@@ -705,10 +782,10 @@ async def update_location_payroll_settings(payload: PayrollSettingsUpdateRequest
             )
         )
         if (has_access or 0) <= 0:
-            raise HTTPException(status_code=400, detail='У выбранного администратора нет доступа к точке.')
+            raise HTTPException(status_code=400, detail='У выбранного управляющего нет доступа к точке.')
 
     if current_user.role != 'superadmin' and payload.manager_salary_brackets:
-        raise HTTPException(status_code=403, detail='Настраивать зарплату администратора может только суперадмин.')
+        raise HTTPException(status_code=403, detail='Настраивать зарплату управляющего может только главный управляющий.')
 
     normalized_bonus_category_ids = _normalize_bonus_category_ids(payload.bonus_category_ids)
 
@@ -798,7 +875,26 @@ async def update_location_payroll_settings(payload: PayrollSettingsUpdateRequest
         },
     )
     await db.commit()
-    return await get_location_payroll_setup(point.name, db, current_user)
+
+    rebuild_result: dict[str, Any] | None = None
+    today = get_moscow_today()
+    if payload.effective_from <= today:
+        rebuild_result = await rebuild_closed_shift_snapshots(payload.effective_from, today, db, location=point.name)
+
+    saved_settings = await db.get(PayrollSettingsVersion, version.id)
+    saved_rates = await _get_settings_rates(version.id, db)
+    setup = await get_location_payroll_setup(point.name, db, current_user)
+    setup['settings'] = _serialize_settings_version_payload(saved_settings or version, saved_rates)
+    rebuild_date_to = today if payload.effective_from <= today else payload.effective_from
+    setup['rebuild_closed_shifts'] = rebuild_result or {
+        'date_from': payload.effective_from.isoformat(),
+        'date_to': rebuild_date_to.isoformat(),
+        'location': point.name,
+        'processed': 0,
+        'updated': 0,
+        'details': [],
+    }
+    return setup
 
 
 async def _ensure_month_expense_entries(point: LocationPoint, month_start: date, db: AsyncSession) -> list[MonthlyExpenseEntry]:
@@ -878,7 +974,7 @@ async def list_expense_templates(location: str, db: AsyncSession, current_user: 
 
 async def create_expense_template(payload: ExpenseTemplateCreateRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
     if current_user.role not in {'admin', 'superadmin'}:
-        raise HTTPException(status_code=403, detail='Создавать шаблоны расходов может только администратор.')
+        raise HTTPException(status_code=403, detail='Создавать шаблоны расходов может только управляющий.')
     await ensure_user_can_access_location(current_user, payload.location, db)
     point = await _get_location_point_by_name(payload.location, db)
     amount_type = payload.amount_type if payload.amount_type in {'static', 'dynamic'} else 'dynamic'
@@ -988,7 +1084,7 @@ def _serialize_monthly_expense_entry(
 
 async def create_manual_monthly_expense(payload: ManualMonthlyExpenseCreateRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
     if current_user.role not in {'admin', 'superadmin'}:
-        raise HTTPException(status_code=403, detail='Создавать расходы может только администратор.')
+        raise HTTPException(status_code=403, detail='Создавать расходы может только управляющий.')
     await ensure_user_can_access_location(current_user, payload.location, db)
     point = await _get_location_point_by_name(payload.location, db)
     month_key = _month_start(payload.month_start)
@@ -2119,7 +2215,7 @@ async def close_shift(shift_id: int, db: AsyncSession, actor_user: User | None, 
 
 async def upsert_work_shift(payload: WorkShiftUpsertRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
     if current_user.role not in {'admin', 'superadmin'}:
-        raise HTTPException(status_code=403, detail='Назначать смены может только администратор.')
+        raise HTTPException(status_code=403, detail='Назначать смены может только управляющий.')
     await ensure_user_can_access_location(current_user, payload.location, db)
     point = await _get_location_point_by_name(payload.location, db)
     employee = await db.get(User, payload.employee_user_id)

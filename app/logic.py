@@ -935,11 +935,11 @@ async def create_user(payload: UserCreateRequest, db: AsyncSession, current_user
     requested_access_ids = sorted({int(location_id) for location_id in payload.admin_location_ids})
 
     if current_user.role == RoleEnum.ADMIN.value and requested_role != RoleEnum.EMPLOYEE.value:
-        raise HTTPException(status_code=403, detail='Обычный администратор может создавать только сотрудников.')
+        raise HTTPException(status_code=403, detail='Обычный управляющий может создавать только сотрудников.')
     if requested_role == RoleEnum.SUPERADMIN.value and current_user.role != RoleEnum.SUPERADMIN.value:
-        raise HTTPException(status_code=403, detail='Создавать главного администратора может только главный администратор.')
+        raise HTTPException(status_code=403, detail='Создавать главного управляющего может только главный управляющий.')
     if requested_role == RoleEnum.ADMIN.value and current_user.role != RoleEnum.SUPERADMIN.value:
-        raise HTTPException(status_code=403, detail='Создавать администраторов может только главный администратор.')
+        raise HTTPException(status_code=403, detail='Создавать управляющих может только главный управляющий.')
 
     if requested_role == RoleEnum.EMPLOYEE.value:
         if not normalized_location:
@@ -956,7 +956,7 @@ async def create_user(payload: UserCreateRequest, db: AsyncSession, current_user
     if requested_role == RoleEnum.ADMIN.value:
         admin_location_rows = await _validate_location_ids(requested_access_ids, db)
         if not admin_location_rows:
-            raise HTTPException(status_code=400, detail='Администратору нужно назначить хотя бы одну точку.')
+            raise HTTPException(status_code=400, detail='Управляющему нужно назначить хотя бы одну точку.')
 
     user = User(
         full_name=payload.full_name.strip(),
@@ -998,23 +998,23 @@ async def update_user(user_id: int, payload: UserUpdateRequest, db: AsyncSession
                 raise HTTPException(status_code=400, detail='Нельзя снять роль admin у своего аккаунта.')
         else:
             if user.role != RoleEnum.EMPLOYEE.value:
-                raise HTTPException(status_code=403, detail='Обычный администратор может редактировать только сотрудников.')
+                raise HTTPException(status_code=403, detail='Обычный управляющий может редактировать только сотрудников.')
             if user.location and _normalize_location(user.location) not in accessible_locations:
                 raise HTTPException(status_code=403, detail='Нет доступа к пользователю из другой точки.')
             if requested_role != RoleEnum.EMPLOYEE.value:
-                raise HTTPException(status_code=403, detail='Обычный администратор не может менять роль сотрудника.')
+                raise HTTPException(status_code=403, detail='Обычный управляющий не может менять роль сотрудника.')
             if not normalized_location:
                 raise HTTPException(status_code=400, detail='Сотруднику нужно назначить точку.')
             if normalized_location not in accessible_locations:
                 raise HTTPException(status_code=403, detail='Нельзя назначить сотруднику чужую точку.')
 
     if requested_role == RoleEnum.SUPERADMIN.value and current_user.role != RoleEnum.SUPERADMIN.value:
-        raise HTTPException(status_code=403, detail='Назначать роль главного администратора может только главный администратор.')
+        raise HTTPException(status_code=403, detail='Назначать роль главного управляющего может только главный управляющий.')
     if requested_role == RoleEnum.ADMIN.value and current_user.role != RoleEnum.SUPERADMIN.value and user.id != current_user.id:
-        raise HTTPException(status_code=403, detail='Назначать роль администратора может только главный администратор.')
+        raise HTTPException(status_code=403, detail='Назначать роль управляющего может только главный управляющий.')
 
     if user.id == current_user.id and user.role == RoleEnum.SUPERADMIN.value and requested_role != RoleEnum.SUPERADMIN.value:
-        raise HTTPException(status_code=400, detail='Нельзя снять роль главного администратора у своего аккаунта.')
+        raise HTTPException(status_code=400, detail='Нельзя снять роль главного управляющего у своего аккаунта.')
 
     old_superadmin = user.role == RoleEnum.SUPERADMIN.value
 
@@ -1023,7 +1023,7 @@ async def update_user(user_id: int, payload: UserUpdateRequest, db: AsyncSession
         if current_user.role == RoleEnum.SUPERADMIN.value:
             admin_location_rows = await _validate_location_ids(requested_access_ids, db)
             if user.id != current_user.id and not admin_location_rows:
-                raise HTTPException(status_code=400, detail='Администратору нужно назначить хотя бы одну точку.')
+                raise HTTPException(status_code=400, detail='Управляющему нужно назначить хотя бы одну точку.')
         normalized_location = None
     elif requested_role == RoleEnum.EMPLOYEE.value:
         if not normalized_location:
@@ -1061,7 +1061,7 @@ async def update_user(user_id: int, payload: UserUpdateRequest, db: AsyncSession
     if old_superadmin and requested_role != RoleEnum.SUPERADMIN.value:
         superadmin_count = await db.scalar(select(func.count()).select_from(User).where(User.role == RoleEnum.SUPERADMIN.value))
         if (superadmin_count or 0) <= 1:
-            raise HTTPException(status_code=400, detail='Нельзя снять роль у последнего главного администратора.')
+            raise HTTPException(status_code=400, detail='Нельзя снять роль у последнего главного управляющего.')
 
     await db.commit()
     await db.refresh(user)
@@ -1079,14 +1079,14 @@ async def delete_user(user_id: int, db: AsyncSession, current_user: User) -> Del
     if current_user.role == RoleEnum.ADMIN.value:
         accessible_locations = set(await get_user_accessible_locations(current_user, db))
         if user.role != RoleEnum.EMPLOYEE.value:
-            raise HTTPException(status_code=403, detail='Обычный администратор может удалять только сотрудников.')
+            raise HTTPException(status_code=403, detail='Обычный управляющий может удалять только сотрудников.')
         if not user.location or _normalize_location(user.location) not in accessible_locations:
             raise HTTPException(status_code=403, detail='Нет доступа к пользователю из другой точки.')
 
     if user.role == RoleEnum.SUPERADMIN.value:
         superadmin_count = await db.scalar(select(func.count()).select_from(User).where(User.role == RoleEnum.SUPERADMIN.value))
         if (superadmin_count or 0) <= 1:
-            raise HTTPException(status_code=400, detail='Нельзя удалить последнего главного администратора.')
+            raise HTTPException(status_code=400, detail='Нельзя удалить последнего главного управляющего.')
 
     await db.execute(delete(CategoryAssignment).where(CategoryAssignment.user_id == user.id))
     await db.execute(update(CheckResult).where(CheckResult.checked_by_user_id == user.id).values(checked_by_user_id=None))
@@ -2171,7 +2171,7 @@ async def delete_location_point(location_id: int, db: AsyncSession) -> DeleteRes
 
     access_count = await db.scalar(select(func.count()).select_from(AdminLocationAccess).where(AdminLocationAccess.location_point_id == point.id))
     if (access_count or 0) > 0:
-        linked_entities.append('доступы администраторов')
+        linked_entities.append('доступы управляющих')
 
     if linked_entities:
         raise HTTPException(
@@ -3162,9 +3162,9 @@ async def assign_selection_to_user(report_id: int, category_id: str, target_type
             if partial_sub_ids:
                 raise HTTPException(
                     status_code=400,
-                    detail='Администратор выбрал в этой категории только отдельные подкатегории. Возьмите нужную подкатегорию ниже.',
+                    detail='Управляющий выбрал в этой категории только отдельные подкатегории. Возьмите нужную подкатегорию ниже.',
                 )
-            raise HTTPException(status_code=400, detail='Эта категория не выбрана администратором для текущего цикла.')
+            raise HTTPException(status_code=400, detail='Эта категория не выбрана управляющим для текущего цикла.')
         if any(sub['name'] == DEFAULT_SUBCATEGORY_NAME for sub in category['subcategories']):
             raise HTTPException(status_code=400, detail='Категории со служебными ветками «Без категории/Без подкатегории» нельзя брать целиком. Выберите обычную подкатегорию или конкретные товары.')
         remaining_subcategories = [
@@ -3219,7 +3219,7 @@ async def assign_selection_to_user(report_id: int, category_id: str, target_type
             raise HTTPException(status_code=400, detail=f'Вся категория уже закреплена за сотрудником {category_assignment.user_full_name_snapshot}.')
 
         if category_id not in selected_category_ids and subcategory_id not in selected_subcategory_ids.get(category_id, set()):
-            raise HTTPException(status_code=400, detail='Эта подкатегория не выбрана администратором для текущего цикла.')
+            raise HTTPException(status_code=400, detail='Эта подкатегория не выбрана управляющим для текущего цикла.')
 
         subcategory = await _find_subcategory(report.location, category_id, subcategory_id, db=db)
         diagnostic_sub = category_is_diagnostic or subcategory['name'] == DEFAULT_SUBCATEGORY_NAME
@@ -3273,7 +3273,7 @@ async def assign_selection_to_user(report_id: int, category_id: str, target_type
             raise HTTPException(status_code=400, detail='Сейчас внутри этой категории нельзя закреплять отдельные товары, потому что уже есть выбор категории целиком.')
 
         if category_id not in selected_category_ids and subcategory_id not in selected_subcategory_ids.get(category_id, set()):
-            raise HTTPException(status_code=400, detail='Эта подкатегория не выбрана администратором для текущего цикла.')
+            raise HTTPException(status_code=400, detail='Эта подкатегория не выбрана управляющим для текущего цикла.')
 
         subcategory = await _find_subcategory(report.location, category_id, subcategory_id, db=db)
         diagnostic_sub = category_is_diagnostic or subcategory['name'] == DEFAULT_SUBCATEGORY_NAME
@@ -5647,7 +5647,7 @@ async def update_discrepancy_actual_qty(
 
     password = str(payload.password or '').strip()
     if not password or not verify_password(password, current_user.password_hash):
-        raise HTTPException(status_code=403, detail='Неверный пароль текущего администратора.')
+        raise HTTPException(status_code=403, detail='Неверный пароль текущего управляющего.')
 
     actual_quantity = float(payload.actual_quantity)
     expected_quantity = float(check_result.expected_qty or 0.0)

@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./inventory.db"
     session_secret_key: str = "smart-inventory-secret-key"
 
-    default_admin_full_name: str = "Главный администратор"
+    default_admin_full_name: str = "Главный управляющий"
     default_admin_birth_date: str = "1990-01-01"
     default_admin_username: str = "admin"
     default_admin_password: str = "admin123"

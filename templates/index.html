@@ -18,15 +18,18 @@
             {% endif %}
         </div>
         <div class="header-actions">
-            {% if not no_location_assigned %}<a href="/payroll" class="btn secondary btn-inline">Бухгалтерия</a>{% endif %}
-            <button id="logout-btn" class="btn secondary btn-inline" type="button">Выйти</button>
+            {% if not no_location_assigned %}
+                <a href="/payroll?view=salary" class="btn secondary btn-inline">Зарплата</a>
+                <a href="/payroll?view=shifts" class="btn secondary btn-inline">Смены</a>
+            {% endif %}
+            <a href="/logout" id="logout-btn" class="btn secondary btn-inline">Выйти</a>
         </div>
     </header>
 
     {% if no_location_assigned %}
         <div class="warning-card">
             <h2>Точка вам ещё не выдана</h2>
-            <p>Обратитесь к администратору, чтобы вам назначили точку для работы.</p>
+            <p>Обратитесь к управляющему, чтобы вам назначили точку для работы.</p>
         </div>
     {% else %}
         <div id="inventory-screen" class="screen active">

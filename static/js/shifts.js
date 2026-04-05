@@ -169,6 +169,33 @@ function selectedLocation() {
     return qs('shift-location-select')?.value || '';
 }
 
+function normalizeLocationList(locations = []) {
+    const result = [];
+    const seen = new Set();
+    (locations || []).forEach((location) => {
+        const value = String(location ?? '').trim();
+        if (!value || seen.has(value)) return;
+        seen.add(value);
+        result.push(value);
+    });
+    return result;
+}
+
+function currentLocationOptionsFromDom() {
+    return normalizeLocationList(
+        [...(qs('shift-location-select')?.options || [])].map((option) => option.value || option.textContent || '')
+    );
+}
+
+function fallbackLocations() {
+    return normalizeLocationList([
+        ...currentLocationOptionsFromDom(),
+        ...(Array.isArray(shiftsState.user.accessible_locations) ? shiftsState.user.accessible_locations : []),
+        shiftsState.user.default_location,
+        shiftsState.user.location,
+    ]);
+}
+
 function setDefaults() {
     if (qs('shift-year-input')) qs('shift-year-input').value = String(currentYear());
     if (qs('shift-month-select')) qs('shift-month-select').value = monthIso().slice(5, 7);
@@ -183,10 +210,14 @@ function renderMonthOptions() {
 function renderLocations() {
     const select = qs('shift-location-select');
     if (!select) return;
-    select.innerHTML = shiftsState.locations.map(location => `<option value="${location}">${location}</option>`).join('');
-    const defaultLocation = shiftsState.user.default_location || shiftsState.user.location || shiftsState.locations[0] || '';
-    if (defaultLocation && shiftsState.locations.includes(defaultLocation)) {
+    const locations = normalizeLocationList(shiftsState.locations.length ? shiftsState.locations : fallbackLocations());
+    shiftsState.locations = locations;
+    select.innerHTML = locations.map(location => `<option value="${location}">${location}</option>`).join('');
+    const defaultLocation = shiftsState.user.default_location || shiftsState.user.location || locations[0] || '';
+    if (defaultLocation && locations.includes(defaultLocation)) {
         select.value = defaultLocation;
+    } else if (locations[0]) {
+        select.value = locations[0];
     }
 }
 
@@ -256,12 +287,13 @@ function renderPayrollDays() {
                 </div>
                 <span class="payroll-chip ${day.is_closed ? 'green' : 'orange'}">${day.is_closed ? 'Закрыта' : 'Открыта'}</span>
             </div>
-            <div class="payroll-day-grid">
+            <div class="payroll-day-grid payroll-day-grid--emphasis">
                 <div><span class="summary-label">Выручка</span><strong>${formatMoney(day.gross_sales_amount)}</strong></div>
                 <div><span class="summary-label">Возвраты</span><strong>${formatMoney(day.return_amount)}</strong></div>
                 <div><span class="summary-label">Выручка после возвратов</span><strong>${formatMoney(day.net_sales_amount)}</strong></div>
                 <div><span class="summary-label">Выход</span><strong>${formatMoney(day.exit_amount)}</strong></div>
-                <div><span class="summary-label">Бонус</span><strong>${formatMoney(day.bonus_amount)}</strong></div>
+                <div><span class="summary-label">Бонус к выходу</span><strong>${formatMoney(day.bonus_amount)}</strong></div>
+                <div><span class="summary-label">Бонус по категориям</span><strong>${formatMoney(day.category_earnings_total)}</strong></div>
                 <div><span class="summary-label">Итого</span><strong>${formatMoney(day.gross_salary_amount)}</strong></div>
             </div>
             ${(day.id && !day.is_closed) ? `
@@ -463,6 +495,8 @@ async function refreshPageData(showSuccess = true) {
     }
 }
 
+window.shiftsRefresh = refreshPageData;
+
 window.openShiftDay = function openShiftDay(dateValue) {
     if (!dateValue) return;
     shiftsState.filterMode = 'date';
@@ -543,11 +577,6 @@ async function saveShiftFromModal() {
     }
 }
 
-async function logout() {
-    await api('/api/logout', { method: 'POST' });
-    window.location.href = '/login';
-}
-
 function handleShiftDatePickerClick(event) {
     const target = event.target.closest('[data-shift-picker-date]');
     if (!target || target.disabled) return;
@@ -562,23 +591,31 @@ async function bootstrap() {
         syncCollapseToggleText(details);
         details.addEventListener('toggle', () => syncCollapseToggleText(details));
     });
+    shiftsState.locations = fallbackLocations();
+    renderLocations();
     try {
         const access = await api('/api/payroll/access');
-        shiftsState.locations = access.locations || [];
+        shiftsState.locations = normalizeLocationList(access.locations || []);
         renderLocations();
         await refreshPageData(false);
     } catch (error) {
         console.error(error);
+        shiftsState.locations = fallbackLocations();
+        renderLocations();
+        if (selectedLocation()) {
+            try {
+                await refreshPageData(false);
+                showStatus('Список точек из API не загрузился, показана базовая точка.', 'warning');
+                return;
+            } catch (fallbackError) {
+                console.error(fallbackError);
+            }
+        }
         showStatus(error.message || 'Не удалось загрузить страницу смен.', 'error');
     }
 }
 
 qs('shift-location-select')?.addEventListener('change', async () => {
-    shiftsState.filterMode = 'month';
-    shiftsState.selectedDate = '';
-    await refreshPageData();
-});
-qs('shift-load-btn')?.addEventListener('click', async () => {
     shiftsState.filterMode = 'month';
     shiftsState.selectedDate = '';
     await refreshPageData();
@@ -597,7 +634,6 @@ qs('shift-view-all-btn')?.addEventListener('click', () => setShiftFilterMode('mo
 qs('shift-view-date-btn')?.addEventListener('click', () => setShiftFilterMode('date'));
 qs('shift-date-picker-btn')?.addEventListener('click', () => toggleShiftDatePicker());
 qs('shift-date-picker-grid')?.addEventListener('click', handleShiftDatePickerClick);
-qs('logout-btn')?.addEventListener('click', logout);
 qs('shift-modal-save-btn')?.addEventListener('click', saveShiftFromModal);
 qs('shift-modal-close-btn')?.addEventListener('click', closeShiftModal);
 qs('shift-modal-cancel-btn')?.addEventListener('click', closeShiftModal);

@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Админка — Умная ревизия</title>
+    <title>Панель управляющего — Умная ревизия</title>
     <link rel="stylesheet" href="/static/css/style.css?v={{ asset_version }}">
 </head>
 <body>
 <div class="container admin-container admin-v2">
     <header class="page-header admin-header-v2">
         <div>
-            <h1>Панель администратора</h1>
+            <h1>Панель управляющего</h1>
             <p class="muted-text">{{ user.full_name }}</p>
         </div>
         <div class="header-actions">
@@ -265,9 +265,9 @@
             </label>
             <label>Роль
                 <select id="user-role">
-                    <option value="employee">employee</option>
-                    <option value="admin">admin</option>
-                    <option value="superadmin">superadmin</option>
+                    <option value="employee">Сотрудник</option>
+                    <option value="admin">Управляющий</option>
+                    <option value="superadmin">Главный управляющий</option>
                 </select>
             </label>
             <label id="user-location-row">Точка сотрудника
@@ -275,9 +275,9 @@
                     <option value="">— не выбрано —</option>
                 </select>
             </label>
-            <label id="user-admin-locations-row" class="hidden">Доступные точки администратора
+            <label id="user-admin-locations-row" class="hidden">Доступные точки управляющего
                 <select id="user-admin-locations" multiple size="6"></select>
-                <span class="muted-text">Для администратора можно выбрать несколько точек. Удерживайте Ctrl/Cmd для множественного выбора.</span>
+                <span class="muted-text">Для управляющего можно выбрать несколько точек. Удерживайте Ctrl/Cmd для множественного выбора.</span>
             </label>
             <label class="checkbox-row">
                 <input type="checkbox" id="user-active" checked>
@@ -318,7 +318,7 @@
         <div class="modal-header">
             <div>
                 <h2>Редактировать расхождение</h2>
-                <p class="muted-text">Измените фактическое количество и подтвердите действие паролем текущего администратора точки.</p>
+                <p class="muted-text">Измените фактическое количество и подтвердите действие паролем текущего управляющего точки.</p>
             </div>
             <button id="close-edit-discrepancy-modal-btn" class="btn secondary btn-inline" type="button">Закрыть</button>
         </div>
@@ -331,7 +331,7 @@
             <label>Новый факт
                 <input type="number" id="edit-discrepancy-actual" min="0" step="0.001" required>
             </label>
-            <label>Пароль текущего администратора
+            <label>Пароль текущего управляющего
                 <input type="password" id="edit-discrepancy-password" autocomplete="current-password" required>
             </label>
             <div class="form-actions">
