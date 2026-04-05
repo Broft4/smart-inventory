@@ -87,6 +87,30 @@ function monthLabel(monthValue) {
     return new Intl.DateTimeFormat('ru-RU', { month: 'long', year: 'numeric' }).format(new Date(year, month - 1, 1));
 }
 
+function monthOptionsAroundToday({ past = 12, future = 3 } = {}) {
+    const now = new Date();
+    const baseYear = now.getFullYear();
+    const baseMonth = now.getMonth();
+    const options = [];
+    for (let offset = -past; offset <= future; offset += 1) {
+        const current = new Date(baseYear, baseMonth + offset, 1);
+        const value = `${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, '0')}`;
+        options.push({ value, label: monthLabel(value) });
+    }
+    return options;
+}
+
+function populateMonthSelect(inputId, selectedValue = monthIso()) {
+    const select = qs(inputId);
+    if (!select || select.tagName !== 'SELECT') return;
+    const currentValue = selectedValue || select.value || monthIso();
+    const options = monthOptionsAroundToday();
+    select.innerHTML = options.map(({ value, label }) => `<option value="${value}">${escapeHtml(label)}</option>`).join('');
+    if (options.some((item) => item.value === currentValue)) {
+        select.value = currentValue;
+    }
+}
+
 
 function captureSettingsDraftFromUi() {
     if (!isAdminRole() || !qs('admin-settings-card') || qs('admin-settings-card').classList.contains('hidden')) return null;
@@ -225,7 +249,7 @@ function setDefaultDates() {
     if (qs('payroll-date-to')) qs('payroll-date-to').value = todayIso();
     if (qs('settings-effective-from')) qs('settings-effective-from').value = todayIso();
     if (qs('shift-month-input')) qs('shift-month-input').value = monthIso();
-    if (qs('expenses-month-input')) qs('expenses-month-input').value = monthIso();
+    populateMonthSelect('expenses-month-input', monthIso());
     if (qs('shift-date-input')) qs('shift-date-input').value = todayIso();
 }
 
@@ -360,13 +384,16 @@ function setEmployeePayrollView(view) {
 
 function mergeCategoryCatalog(...sources) {
     const result = [];
-    const seen = new Set();
+    const seenIds = new Set();
+    const seenNames = new Set();
     sources.flat().forEach((item) => {
         if (!item) return;
         const id = String(item.category_id || item.id || '').trim();
         const name = String(item.category_name || item.name || '').trim();
-        if (!id || !name || seen.has(id)) return;
-        seen.add(id);
+        const nameKey = normalizeSearch(name);
+        if (!id || !name || seenIds.has(id) || seenNames.has(nameKey)) return;
+        seenIds.add(id);
+        seenNames.add(nameKey);
         result.push({ id, name });
     });
     result.sort((left, right) => left.name.localeCompare(right.name, 'ru'));
@@ -1019,12 +1046,10 @@ async function loadSetupForLocation() {
     payrollState.settings = setup.settings;
     payrollState.employees = setup.employees || [];
     payrollState.admins = setup.admins || [];
-    mergeCategoryCatalog(payrollState.settings?.category_rates || []);
+    mergeCategoryCatalog(setup.categories || [], payrollState.settings?.category_rates || []);
     resetSettingsDraft();
     renderUsersForLocation();
     renderSettings();
-
-    await refreshCategoryCatalogForLocation({ showWarning: true, preserveSettingsDraft: true });
 
     await Promise.all([
         loadShiftCalendar(),
@@ -1181,11 +1206,10 @@ async function saveSettings() {
         payrollState.settings = response.settings || payrollState.settings;
         payrollState.employees = response.employees || payrollState.employees;
         payrollState.admins = response.admins || payrollState.admins;
-        mergeCategoryCatalog(payrollState.categoryCatalog || [], payrollState.settings?.category_rates || []);
+        mergeCategoryCatalog(response.categories || payrollState.categoryCatalog || [], payrollState.settings?.category_rates || []);
         resetSettingsDraft();
         renderUsersForLocation();
         renderSettings();
-        await refreshCategoryCatalogForLocation({ preserveSettingsDraft: false });
         await Promise.all([
             loadShiftCalendar(),
             loadExpenseTemplatesAndEntries(),
@@ -1403,6 +1427,9 @@ async function createManualExpense() {
     }
 }
 
+window.createExpenseTemplate = createExpenseTemplate;
+window.createManualExpense = createManualExpense;
+
 window.deleteExpenseEntry = async function deleteExpenseEntry(id) {
     if (!confirm('Удалить этот свободный расход?')) return;
     try {
@@ -1510,7 +1537,10 @@ document.addEventListener('keydown', (event) => {
     }
 });
 
+let lastViewportWidth = window.innerWidth;
 window.addEventListener('resize', () => {
+    if (window.innerWidth === lastViewportWidth) return;
+    lastViewportWidth = window.innerWidth;
     if (payrollState.summary) {
         renderSummary(payrollState.summary);
     }

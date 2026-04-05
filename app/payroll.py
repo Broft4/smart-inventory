@@ -706,26 +706,8 @@ async def _list_location_admins(point: LocationPoint, db: AsyncSession) -> list[
     ).all()
 
 
-async def get_location_payroll_setup(location: str, db: AsyncSession, current_user: User) -> dict[str, Any]:
-    await ensure_user_can_access_location(current_user, location, db)
-    point = await _get_location_point_by_name(location, db)
-    settings = await _ensure_default_payroll_settings(point, db)
-    rates = await _get_settings_rates(settings.id, db)
-    employees = await _list_location_employees(point, db)
-    admins = await _list_location_admins(point, db)
-    return {
-        'location': point.name,
-        'location_id': point.id,
-        'settings': _serialize_settings_version_payload(settings, rates),
-        'employees': [{'id': item.id, 'full_name': item.full_name} for item in employees],
-        'admins': [{'id': item.id, 'full_name': item.full_name} for item in admins],
-    }
-
-
-async def get_payroll_category_catalog(location: str, db: AsyncSession, current_user: User) -> dict[str, Any]:
-    await ensure_user_can_access_location(current_user, location, db)
-    point = await _get_location_point_by_name(location, db)
-    normalized = _normalize_location(location)
+async def _collect_payroll_category_catalog(point: LocationPoint, db: AsyncSession) -> dict[str, Any]:
+    normalized = _normalize_location(point.name)
     categories: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     seen_names: dict[str, str] = {}
@@ -738,49 +720,27 @@ async def get_payroll_category_catalog(location: str, db: AsyncSession, current_
         name_key = _normalize_category_name_key(normalized_name)
         if normalized_id in seen_ids:
             return
-        # Если уже есть та же категория по имени с осмысленным id, не плодим дубликаты с другим id.
-        if name_key and name_key in seen_names:
+        if name_key in seen_names:
             return
         seen_ids.add(normalized_id)
-        if name_key:
-            seen_names[name_key] = normalized_id
+        seen_names[name_key] = normalized_id
         categories.append({'id': normalized_id, 'name': normalized_name})
 
-    # 1) Категории из всех сохраненных версий правил по точке.
-    historical_rate_rows = (
-        await db.execute(
-            select(PayrollCategoryRateVersion.category_id, PayrollCategoryRateVersion.category_name)
-            .join(PayrollSettingsVersion, PayrollCategoryRateVersion.settings_version_id == PayrollSettingsVersion.id)
-            .where(PayrollSettingsVersion.location_point_id == point.id)
-            .order_by(PayrollCategoryRateVersion.category_name.asc())
-        )
-    ).all()
-    for category_id, category_name in historical_rate_rows:
-        _append_category(category_id, category_name)
-
-    # 1.1) Категории из истории сохранений правил, включая нулевые проценты.
-    audit_rows = (
+    # 1) Берём категории из сохранённых данных: правил, ревизий, снимков закрытых смен.
+    settings_versions = (
         await db.scalars(
-            select(PayrollAuditLog)
-            .where(
-                PayrollAuditLog.location_point_id == point.id,
-                PayrollAuditLog.entity_type == 'payroll_settings',
-            )
-            .order_by(PayrollAuditLog.id.desc())
-            .limit(200)
+            select(PayrollSettingsVersion)
+            .where(PayrollSettingsVersion.location_point_id == point.id)
+            .order_by(PayrollSettingsVersion.effective_from.desc(), PayrollSettingsVersion.id.desc())
+            .limit(50)
         )
     ).all()
-    for audit_row in audit_rows:
-        try:
-            details = json.loads(audit_row.details_json or '{}')
-        except (TypeError, ValueError, json.JSONDecodeError):
-            details = {}
-        for item in details.get('category_rates') or []:
-            _append_category(item.get('category_id') or item.get('id'), item.get('category_name') or item.get('name'))
+    for settings in settings_versions:
+        rates = await _get_settings_rates(settings.id, db)
+        for item in rates.values():
+            _append_category(item.get('category_id'), item.get('category_name'))
 
-    # 1.2) Категории из локальной истории ревизий/снапшотов по этой точке.
     revision_queries = [
-        select(SelectionTarget.category_id, SelectionTarget.category_name).where(SelectionTarget.location == normalized),
         select(SelectionTargetDay.category_id, SelectionTargetDay.category_name).where(SelectionTargetDay.location == normalized),
         select(CategoryAssignment.category_id, CategoryAssignment.category_name).where(CategoryAssignment.location == normalized),
         select(ReportTargetSnapshot.category_id, ReportTargetSnapshot.category_name)
@@ -794,7 +754,6 @@ async def get_payroll_category_catalog(location: str, db: AsyncSession, current_
         for category_id, category_name in (await db.execute(query.distinct())).all():
             _append_category(category_id, category_name)
 
-    # 1.3) Категории из снимков закрытых смен — это помогает, даже если по текущей дате продаж нет.
     snapshot_rows = (
         await db.execute(
             select(ShiftPayrollCategorySnapshot.category_id, ShiftPayrollCategorySnapshot.category_name)
@@ -806,7 +765,6 @@ async def get_payroll_category_catalog(location: str, db: AsyncSession, current_
     for category_id, category_name in snapshot_rows:
         _append_category(category_id, category_name)
 
-    # 2) Категории из кеша метрик продаж — здесь бывают категории, которых уже нет в остатках.
     metric_rows = (
         await db.scalars(
             select(PayrollDailyMetricCache)
@@ -823,12 +781,10 @@ async def get_payroll_category_catalog(location: str, db: AsyncSession, current_
         for item in parsed_categories or []:
             _append_category(item.get('category_id'), item.get('category_name'))
 
-    # 3) Пытаемся подтянуть полный каталог из МоегоСклада.
     try:
         if _ms_client_enabled(token=_point_ms_token(point), location=normalized):
             token = _point_ms_token(point)
             folder_map = await ms_client._get_folder_map(token=token, location=normalized)
-            # Берём верхнюю категорию для каждой папки, а не только "явные" корни.
             for folder_id, folder in folder_map.items():
                 chain = ms_client._resolve_folder_chain(str(folder_id or '').strip(), folder_map)
                 if not chain:
@@ -855,6 +811,32 @@ async def get_payroll_category_catalog(location: str, db: AsyncSession, current_
 
     categories.sort(key=lambda item: item['name'].lower())
     return {'location': normalized, 'categories': categories}
+
+
+async def get_location_payroll_setup(location: str, db: AsyncSession, current_user: User) -> dict[str, Any]:
+    await ensure_user_can_access_location(current_user, location, db)
+    point = await _get_location_point_by_name(location, db)
+    settings = await _ensure_default_payroll_settings(point, db)
+    rates = await _get_settings_rates(settings.id, db)
+    employees = await _list_location_employees(point, db)
+    admins = await _list_location_admins(point, db)
+    category_catalog = await _collect_payroll_category_catalog(point, db)
+    return {
+        'location': point.name,
+        'location_id': point.id,
+        'settings': _serialize_settings_version_payload(settings, rates),
+        'employees': [{'id': item.id, 'full_name': item.full_name} for item in employees],
+        'admins': [{'id': item.id, 'full_name': item.full_name} for item in admins],
+        'categories': category_catalog.get('categories', []),
+    }
+
+
+async def get_payroll_category_catalog(location: str, db: AsyncSession, current_user: User) -> dict[str, Any]:
+    await ensure_user_can_access_location(current_user, location, db)
+    point = await _get_location_point_by_name(location, db)
+    return await _collect_payroll_category_catalog(point, db)
+
+    
 
 
 async def update_location_payroll_settings(payload: PayrollSettingsUpdateRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
@@ -2253,7 +2235,7 @@ async def close_shift(shift_id: int, db: AsyncSession, actor_user: User | None, 
         if actor_user.role in {'admin', 'superadmin'}:
             await ensure_user_can_access_location(actor_user, point.name, db)
     if shift.status == 'closed':
-        computed = await _build_computed_shift(shift, db, force_refresh_metrics=force_refresh_metrics)
+        computed = await _build_computed_shift(shift, db)
         return {'success': True, 'message': 'Смена уже закрыта.', 'shift': _serialize_computed_shift(computed)}
 
     computed = await _build_computed_shift(shift, db)
@@ -2768,7 +2750,7 @@ async def rebuild_closed_shift_snapshots(date_from: date, date_to: date, db: Asy
             await db.delete(snapshot)
             await db.flush()
 
-        computed = await _build_computed_shift(shift, db)
+        computed = await _build_computed_shift(shift, db, force_refresh_metrics=force_refresh_metrics)
         new_snapshot = ShiftPayrollSnapshot(
             shift_id=shift.id,
             location_point_id=shift.location_point_id,
