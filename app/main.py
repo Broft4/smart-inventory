@@ -185,7 +185,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260405-employee-payroll-shifts-v8'
+templates.env.globals['asset_version'] = '20260406-payroll-settings-date-fix-v12'
 
 
 @app.middleware('http')
@@ -742,8 +742,8 @@ async def api_payroll_categories(location: str, user: User = Depends(require_use
 
 
 @app.get('/api/payroll/settings')
-async def api_payroll_settings(location: str, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
-    return await get_location_payroll_setup(location, db, user)
+async def api_payroll_settings(location: str, effective_from: date | None = None, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
+    return await get_location_payroll_setup(location, db, user, effective_from=effective_from)
 
 
 @app.put('/api/payroll/settings')

@@ -1591,6 +1591,29 @@ body.modal-open {
     margin-top: 10px;
 }
 
+.payroll-inline-loading {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    border-radius: 999px;
+    background: #eef4ff;
+    color: #1f4aa8;
+    font-size: 14px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.payroll-inline-loading .btn-loader {
+    border-color: rgba(31, 74, 168, 0.22);
+    border-top-color: #1f4aa8;
+}
+
+.settings-category-grid.is-loading {
+    opacity: 0.55;
+    pointer-events: none;
+}
+
 .payroll-day-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));

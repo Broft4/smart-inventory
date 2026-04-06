@@ -502,7 +502,7 @@ function renderShiftCalendar() {
 async function loadSetupForLocation() {
     const location = selectedLocation();
     if (!location) return;
-    const setup = await api(`/api/payroll/settings?location=${encodeURIComponent(location)}`);
+    const setup = await api(`/api/payroll/shifts/setup?location=${encodeURIComponent(location)}`);
     shiftsState.employees = setup.employees || [];
     renderEmployees();
 }

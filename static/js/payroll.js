@@ -5,6 +5,7 @@ const payrollState = {
     admins: [],
     settings: null,
     categoryCatalog: [],
+    requestedSettingsEffectiveFrom: '',
     summary: null,
     managerSummary: null,
     templates: [],
@@ -238,6 +239,39 @@ function todayIso() {
 
 function monthIso() {
     return todayIso().slice(0, 7);
+}
+
+function payrollSettingsDateStorageKey(location) {
+    const normalizedLocation = String(location || '').trim() || '__default__';
+    return `payroll-settings-effective-from:${normalizedLocation}`;
+}
+
+function getStoredSettingsEffectiveFrom(location) {
+    try {
+        return window.localStorage.getItem(payrollSettingsDateStorageKey(location)) || '';
+    } catch {
+        return '';
+    }
+}
+
+function storeSettingsEffectiveFrom(location, value) {
+    const normalizedValue = String(value || '').trim();
+    if (!location) return;
+    try {
+        if (normalizedValue) {
+            window.localStorage.setItem(payrollSettingsDateStorageKey(location), normalizedValue);
+        } else {
+            window.localStorage.removeItem(payrollSettingsDateStorageKey(location));
+        }
+    } catch {
+        // ignore localStorage errors
+    }
+}
+
+function selectedSettingsEffectiveFrom() {
+    const inputValue = String(qs('settings-effective-from')?.value || '').trim();
+    if (inputValue) return inputValue;
+    return getStoredSettingsEffectiveFrom(selectedLocation()) || '';
 }
 
 function setDefaultDates() {
@@ -746,7 +780,8 @@ function renderSettings() {
     card.classList.remove('hidden');
     const settings = payrollState.settings || {};
     const selectedBonusCategories = new Set(settings.bonus_category_ids || []);
-    qs('settings-effective-from').value = settings.effective_from || todayIso();
+    const effectiveFromInputValue = payrollState.requestedSettingsEffectiveFrom || settings.effective_from || getStoredSettingsEffectiveFrom(selectedLocation()) || todayIso();
+    qs('settings-effective-from').value = effectiveFromInputValue;
     qs('settings-exit').value = settings.exit_amount ?? 2000;
     qs('settings-threshold').value = settings.bonus_threshold ?? 40000;
     qs('settings-bonus').value = settings.bonus_amount ?? 500;
@@ -1033,7 +1068,11 @@ async function loadSetupForLocation() {
     if (!location) return;
     stopRecalcPolling();
     payrollState.activeRecalcJob = null;
-    const setup = await api(`/api/payroll/settings?location=${encodeURIComponent(location)}`);
+    const requestedEffectiveFrom = selectedSettingsEffectiveFrom() || getStoredSettingsEffectiveFrom(location);
+    const effectiveFromQuery = requestedEffectiveFrom ? `&effective_from=${encodeURIComponent(requestedEffectiveFrom)}` : '';
+    const setup = await api(`/api/payroll/settings?location=${encodeURIComponent(location)}${effectiveFromQuery}`);
+    payrollState.requestedSettingsEffectiveFrom = setup.requested_effective_from || requestedEffectiveFrom || setup.settings?.effective_from || '';
+    storeSettingsEffectiveFrom(location, payrollState.requestedSettingsEffectiveFrom);
     payrollState.settings = setup.settings;
     payrollState.employees = setup.employees || [];
     payrollState.admins = setup.admins || [];
@@ -1169,7 +1208,11 @@ async function saveSettings() {
     showScopedStatus('settings-status', 'Сохраняем правила...', 'loading');
     setButtonLoading(button, true, 'Сохраняем...');
     try {
+        payrollState.requestedSettingsEffectiveFrom = payload.effective_from || '';
+        storeSettingsEffectiveFrom(selectedLocation(), payrollState.requestedSettingsEffectiveFrom);
         const response = await api('/api/payroll/settings', { method: 'PUT', body: JSON.stringify(payload) });
+        payrollState.requestedSettingsEffectiveFrom = response.requested_effective_from || payload.effective_from || payrollState.requestedSettingsEffectiveFrom;
+        storeSettingsEffectiveFrom(selectedLocation(), payrollState.requestedSettingsEffectiveFrom);
         payrollState.settings = response.settings || payrollState.settings;
         payrollState.employees = response.employees || payrollState.employees;
         payrollState.admins = response.admins || payrollState.admins;
@@ -1470,8 +1513,21 @@ async function bootstrap() {
 }
 
 qs('payroll-location-select').addEventListener('change', async () => {
+    const location = selectedLocation();
+    payrollState.requestedSettingsEffectiveFrom = getStoredSettingsEffectiveFrom(location) || '';
     await loadSetupForLocation();
     await loadSummary();
+});
+qs('settings-effective-from')?.addEventListener('change', async (event) => {
+    const nextValue = String(event?.target?.value || '').trim();
+    payrollState.requestedSettingsEffectiveFrom = nextValue;
+    storeSettingsEffectiveFrom(selectedLocation(), nextValue);
+    try {
+        await loadSetupForLocation();
+    } catch (error) {
+        console.error(error);
+        showScopedStatus('settings-status', error.message || 'Не удалось загрузить правила на выбранную дату.', 'error');
+    }
 });
 qs('payroll-employee-select')?.addEventListener('change', loadSummary);
 qs('settings-add-manager-bracket-btn')?.addEventListener('click', () => window.addManagerBracket());
