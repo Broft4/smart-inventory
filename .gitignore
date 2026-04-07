@@ -7,3 +7,7 @@ __pycache__/
 .DS_Store
 inventory.db
 .inventory.db
+inventory.db-wal
+inventory.db-shm
+*.db-wal
+*.db-shm
