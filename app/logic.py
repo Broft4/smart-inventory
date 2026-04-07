@@ -701,6 +701,8 @@ def bootstrap_schema_and_admin(sync_conn) -> None:
         cols = {c['name'] for c in inspector.get_columns('expense_templates')}
         if 'created_by_user_id' not in cols:
             sync_conn.execute(text('ALTER TABLE expense_templates ADD COLUMN created_by_user_id INTEGER'))
+        if 'day_of_month' not in cols:
+            sync_conn.execute(text('ALTER TABLE expense_templates ADD COLUMN day_of_month INTEGER NOT NULL DEFAULT 1'))
 
     if 'monthly_expense_entries' in tables:
         cols = {c['name'] for c in inspector.get_columns('monthly_expense_entries')}
@@ -710,6 +712,9 @@ def bootstrap_schema_and_admin(sync_conn) -> None:
             sync_conn.execute(text('ALTER TABLE monthly_expense_entries ADD COLUMN comment TEXT'))
         if 'created_by_user_id' not in cols:
             sync_conn.execute(text('ALTER TABLE monthly_expense_entries ADD COLUMN created_by_user_id INTEGER'))
+        if 'expense_date' not in cols:
+            sync_conn.execute(text('ALTER TABLE monthly_expense_entries ADD COLUMN expense_date DATE'))
+            sync_conn.execute(text('UPDATE monthly_expense_entries SET expense_date = month_start WHERE expense_date IS NULL'))
 
     if reset_reports:
         sync_conn.execute(text('DROP TABLE IF EXISTS check_results'))
