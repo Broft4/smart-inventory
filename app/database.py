@@ -12,7 +12,7 @@ engine = create_async_engine(
     settings.database_url,
     echo=False,
     pool_pre_ping=True,
-    connect_args={'timeout': 30},
+    connect_args={'timeout': 60},
 )
 
 
@@ -25,7 +25,7 @@ def _configure_sqlite_connection(dbapi_connection, connection_record) -> None:  
         cursor = dbapi_connection.cursor()
         cursor.execute('PRAGMA journal_mode=WAL')
         cursor.execute('PRAGMA synchronous=NORMAL')
-        cursor.execute('PRAGMA busy_timeout=30000')
+        cursor.execute('PRAGMA busy_timeout=60000')
         cursor.execute('PRAGMA foreign_keys=ON')
         cursor.close()
     except Exception:

@@ -21,6 +21,7 @@ const payrollState = {
     activeRecalcJob: null,
     recalcPollTimer: null,
     lastViewportWidth: window.innerWidth || 0,
+    expensesCollapsed: true,
 };
 
 function qs(id) {
@@ -909,52 +910,102 @@ function renderTemplates() {
 }
 
 
+function expenseEmployeeName(entry) {
+    if (!entry?.assigned_employee_user_id) return 'Без привязки';
+    return payrollState.employees.find(item => Number(item.id) === Number(entry.assigned_employee_user_id))?.full_name || 'Сотрудник';
+}
+
+function syncExpenseEntriesToggle() {
+    const list = qs('expense-entry-tbody');
+    const button = qs('expense-entries-toggle-btn');
+    if (!list || !button) return;
+    const hidden = list.classList.contains('hidden');
+    button.textContent = hidden ? 'Развернуть расходы' : 'Свернуть расходы';
+}
+
+function toggleExpenseEntries() {
+    const list = qs('expense-entry-tbody');
+    if (!list) return;
+    list.classList.toggle('hidden');
+    payrollState.expensesCollapsed = list.classList.contains('hidden');
+    syncExpenseEntriesToggle();
+}
+
+function syncExpenseEntryToggle(details) {
+    if (!details) return;
+    const toggle = details.querySelector('.expense-entry-toggle-text');
+    if (!toggle) return;
+    toggle.textContent = details.open ? 'Свернуть' : 'Развернуть';
+}
+
 function renderExpenses() {
     const employeeOptions = ['<option value="">Без привязки</option>', ...payrollState.employees.map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}</option>`)].join('');
-    qs('expense-entry-tbody').innerHTML = (payrollState.expenses || []).map(entry => `
-        <article class="expense-entry-card ${entry.is_manual ? 'manual' : ''}">
-            <div class="expense-entry-head">
+    const list = qs('expense-entry-tbody');
+    if (!list) return;
+    list.innerHTML = (payrollState.expenses || []).map(entry => {
+        const title = escapeHtml(entry.name || entry.template_name || 'Расход');
+        const subtitle = entry.is_manual
+            ? 'Свободный расход без шаблона'
+            : `${entry.amount_type === 'static' ? 'Статический расход' : 'Динамический расход'} · месяц ${escapeHtml(entry.month_start || '')}`;
+        const employeeName = escapeHtml(expenseEmployeeName(entry));
+        const paidLabel = entry.is_paid ? 'Оплачен' : 'Не оплачен';
+        const amountLabel = formatMoney(entry.amount);
+        return `
+        <details class="expense-entry-card ${entry.is_manual ? 'manual' : ''} expense-entry-card--accordion">
+            <summary class="expense-entry-toggle">
                 <div>
-                    <h4>${escapeHtml(entry.name || entry.template_name || 'Расход')}</h4>
-                    <p class="muted-text">${entry.is_manual ? 'Свободный расход без шаблона' : `${entry.amount_type === 'static' ? 'Статический расход' : 'Динамический расход'} · месяц ${escapeHtml(entry.month_start || '')}`}</p>
+                    <h4>${title}</h4>
+                    <p class="muted-text">${subtitle}</p>
                 </div>
-                <span class="status-chip ${entry.is_paid ? 'green' : 'orange'}">${entry.is_paid ? 'Оплачен' : 'Не оплачен'}</span>
+                <div class="expense-entry-toggle-side">
+                    <span class="expense-entry-badge">${amountLabel}</span>
+                    <span class="muted-text expense-entry-toggle-meta">${employeeName} · ${paidLabel}</span>
+                    <span class="btn secondary btn-inline expense-entry-toggle-text">Развернуть</span>
+                </div>
+            </summary>
+            <div class="expense-entry-accordion-body">
+                <div class="expense-entry-form">
+                    <label>
+                        Сумма
+                        <input type="number" min="0" step="0.01" data-expense-amount="${entry.id}" value="${entry.amount}">
+                    </label>
+                    <label>
+                        Сотрудник
+                        <select data-expense-employee="${entry.id}">${employeeOptions}</select>
+                    </label>
+                    <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline">
+                        <input type="checkbox" data-expense-paid="${entry.id}" ${entry.is_paid ? 'checked' : ''}>
+                        Уже оплачен
+                    </label>
+                    <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline">
+                        <input type="checkbox" data-expense-apply="${entry.id}" ${entry.apply_to_employee_salary ? 'checked' : ''}>
+                        Вычитать из зарплаты сотрудника
+                    </label>
+                    <label class="expense-comment-field expense-entry-comment">
+                        Комментарий
+                        <textarea rows="3" data-expense-comment="${entry.id}" placeholder="Комментарий к расходу">${escapeHtml(entry.comment || '')}</textarea>
+                    </label>
+                </div>
+                <div class="expense-entry-actions">
+                    <button type="button" class="btn secondary btn-inline btn-with-loader" data-expense-save="${entry.id}" onclick="saveExpenseEntry(${entry.id})">
+                        <span class="btn-loader hidden" aria-hidden="true"></span>
+                        <span class="btn-label">Сохранить расход</span>
+                    </button>
+                    ${entry.is_manual ? `<button type="button" class="btn danger btn-inline" onclick="deleteExpenseEntry(${entry.id})">Удалить</button>` : ''}
+                </div>
+                <div id="expense-status-${entry.id}" class="inventory-status hidden save-action-status"></div>
             </div>
-            <div class="expense-entry-form">
-                <label>
-                    Сумма
-                    <input type="number" min="0" step="0.01" data-expense-amount="${entry.id}" value="${entry.amount}">
-                </label>
-                <label>
-                    Сотрудник
-                    <select data-expense-employee="${entry.id}">${employeeOptions}</select>
-                </label>
-                <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline">
-                    <input type="checkbox" data-expense-paid="${entry.id}" ${entry.is_paid ? 'checked' : ''}>
-                    Уже оплачен
-                </label>
-                <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline">
-                    <input type="checkbox" data-expense-apply="${entry.id}" ${entry.apply_to_employee_salary ? 'checked' : ''}>
-                    Вычитать из зарплаты сотрудника
-                </label>
-                <label class="expense-comment-field expense-entry-comment">
-                    Комментарий
-                    <textarea rows="3" data-expense-comment="${entry.id}" placeholder="Комментарий к расходу">${escapeHtml(entry.comment || '')}</textarea>
-                </label>
-            </div>
-            <div class="expense-entry-actions">
-                <button type="button" class="btn secondary btn-inline btn-with-loader" data-expense-save="${entry.id}" onclick="saveExpenseEntry(${entry.id})">
-                    <span class="btn-loader hidden" aria-hidden="true"></span>
-                    <span class="btn-label">Сохранить расход</span>
-                </button>
-                ${entry.is_manual ? `<button type="button" class="btn danger btn-inline" onclick="deleteExpenseEntry(${entry.id})">Удалить</button>` : ''}
-            </div>
-            <div id="expense-status-${entry.id}" class="inventory-status hidden save-action-status"></div>
-        </article>
-    `).join('') || '<div class="empty-text">Нет расходов за выбранный месяц.</div>';
+        </details>`;
+    }).join('') || '<div class="empty-text">Нет расходов за выбранный месяц.</div>';
     (payrollState.expenses || []).forEach(entry => {
         const select = document.querySelector(`[data-expense-employee="${entry.id}"]`);
         if (select && entry.assigned_employee_user_id) select.value = String(entry.assigned_employee_user_id);
+    });
+    list.classList.toggle('hidden', payrollState.expensesCollapsed);
+    syncExpenseEntriesToggle();
+    list.querySelectorAll('.expense-entry-card--accordion').forEach((details) => {
+        syncExpenseEntryToggle(details);
+        details.addEventListener('toggle', () => syncExpenseEntryToggle(details));
     });
 }
 
@@ -1546,6 +1597,7 @@ qs('shift-modal')?.addEventListener('click', (event) => {
     if (event.target === qs('shift-modal')) closeShiftModal();
 });
 qs('expense-templates-toggle-btn')?.addEventListener('click', toggleExpenseTemplates);
+qs('expense-entries-toggle-btn')?.addEventListener('click', toggleExpenseEntries);
 qs('audit-toggle-btn')?.addEventListener('click', () => {
     const list = qs('audit-log-list');
     const button = qs('audit-toggle-btn');

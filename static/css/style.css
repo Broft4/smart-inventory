@@ -1591,29 +1591,6 @@ body.modal-open {
     margin-top: 10px;
 }
 
-.payroll-inline-loading {
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 14px;
-    border-radius: 999px;
-    background: #eef4ff;
-    color: #1f4aa8;
-    font-size: 14px;
-    font-weight: 700;
-    white-space: nowrap;
-}
-
-.payroll-inline-loading .btn-loader {
-    border-color: rgba(31, 74, 168, 0.22);
-    border-top-color: #1f4aa8;
-}
-
-.settings-category-grid.is-loading {
-    opacity: 0.55;
-    pointer-events: none;
-}
-
 .payroll-day-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
@@ -1890,6 +1867,7 @@ body.modal-open {
     gap: 6px;
 }
 
+.shift-calendar-mobile-add-btn,
 .shift-calendar-mobile-remove-btn {
     display: none;
     width: 24px;
@@ -1897,13 +1875,20 @@ body.modal-open {
     min-width: 24px;
     border: none;
     border-radius: 999px;
-    background: #dc3545;
     color: #fff;
     font-size: 18px;
     line-height: 1;
     align-items: center;
     justify-content: center;
     cursor: pointer;
+}
+
+.shift-calendar-mobile-add-btn {
+    background: #2563eb;
+}
+
+.shift-calendar-mobile-remove-btn {
+    background: #dc3545;
 }
 
 .shift-calendar-mobile-remove-btn--inline {
@@ -2066,6 +2051,60 @@ body.modal-open {
     margin-top: 14px;
     display: flex;
     justify-content: flex-end;
+}
+
+.expense-entry-card--accordion {
+    padding: 0;
+    overflow: hidden;
+}
+
+.expense-entry-card--accordion[open] {
+    border-color: rgba(37, 99, 235, 0.22);
+    box-shadow: 0 12px 28px rgba(37, 99, 235, 0.08);
+}
+
+.expense-entry-toggle {
+    list-style: none;
+    cursor: pointer;
+    padding: 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+}
+
+.expense-entry-toggle::-webkit-details-marker {
+    display: none;
+}
+
+.expense-entry-toggle-side {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.expense-entry-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 7px 12px;
+    border-radius: 999px;
+    background: #eef4ff;
+    color: #1f4aa8;
+    font-size: 15px;
+    font-weight: 800;
+    white-space: nowrap;
+}
+
+.expense-entry-toggle-meta {
+    white-space: nowrap;
+}
+
+.expense-entry-accordion-body {
+    padding: 0 16px 16px;
+    border-top: 1px solid #e7edf4;
 }
 
 .checkbox-like {
@@ -2266,6 +2305,16 @@ body.modal-open {
     .shift-modal-actions .btn,
     .audit-filter-actions .btn {
         width: 100%;
+    }
+
+    .expense-entry-toggle,
+    .expense-entry-toggle-side {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .expense-entry-toggle-meta {
+        white-space: normal;
     }
 
     .shift-calendar-cell {
@@ -2674,6 +2723,25 @@ body.modal-open {
     margin-bottom: 6px;
 }
 
+.employee-shift-status-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-self: center;
+    margin: 2px auto 4px;
+    box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.04);
+}
+
+.employee-shift-status-dot.closed {
+    background: #16a34a;
+}
+
+.employee-shift-status-dot.open,
+.employee-shift-status-dot.planned {
+    background: #f59e0b;
+}
+
 .employee-shift-compact-total {
     font-size: 11px;
     font-weight: 800;
@@ -2904,6 +2972,11 @@ body.modal-open {
         font-size: 9px;
     }
 
+    .shift-calendar-scroller .shift-calendar-add-btn {
+        display: none;
+    }
+
+    .shift-calendar-scroller .shift-calendar-mobile-add-btn,
     .shift-calendar-scroller .shift-calendar-mobile-remove-btn {
         display: inline-flex;
         width: 18px;
@@ -2911,6 +2984,11 @@ body.modal-open {
         min-width: 18px;
         font-size: 13px;
         box-shadow: none;
+    }
+
+    .shift-calendar-scroller .shift-calendar-mobile-add-btn {
+        order: -1;
+        font-size: 14px;
     }
 
     .shift-calendar-scroller .shift-calendar-mobile-remove-btn--inline {
@@ -2928,6 +3006,12 @@ body.modal-open {
 
     .shift-calendar-scroller .employee-shift-status {
         margin-bottom: 0;
+    }
+
+    .shift-calendar-scroller .employee-shift-status-dot {
+        width: 10px;
+        height: 10px;
+        margin-bottom: 2px;
     }
 
     .shift-calendar-scroller .employee-shift-lines,

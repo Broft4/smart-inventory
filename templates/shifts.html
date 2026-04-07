@@ -96,11 +96,11 @@
 
 
     <section class="category-card">
-        <details class="payroll-collapse" open>
+        <details class="payroll-collapse" id="shift-payroll-section">
             <summary class="report-summary-header payroll-collapse-summary">
                 <div>
                     <h2>Смены</h2>
-                    <p class="muted-text">{% if user.role in ['admin', 'superadmin'] %}Здесь только детализация по сменам: суммы, бонус к выходу и общий бонус по категориям.{% else %}Подробности по вашим сменам: что пришло из выхода, бонуса к выходу и начислений по категориям.{% endif %}</p>
+                    <p class="muted-text">{% if user.role in ['admin', 'superadmin'] %}Здесь только детализация по сменам: суммы, бонус к выходу и общий бонус по категориям. Раздел загружается отдельно, чтобы календарь открывался быстрее.{% else %}Подробности по вашим сменам: что пришло из выхода, бонуса к выходу и начислений по категориям. Раздел загружается отдельно, чтобы календарь открывался быстрее.{% endif %}</p>
                 </div>
                 <span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span>
             </summary>

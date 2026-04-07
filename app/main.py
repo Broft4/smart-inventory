@@ -79,6 +79,7 @@ from app.payroll import (
     export_employee_payroll_xlsx,
     get_employee_payroll_summary,
     get_location_payroll_setup,
+    get_location_shift_setup,
     get_manager_payroll_summary,
     get_payroll_category_catalog,
     get_payroll_recalc_status,
@@ -86,6 +87,7 @@ from app.payroll import (
     list_expense_templates,
     list_monthly_expenses,
     list_payroll_audit_logs,
+    list_work_shift_day_summary,
     list_work_shifts,
     update_expense_template,
     update_location_payroll_settings,
@@ -185,7 +187,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260406-payroll-settings-date-fix-v12'
+templates.env.globals['asset_version'] = '20260405-employee-payroll-shifts-v8'
 
 
 @app.middleware('http')
@@ -746,6 +748,11 @@ async def api_payroll_settings(location: str, effective_from: date | None = None
     return await get_location_payroll_setup(location, db, user, effective_from=effective_from)
 
 
+@app.get('/api/payroll/shifts/setup')
+async def api_payroll_shifts_setup(location: str, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
+    return await get_location_shift_setup(location, db, user)
+
+
 @app.put('/api/payroll/settings')
 async def api_payroll_settings_update(payload: PayrollSettingsUpdateRequest, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
     return await update_location_payroll_settings(payload, db, user)
@@ -760,6 +767,11 @@ async def api_payroll_recalc_status(location: str, job_id: int | None = None, us
 @app.get('/api/payroll/shifts')
 async def api_payroll_shifts(location: str, date_from: date, date_to: date, employee_user_id: int | None = None, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
     return await list_work_shifts(location, date_from, date_to, db, user, employee_user_id=employee_user_id)
+
+
+@app.get('/api/payroll/shifts/day-summary')
+async def api_payroll_shift_day_summary(location: str, date_from: date, date_to: date, employee_user_id: int | None = None, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
+    return await list_work_shift_day_summary(location, date_from, date_to, db, user, employee_user_id=employee_user_id)
 
 
 @app.post('/api/payroll/shifts')

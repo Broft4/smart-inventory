@@ -6,6 +6,8 @@ const shiftsState = {
     payrollDays: [],
     filterMode: 'month',
     selectedDate: '',
+    payrollDaysLoaded: false,
+    payrollDaysLoading: false,
 };
 
 const MONTH_OPTIONS = [
@@ -269,6 +271,32 @@ function renderShiftFilterControls() {
         : 'Выбери конкретную дату в маленьком календаре ниже.';
 }
 
+function setPayrollDaysPlaceholder(message = 'Открой раздел «Смены», чтобы загрузить детализацию по дням.') {
+    const container = qs('shift-payroll-days-container');
+    if (!container) return;
+    container.innerHTML = `<div class="muted-text">${escapeHtml(message)}</div>`;
+}
+
+function isPayrollSectionOpen() {
+    return !!qs('shift-payroll-section')?.open;
+}
+
+async function ensurePayrollDaysLoaded(force = false, options = {}) {
+    const { showLoading = false } = options;
+    if (!force && shiftsState.payrollDaysLoaded) return;
+    if (shiftsState.payrollDaysLoading) return;
+    shiftsState.payrollDaysLoading = true;
+    if (showLoading) {
+        setPayrollDaysPlaceholder('Загружаем детализацию смен...');
+    }
+    try {
+        await loadPayrollDays();
+        shiftsState.payrollDaysLoaded = true;
+    } finally {
+        shiftsState.payrollDaysLoading = false;
+    }
+}
+
 function renderPayrollDays() {
     const container = qs('shift-payroll-days-container');
     if (!container) return;
@@ -356,18 +384,38 @@ function toggleShiftDatePicker(forceOpen = null) {
     if (shouldOpen) renderShiftDatePicker();
 }
 
-function setShiftFilterMode(mode) {
+async function setShiftFilterMode(mode) {
     shiftsState.filterMode = mode === 'date' ? 'date' : 'month';
     if (shiftsState.filterMode === 'month') {
         shiftsState.selectedDate = '';
         toggleShiftDatePicker(false);
+    } else if (!shiftsState.payrollDaysLoaded) {
+        const payrollSection = qs('shift-payroll-section');
+        if (payrollSection && !payrollSection.open) {
+            payrollSection.open = true;
+            syncCollapseToggleText(payrollSection);
+        }
+        try {
+            await ensurePayrollDaysLoaded(false, { showLoading: true });
+        } catch (error) {
+            console.error(error);
+            showStatus(error.message || 'Не удалось загрузить детализацию смен.', 'error');
+        }
     }
     renderShiftFilterControls();
     renderPayrollDays();
 }
 
-function selectShiftDate(dateValue) {
+async function selectShiftDate(dateValue) {
     shiftsState.selectedDate = dateValue;
+    if (!shiftsState.payrollDaysLoaded) {
+        try {
+            await ensurePayrollDaysLoaded(false, { showLoading: true });
+        } catch (error) {
+            console.error(error);
+            showStatus(error.message || 'Не удалось загрузить детализацию смен.', 'error');
+        }
+    }
     renderShiftFilterControls();
     renderShiftDatePicker();
     renderPayrollDays();
@@ -400,8 +448,14 @@ function renderShiftCalendar() {
         const shiftCount = (day.shifts || []).length;
 
         if (adminMode) {
-            const mobileRemoveButtons = shiftCount
-                ? `<div class="shift-calendar-mobile-actions">${day.shifts.map(shift => `
+            const mobileActionButtons = `<div class="shift-calendar-mobile-actions">
+                <button
+                    type="button"
+                    class="shift-calendar-mobile-add-btn"
+                    onclick="openShiftModal('${day.date}')"
+                    aria-label="Назначить смену на ${formatDateRu(day.date)}"
+                    title="Назначить смену на ${formatDateRu(day.date)}"
+                >+</button>${day.shifts.map(shift => `
                     <button
                         type="button"
                         class="shift-calendar-mobile-remove-btn"
@@ -409,8 +463,7 @@ function renderShiftCalendar() {
                         aria-label="Убрать смену ${escapeHtml(shift.employee_name)}"
                         title="Убрать смену ${escapeHtml(shift.employee_name)}"
                     >−</button>
-                `).join('')}</div>`
-                : '';
+                `).join('')}</div>`;
             const miniChips = shiftCount
                 ? `<div class="shift-calendar-mini-list">${day.shifts.slice(0, 4).map(shift => `
                     <span class="shift-calendar-mini-chip ${shift.is_closed ? 'closed' : 'open'}" title="${escapeHtml(shift.employee_name)}">${escapeHtml(initialsFromName(shift.employee_name))}</span>
@@ -453,7 +506,7 @@ function renderShiftCalendar() {
                             <button type="button" class="shift-calendar-add-btn" onclick="openShiftModal('${day.date}')" aria-label="Назначить смену на ${formatDateRu(day.date)}">+</button>
                         </div>
                     </div>
-                    <div class="shift-calendar-cell-body">${shiftCards}${mobileRemoveButtons}</div>
+                    <div class="shift-calendar-cell-body">${shiftCards}${mobileActionButtons}</div>
                 </article>
             `);
             return;
@@ -463,6 +516,7 @@ function renderShiftCalendar() {
         const selectable = isShiftDaySelectable(day);
         let body = '<div class="shift-calendar-empty-day">Смены нет</div>';
         if (shift) {
+            const compactMode = isMobileCompactMode();
             const statusLabel = shift.is_closed ? 'Завершена' : (day.date > today ? 'Назначена' : (day.date === today ? 'Сегодня' : 'Открыта'));
             const statusClass = shift.is_closed ? 'closed' : (day.date > today ? 'planned' : 'open');
             const lines = [
@@ -473,11 +527,16 @@ function renderShiftCalendar() {
             if (shift.is_closed || day.date <= today) {
                 lines.push(`<div class="employee-shift-line total"><span>${shift.is_closed ? 'Итог' : 'Промежуточно'}</span><strong>${formatMoney(shift.gross_salary_amount || 0)}</strong></div>`);
             }
-            body = `
-                <div class="employee-shift-status ${statusClass}">${statusLabel}</div>
-                <div class="employee-shift-lines">${lines.join('')}</div>
-                ${selectable ? `<button type="button" class="btn secondary btn-inline employee-shift-open-btn" onclick="openShiftDay('${day.date}')">Открыть детали</button>` : ''}
-            `;
+            body = compactMode
+                ? `
+                    <div class="employee-shift-status-dot ${statusClass}" aria-label="${statusLabel}" title="${statusLabel}"></div>
+                    ${(shift.is_closed || day.date <= today) ? `<div class="employee-shift-compact-total">${formatMoney(shift.gross_salary_amount || 0)}</div>` : ''}
+                `
+                : `
+                    <div class="employee-shift-status ${statusClass}">${statusLabel}</div>
+                    <div class="employee-shift-lines">${lines.join('')}</div>
+                    ${selectable ? `<button type="button" class="btn secondary btn-inline employee-shift-open-btn" onclick="openShiftDay('${day.date}')">Открыть детали</button>` : ''}
+                `;
         }
 
         cells.push(`
@@ -502,7 +561,12 @@ function renderShiftCalendar() {
 async function loadSetupForLocation() {
     const location = selectedLocation();
     if (!location) return;
-    const setup = await api(`/api/payroll/shifts/setup?location=${encodeURIComponent(location)}`);
+    let setup;
+    try {
+        setup = await api(`/api/payroll/shifts/setup?location=${encodeURIComponent(location)}`);
+    } catch (error) {
+        setup = await api(`/api/payroll/settings?location=${encodeURIComponent(location)}`);
+    }
     shiftsState.employees = setup.employees || [];
     renderEmployees();
 }
@@ -528,7 +592,7 @@ async function loadPayrollDays() {
     const location = selectedLocation();
     const { dateFrom, dateTo } = monthDateRange();
     if (!location || !dateFrom || !dateTo) return;
-    const payload = await api(`/api/payroll/employee-summary?location=${encodeURIComponent(location)}&date_from=${dateFrom}&date_to=${dateTo}`);
+    const payload = await api(`/api/payroll/shifts/day-summary?location=${encodeURIComponent(location)}&date_from=${dateFrom}&date_to=${dateTo}`);
     shiftsState.payrollDays = payload.days || [];
     if (shiftsState.filterMode === 'date' && shiftsState.selectedDate) {
         const day = shiftsState.shiftDays.find(item => item.date === shiftsState.selectedDate);
@@ -541,14 +605,23 @@ async function loadPayrollDays() {
     renderPayrollDays();
 }
 
-async function refreshPageData(showSuccess = true) {
+async function refreshPageData(showSuccess = true, options = {}) {
+    const { forcePayrollReload = false } = options;
     showStatus('Загружаем смены...', 'loading');
     try {
+        if (forcePayrollReload) {
+            shiftsState.payrollDaysLoaded = false;
+        }
         await loadSetupForLocation();
-        await Promise.all([
-            loadShiftCalendar(),
-            loadPayrollDays(),
-        ]);
+        await loadShiftCalendar();
+        if (isPayrollSectionOpen()) {
+            await ensurePayrollDaysLoaded(forcePayrollReload, { showLoading: true });
+        } else {
+            shiftsState.payrollDays = [];
+            if (!shiftsState.payrollDaysLoaded || forcePayrollReload) {
+                setPayrollDaysPlaceholder();
+            }
+        }
         if (showSuccess) {
             showStatus('Данные обновлены.', 'success');
             setTimeout(hideStatus, 1200);
@@ -563,14 +636,25 @@ async function refreshPageData(showSuccess = true) {
 
 window.shiftsRefresh = refreshPageData;
 
-window.openShiftDay = function openShiftDay(dateValue) {
+window.openShiftDay = async function openShiftDay(dateValue) {
     if (!dateValue) return;
     shiftsState.filterMode = 'date';
     shiftsState.selectedDate = dateValue;
     renderShiftFilterControls();
-    renderPayrollDays();
     toggleShiftDatePicker(false);
-    qs('shift-payroll-days-container')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    const payrollSection = qs('shift-payroll-section');
+    if (payrollSection && !payrollSection.open) {
+        payrollSection.open = true;
+        syncCollapseToggleText(payrollSection);
+    }
+    try {
+        await ensurePayrollDaysLoaded(false, { showLoading: true });
+        renderPayrollDays();
+        qs('shift-payroll-days-container')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch (error) {
+        console.error(error);
+        showStatus(error.message || 'Не удалось загрузить детализацию смен.', 'error');
+    }
 };
 
 window.deleteShift = async function deleteShift(id) {
@@ -578,7 +662,7 @@ window.deleteShift = async function deleteShift(id) {
     showScopedStatus('shift-calendar-status', 'Убираем смену...', 'loading');
     try {
         await api(`/api/payroll/shifts/${id}`, { method: 'DELETE' });
-        await refreshPageData(false);
+        await refreshPageData(false, { forcePayrollReload: true });
         showStatus('Смена убрана.', 'success');
         showScopedStatus('shift-calendar-status', 'Смена убрана.', 'success');
         setTimeout(hideStatus, 1200);
@@ -592,7 +676,7 @@ window.closeAdminShift = async function closeAdminShift(id) {
     showScopedStatus('shift-calendar-status', 'Закрываем смену...', 'loading');
     try {
         await api(`/api/payroll/shifts/${id}/close`, { method: 'POST' });
-        await refreshPageData(false);
+        await refreshPageData(false, { forcePayrollReload: true });
         showStatus('Смена закрыта.', 'success');
         showScopedStatus('shift-calendar-status', 'Смена закрыта.', 'success');
         setTimeout(hideStatus, 1200);
@@ -630,7 +714,7 @@ async function saveShiftFromModal() {
         setButtonLoading(button, true, 'Назначаем...');
         await api('/api/payroll/shifts', { method: 'POST', body: JSON.stringify(payload) });
         closeShiftModal();
-        await refreshPageData(false);
+        await refreshPageData(false, { forcePayrollReload: true });
         showStatus('Смена назначена.', 'success');
         showScopedStatus('shift-calendar-status', 'Смена назначена.', 'success');
         setTimeout(hideStatus, 1200);
@@ -643,19 +727,30 @@ async function saveShiftFromModal() {
     }
 }
 
-function handleShiftDatePickerClick(event) {
+async function handleShiftDatePickerClick(event) {
     const target = event.target.closest('[data-shift-picker-date]');
     if (!target || target.disabled) return;
-    selectShiftDate(target.dataset.shiftPickerDate || '');
+    await selectShiftDate(target.dataset.shiftPickerDate || '');
 }
 
 async function bootstrap() {
     renderMonthOptions();
     setDefaults();
     renderShiftFilterControls();
+    setPayrollDaysPlaceholder();
     document.querySelectorAll('.payroll-collapse').forEach((details) => {
         syncCollapseToggleText(details);
-        details.addEventListener('toggle', () => syncCollapseToggleText(details));
+        details.addEventListener('toggle', async () => {
+            syncCollapseToggleText(details);
+            if (details.id === 'shift-payroll-section' && details.open) {
+                try {
+                    await ensurePayrollDaysLoaded(false, { showLoading: true });
+                } catch (error) {
+                    console.error(error);
+                    showStatus(error.message || 'Не удалось загрузить детализацию смен.', 'error');
+                }
+            }
+        });
     });
     shiftsState.locations = fallbackLocations();
     renderLocations();
@@ -663,14 +758,14 @@ async function bootstrap() {
         const access = await api('/api/payroll/access');
         shiftsState.locations = normalizeLocationList(access.locations || []);
         renderLocations();
-        await refreshPageData(false);
+        await refreshPageData(false, { forcePayrollReload: true });
     } catch (error) {
         console.error(error);
         shiftsState.locations = fallbackLocations();
         renderLocations();
         if (selectedLocation()) {
             try {
-                await refreshPageData(false);
+                await refreshPageData(false, { forcePayrollReload: true });
                 showStatus('Список точек из API не загрузился, показана базовая точка.', 'warning');
                 return;
             } catch (fallbackError) {
@@ -696,8 +791,8 @@ qs('shift-month-select')?.addEventListener('change', async () => {
     shiftsState.selectedDate = '';
     await refreshPageData();
 });
-qs('shift-view-all-btn')?.addEventListener('click', () => setShiftFilterMode('month'));
-qs('shift-view-date-btn')?.addEventListener('click', () => setShiftFilterMode('date'));
+qs('shift-view-all-btn')?.addEventListener('click', () => { void setShiftFilterMode('month'); });
+qs('shift-view-date-btn')?.addEventListener('click', () => { void setShiftFilterMode('date'); });
 qs('shift-date-picker-btn')?.addEventListener('click', () => toggleShiftDatePicker());
 qs('shift-date-picker-grid')?.addEventListener('click', handleShiftDatePickerClick);
 qs('shift-modal-save-btn')?.addEventListener('click', saveShiftFromModal);

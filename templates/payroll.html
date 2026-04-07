@@ -231,6 +231,27 @@
                         <div id="create-expense-template-status" class="inventory-status hidden save-action-status"></div>
                     </div>
 
+                    <div class="expense-section">
+                        <div class="expense-section-head expense-section-head--stacked">
+                            <div>
+                                <h3>Расходы за месяц</h3>
+                                <p class="muted-text">Оплата, сотрудник, комментарий и удержание из зарплаты настраиваются по каждой записи отдельно.</p>
+                            </div>
+                            <button id="expense-entries-toggle-btn" type="button" class="btn secondary btn-inline">Развернуть расходы</button>
+                        </div>
+                        <div id="expense-entry-tbody" class="expense-entry-grid hidden"></div>
+                    </div>
+                    <div class="expense-section">
+                        <div class="expense-section-head">
+                            <div>
+                                <h3>Шаблоны расходов</h3>
+                                <p class="muted-text">Шаблоны переходят из месяца в месяц, пока активны.</p>
+                            </div>
+                            <button id="expense-templates-toggle-btn" type="button" class="btn secondary btn-inline">Свернуть шаблоны</button>
+                        </div>
+                        <div id="expense-template-tbody" class="expense-template-grid"></div>
+                    </div>
+
                     <div class="expense-create-card">
                         <div class="expense-section-head">
                             <div>
@@ -253,26 +274,6 @@
                             </button>
                         </div>
                         <div id="create-manual-expense-status" class="inventory-status hidden save-action-status"></div>
-                    </div>
-
-                    <div class="expense-section">
-                        <div class="expense-section-head">
-                            <div>
-                                <h3>Шаблоны расходов</h3>
-                                <p class="muted-text">Шаблоны переходят из месяца в месяц, пока активны.</p>
-                            </div>
-                            <button id="expense-templates-toggle-btn" type="button" class="btn secondary btn-inline">Свернуть шаблоны</button>
-                        </div>
-                        <div id="expense-template-tbody" class="expense-template-grid"></div>
-                    </div>
-                    <div class="expense-section">
-                        <div class="expense-section-head expense-section-head--stacked">
-                            <div>
-                                <h3>Расходы за месяц</h3>
-                                <p class="muted-text">Оплата, сотрудник, комментарий и удержание из зарплаты настраиваются по каждой записи отдельно.</p>
-                            </div>
-                        </div>
-                        <div id="expense-entry-tbody" class="expense-entry-grid"></div>
                     </div>
                 </div>
             </div>
