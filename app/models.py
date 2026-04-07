@@ -343,6 +343,7 @@ class ShiftPayrollCategorySnapshot(Base):
     sales_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     return_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     net_sales_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    cost_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     earning_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     is_other_category: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
@@ -433,6 +434,7 @@ class MonthlyExpenseEntry(Base):
     location_point_id: Mapped[int] = mapped_column(ForeignKey('location_points.id', ondelete='CASCADE'), nullable=False, index=True)
     month_start: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     expense_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    distribution_mode: Mapped[str] = mapped_column(String(20), default='spread', nullable=False)
     custom_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)

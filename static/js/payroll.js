@@ -71,8 +71,107 @@ function formatTimeRu(dateTimeValue) {
     return new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit' }).format(date);
 }
 
+function expenseModeLabel(mode) {
+    return String(mode || '').trim() === 'spread' ? 'Растянуть на месяц' : 'Одним днём';
+}
+
+function defaultManualExpenseDate() {
+    const selectedMonth = selectedMonthStart('expenses-month-input');
+    const today = todayIso();
+    return today.startsWith(selectedMonth.slice(0, 7)) ? today : selectedMonth;
+}
+
+function syncManualExpenseDefaults({ forceDate = false } = {}) {
+    const modeInput = qs('manual-expense-mode');
+    const dateInput = qs('manual-expense-date');
+    if (modeInput && !modeInput.value) {
+        modeInput.value = 'single_day';
+    }
+    if (dateInput && (forceDate || !dateInput.value)) {
+        dateInput.value = defaultManualExpenseDate();
+    }
+}
+
 function normalizeSearch(value) {
     return String(value ?? '').trim().toLowerCase();
+}
+
+const EXCLUDED_PAYROLL_CATEGORY_NAME = 'Без категории';
+
+function isExcludedPayrollCategory(categoryOrName) {
+    const categoryName = typeof categoryOrName === 'string'
+        ? categoryOrName
+        : (categoryOrName?.category_name || categoryOrName?.name || '');
+    const categoryId = typeof categoryOrName === 'object' && categoryOrName
+        ? String(categoryOrName.category_id || categoryOrName.id || '').trim()
+        : '';
+    return categoryId === '__other__' || normalizeSearch(categoryName) === normalizeSearch(EXCLUDED_PAYROLL_CATEGORY_NAME);
+}
+
+function filterVisiblePayrollCategories(categories = []) {
+    return (Array.isArray(categories) ? categories : []).filter((category) => !isExcludedPayrollCategory(category));
+}
+
+function formatApiErrorMessage(payload) {
+    const detail = payload?.detail ?? payload?.message ?? payload;
+
+    const fromValidationItem = (item) => {
+        const loc = Array.isArray(item?.loc) ? item.loc.map(String).join('.') : '';
+        if (loc.includes('name')) {
+            return 'Введите название.';
+        }
+        if (typeof item?.msg === 'string' && item.msg.trim()) {
+            return item.msg.trim();
+        }
+        return '';
+    };
+
+    if (typeof detail === 'string' && detail.trim()) {
+        return detail.trim();
+    }
+    if (Array.isArray(detail)) {
+        const messages = detail
+            .map((item) => {
+                if (typeof item === 'string') return item.trim();
+                if (item && typeof item === 'object') return fromValidationItem(item);
+                return '';
+            })
+            .filter(Boolean);
+        if (messages.length) {
+            return messages[0];
+        }
+    }
+    if (detail && typeof detail === 'object') {
+        if (typeof detail.message === 'string' && detail.message.trim()) {
+            return detail.message.trim();
+        }
+        if (typeof detail.error === 'string' && detail.error.trim()) {
+            return detail.error.trim();
+        }
+    }
+    return 'Ошибка запроса';
+}
+
+function setSettingsCategoryInputsDisabled(disabled) {
+    const card = qs('settings-rates-card');
+    if (!card) return;
+    card.classList.toggle('is-disabled', Boolean(disabled));
+    card.setAttribute('aria-busy', disabled ? 'true' : 'false');
+    card.querySelectorAll('input, select, textarea, button').forEach((element) => {
+        element.disabled = Boolean(disabled);
+    });
+}
+
+function setSettingsLoading(isLoading, text = 'Загружаем настройки...') {
+    const indicators = [qs('settings-section-loading'), qs('settings-category-loading')].filter(Boolean);
+    indicators.forEach((indicator) => {
+        indicator.classList.toggle('hidden', !isLoading);
+        const textNode = indicator.querySelector('[data-loading-text]') || indicator.querySelector('span:last-child');
+        if (textNode) {
+            textNode.textContent = text;
+        }
+    });
+    setSettingsCategoryInputsDisabled(isLoading);
 }
 
 function compactCurrency(value) {
@@ -130,6 +229,22 @@ function normalizeCategoryDisplayNet(category) {
         return 0;
     }
     return raw;
+}
+
+function calculateCategoryProfit(category) {
+    const hasFormulaParts = category && (
+        Object.prototype.hasOwnProperty.call(category, 'net_sales_amount')
+        || Object.prototype.hasOwnProperty.call(category, 'cost_amount')
+        || Object.prototype.hasOwnProperty.call(category, 'earning_amount')
+    );
+    if (hasFormulaParts) {
+        const sumAmount = normalizeCategoryDisplayNet(category);
+        const costAmount = Number(category?.cost_amount || 0);
+        const earningAmount = Number(category?.earning_amount || 0);
+        return sumAmount - costAmount - earningAmount;
+    }
+    const explicitProfit = category?.profit_amount;
+    return Number(explicitProfit || 0);
 }
 
 function stopRecalcPolling() {
@@ -229,7 +344,7 @@ async function api(url, options = {}) {
         payload = null;
     }
     if (!response.ok) {
-        throw new Error(payload?.detail || payload?.message || 'Ошибка запроса');
+        throw new Error(formatApiErrorMessage(payload));
     }
     return payload;
 }
@@ -282,6 +397,7 @@ function setDefaultDates() {
     if (qs('shift-month-input')) qs('shift-month-input').value = monthIso();
     if (qs('expenses-month-input')) qs('expenses-month-input').value = monthIso();
     if (qs('shift-date-input')) qs('shift-date-input').value = todayIso();
+    syncManualExpenseDefaults({ forceDate: true });
 }
 
 function selectedLocation() {
@@ -417,7 +533,7 @@ function mergeCategoryCatalog(...sources) {
     const result = [];
     const seen = new Set();
     sources.flat().forEach((item) => {
-        if (!item) return;
+        if (!item || isExcludedPayrollCategory(item)) return;
         const id = String(item.category_id || item.id || '').trim();
         const name = String(item.category_name || item.name || '').trim();
         const nameKey = normalizeSearch(name);
@@ -432,13 +548,13 @@ function mergeCategoryCatalog(...sources) {
 }
 
 function renderShiftCategoryBreakdown(categories = []) {
-    const rows = Array.isArray(categories) ? categories.filter((category) => {
+    const rows = filterVisiblePayrollCategories(categories).filter((category) => {
         const net = Number(category?.net_sales_amount || 0);
         const earned = Number(category?.earning_amount || 0);
         const sales = Number(category?.sales_amount || 0);
         const returns = Number(category?.return_amount || 0);
         return Math.abs(net) > 1e-9 || Math.abs(earned) > 1e-9 || Math.abs(sales) > 1e-9 || Math.abs(returns) > 1e-9;
-    }) : [];
+    });
     if (!rows.length) {
         return '<div class="muted-text">По этой смене нет начислений по категориям.</div>';
     }
@@ -451,8 +567,10 @@ function renderShiftCategoryBreakdown(categories = []) {
                         <th>%</th>
                         <th>Продажи</th>
                         <th>Возвраты</th>
-                        <th>Чистая сумма</th>
+                        <th>Сумма</th>
+                        <th>Себестоимость</th>
                         <th>Начислено</th>
+                        <th>Прибыль</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -462,8 +580,10 @@ function renderShiftCategoryBreakdown(categories = []) {
                             <td data-label="%">${Number(category.rate_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%</td>
                             <td data-label="Продажи">${formatMoney(category.sales_amount || 0)}</td>
                             <td data-label="Возвраты">${formatMoney(category.return_amount || 0)}</td>
-                            <td data-label="Чистая сумма">${formatMoney(normalizeCategoryDisplayNet(category))}</td>
+                            <td data-label="Сумма">${formatMoney(normalizeCategoryDisplayNet(category))}</td>
+                            <td data-label="Себестоимость">${formatMoney(category.cost_amount || 0)}</td>
                             <td data-label="Начислено"><strong>${formatMoney(category.earning_amount || 0)}</strong></td>
+                            <td data-label="Прибыль"><strong>${formatMoney(calculateCategoryProfit(category))}</strong></td>
                         </tr>
                     `).join('')}
                 </tbody>
@@ -557,7 +677,7 @@ function getFilteredPayrollCategories(categories = []) {
     const view = payrollState.categoryFilters.view || 'all';
     const sort = payrollState.categoryFilters.sort || 'earning_desc';
 
-    const filtered = (categories || []).filter(category => {
+    const filtered = filterVisiblePayrollCategories(categories).filter(category => {
         const categoryName = String(category?.category_name || '');
         if (search && !normalizeSearch(categoryName).includes(search)) {
             return false;
@@ -599,11 +719,13 @@ function renderPayrollCategoryTable(categories = payrollState.summary?.categorie
                 <td data-label="%">${Number(category.rate_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%</td>
                 <td data-label="Продажи">${formatMoney(category.sales_amount)}</td>
                 <td data-label="Возвраты">${formatMoney(category.return_amount)}</td>
-                <td data-label="Чистая сумма">${formatMoney(normalizeCategoryDisplayNet(category))}</td>
+                <td data-label="Сумма">${formatMoney(normalizeCategoryDisplayNet(category))}</td>
+                <td data-label="Себестоимость">${formatMoney(category.cost_amount || 0)}</td>
                 <td data-label="Начислено"><strong>${formatMoney(category.earning_amount)}</strong></td>
+                <td data-label="Прибыль"><strong>${formatMoney(calculateCategoryProfit(category))}</strong></td>
             </tr>
         `).join('')
-        : '<tr><td colspan="6" class="muted-text">По текущим фильтрам категории не найдены.</td></tr>';
+        : '<tr><td colspan="8" class="muted-text">По текущим фильтрам категории не найдены.</td></tr>';
 }
 
 function applyPayrollCategoryFiltersFromUi() {
@@ -815,6 +937,8 @@ function renderSettings() {
         </label>
     `}).join('');
     renderManagerBrackets();
+    const categoryLoadingVisible = !qs('settings-category-loading')?.classList.contains('hidden');
+    setSettingsCategoryInputsDisabled(categoryLoadingVisible);
 }
 
 
@@ -944,11 +1068,14 @@ function renderExpenses() {
     if (!list) return;
     list.innerHTML = (payrollState.expenses || []).map(entry => {
         const title = escapeHtml(entry.name || entry.template_name || 'Расход');
+        const distributionText = entry.distribution_mode === 'spread'
+            ? 'Растянут на весь месяц'
+            : `Списывается одним днём · ${escapeHtml(formatDateRu(entry.expense_date))}`;
         const subtitle = entry.is_manual
-            ? 'Свободный расход без шаблона'
-            : `${entry.amount_type === 'static' ? 'Статический расход' : 'Динамический расход'} · месяц ${escapeHtml(entry.month_start || '')}`;
+            ? `Свободный расход без шаблона · ${distributionText}`
+            : `${entry.amount_type === 'static' ? 'Статический расход' : 'Динамический расход'} · ${distributionText}`;
         const employeeName = escapeHtml(expenseEmployeeName(entry));
-        const paidLabel = entry.is_paid ? 'Оплачен' : 'Не оплачен';
+        const paidLabel = entry.is_paid ? 'Оплачен' : 'Не оплачен · в статистику не входит';
         const amountLabel = formatMoney(entry.amount);
         return `
         <details class="expense-entry-card ${entry.is_manual ? 'manual' : ''} expense-entry-card--accordion">
@@ -968,6 +1095,17 @@ function renderExpenses() {
                     <label>
                         Сумма
                         <input type="number" min="0" step="0.01" data-expense-amount="${entry.id}" value="${entry.amount}">
+                    </label>
+                    <label>
+                        Как учитывать
+                        <select data-expense-mode="${entry.id}">
+                            <option value="spread">Растянуть на месяц</option>
+                            <option value="single_day">Одним днём</option>
+                        </select>
+                    </label>
+                    <label>
+                        Дата расхода
+                        <input type="date" data-expense-date="${entry.id}" value="${escapeHtml(entry.expense_date || entry.month_start || '')}">
                     </label>
                     <label>
                         Сотрудник
@@ -1000,6 +1138,8 @@ function renderExpenses() {
     (payrollState.expenses || []).forEach(entry => {
         const select = document.querySelector(`[data-expense-employee="${entry.id}"]`);
         if (select && entry.assigned_employee_user_id) select.value = String(entry.assigned_employee_user_id);
+        const modeSelect = document.querySelector(`[data-expense-mode="${entry.id}"]`);
+        if (modeSelect) modeSelect.value = entry.distribution_mode || 'spread';
     });
     list.classList.toggle('hidden', payrollState.expensesCollapsed);
     syncExpenseEntriesToggle();
@@ -1121,24 +1261,29 @@ async function loadSetupForLocation() {
     payrollState.activeRecalcJob = null;
     const requestedEffectiveFrom = selectedSettingsEffectiveFrom() || getStoredSettingsEffectiveFrom(location);
     const effectiveFromQuery = requestedEffectiveFrom ? `&effective_from=${encodeURIComponent(requestedEffectiveFrom)}` : '';
-    const setup = await api(`/api/payroll/settings?location=${encodeURIComponent(location)}${effectiveFromQuery}`);
-    payrollState.requestedSettingsEffectiveFrom = setup.requested_effective_from || requestedEffectiveFrom || setup.settings?.effective_from || '';
-    storeSettingsEffectiveFrom(location, payrollState.requestedSettingsEffectiveFrom);
-    payrollState.settings = setup.settings;
-    payrollState.employees = setup.employees || [];
-    payrollState.admins = setup.admins || [];
-    mergeCategoryCatalog(setup.category_catalog || [], payrollState.settings?.category_rates || []);
-    renderUsersForLocation();
-    renderSettings();
+    setSettingsLoading(true, 'Загружаем настройки точки...');
+    try {
+        const setup = await api(`/api/payroll/settings?location=${encodeURIComponent(location)}${effectiveFromQuery}`);
+        payrollState.requestedSettingsEffectiveFrom = setup.requested_effective_from || requestedEffectiveFrom || setup.settings?.effective_from || '';
+        storeSettingsEffectiveFrom(location, payrollState.requestedSettingsEffectiveFrom);
+        payrollState.settings = setup.settings;
+        payrollState.employees = setup.employees || [];
+        payrollState.admins = setup.admins || [];
+        mergeCategoryCatalog(setup.category_catalog || [], payrollState.settings?.category_rates || []);
+        renderUsersForLocation();
+        renderSettings();
 
-    await Promise.all([
-        loadShiftCalendar(),
-        loadExpenseTemplatesAndEntries(),
-        loadAudit(),
-    ]);
+        await Promise.all([
+            loadShiftCalendar(),
+            loadExpenseTemplatesAndEntries(),
+            loadAudit(),
+        ]);
 
-    if (setup?.recalc_job?.job_id) {
-        pollRecalcStatus(setup.recalc_job.job_id).catch((error) => console.error(error));
+        if (setup?.recalc_job?.job_id) {
+            pollRecalcStatus(setup.recalc_job.job_id).catch((error) => console.error(error));
+        }
+    } finally {
+        setSettingsLoading(false);
     }
 }
 
@@ -1199,6 +1344,7 @@ async function loadExpenseTemplatesAndEntries() {
     if (manualExpenseEmployee) {
         manualExpenseEmployee.innerHTML = ['<option value="">Без привязки</option>', ...payrollState.employees.map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}</option>`)].join('');
     }
+    syncManualExpenseDefaults();
 }
 
 async function loadAudit() {
@@ -1397,11 +1543,16 @@ async function createExpenseTemplate() {
     const button = qs('create-expense-template-btn');
     const payload = {
         location: selectedLocation(),
-        name: qs('expense-template-name').value,
+        name: qs('expense-template-name').value.trim(),
         amount_type: qs('expense-template-type').value,
         default_amount: qs('expense-template-default').value ? Number(qs('expense-template-default').value) : null,
         assign_to_employee_by_default: qs('expense-template-employee').checked,
     };
+    if (!payload.name) {
+        showStatus('Введите название.', 'error');
+        showScopedStatus('create-expense-template-status', 'Введите название.', 'error');
+        return;
+    }
     showScopedStatus('create-expense-template-status', 'Сохраняем шаблон расхода...', 'loading');
     setButtonLoading(button, true, 'Сохраняем...');
     try {
@@ -1439,12 +1590,16 @@ window.saveExpenseEntry = async function saveExpenseEntry(id) {
     const isPaid = document.querySelector(`[data-expense-paid="${id}"]`).checked;
     const employeeValue = document.querySelector(`[data-expense-employee="${id}"]`).value;
     const applyToEmployeeSalary = document.querySelector(`[data-expense-apply="${id}"]`).checked;
+    const distributionMode = document.querySelector(`[data-expense-mode="${id}"]`)?.value || 'spread';
+    const expenseDate = document.querySelector(`[data-expense-date="${id}"]`)?.value || '';
     const comment = document.querySelector(`[data-expense-comment="${id}"]`)?.value || '';
     const payload = {
         amount,
         is_paid: isPaid,
         assigned_employee_user_id: employeeValue ? Number(employeeValue) : null,
         apply_to_employee_salary: applyToEmployeeSalary,
+        distribution_mode: distributionMode,
+        expense_date: expenseDate || null,
         comment,
     };
     showScopedStatus(`expense-status-${id}`, 'Сохраняем расход...', 'loading');
@@ -1471,14 +1626,16 @@ async function createManualExpense() {
         month_start: selectedMonthStart('expenses-month-input'),
         name: qs('manual-expense-name').value.trim(),
         amount: Number(qs('manual-expense-amount').value || 0),
+        distribution_mode: qs('manual-expense-mode').value || 'single_day',
+        expense_date: qs('manual-expense-date').value || null,
         assigned_employee_user_id: qs('manual-expense-employee').value ? Number(qs('manual-expense-employee').value) : null,
         is_paid: qs('manual-expense-paid').checked,
         apply_to_employee_salary: qs('manual-expense-apply').checked,
         comment: qs('manual-expense-comment').value.trim(),
     };
     if (!payload.name) {
-        showStatus('Укажи название свободного расхода.', 'error');
-        showScopedStatus('create-manual-expense-status', 'Укажи название свободного расхода.', 'error');
+        showStatus('Введите название.', 'error');
+        showScopedStatus('create-manual-expense-status', 'Введите название.', 'error');
         return;
     }
     showScopedStatus('create-manual-expense-status', 'Сохраняем свободный расход...', 'loading');
@@ -1487,10 +1644,12 @@ async function createManualExpense() {
         await api('/api/payroll/expenses/manual', { method: 'POST', body: JSON.stringify(payload) });
         qs('manual-expense-name').value = '';
         qs('manual-expense-amount').value = '';
+        qs('manual-expense-mode').value = 'single_day';
         qs('manual-expense-employee').value = '';
         qs('manual-expense-paid').checked = false;
         qs('manual-expense-apply').checked = false;
         qs('manual-expense-comment').value = '';
+        syncManualExpenseDefaults({ forceDate: true });
         await loadExpenseTemplatesAndEntries();
         await loadSummary();
         await loadAudit();
@@ -1584,7 +1743,10 @@ qs('payroll-employee-select')?.addEventListener('change', loadSummary);
 qs('settings-add-manager-bracket-btn')?.addEventListener('click', () => window.addManagerBracket());
 qs('add-shift-btn')?.addEventListener('click', addShift);
 qs('shift-month-input')?.addEventListener('change', loadShiftCalendar);
-qs('expenses-month-input')?.addEventListener('change', loadExpenseTemplatesAndEntries);
+qs('expenses-month-input')?.addEventListener('change', async () => {
+    syncManualExpenseDefaults({ forceDate: true });
+    await loadExpenseTemplatesAndEntries();
+});
 qs('create-expense-template-btn')?.addEventListener('click', createExpenseTemplate);
 qs('create-manual-expense-btn')?.addEventListener('click', createManualExpense);
 qs('payroll-category-search')?.addEventListener('input', applyPayrollCategoryFiltersFromUi);

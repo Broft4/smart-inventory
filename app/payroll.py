@@ -50,6 +50,8 @@ DEFAULT_EXIT_AMOUNT = 2000.0
 DEFAULT_BONUS_THRESHOLD = 40000.0
 DEFAULT_BONUS_AMOUNT = 500.0
 DEFAULT_OTHER_RATE_PERCENT = 3.0
+EXPENSE_MODE_SPREAD = 'spread'
+EXPENSE_MODE_SINGLE_DAY = 'single_day'
 DEFAULT_MANAGER_SALARY_BRACKETS = [
     {'threshold': 200000.0, 'rate_percent': 25.0},
     {'threshold': 125000.0, 'rate_percent': 20.0},
@@ -90,6 +92,17 @@ def _sanitize_uncategorized_row(row: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
+def _calculate_category_profit_amount(category: dict[str, Any]) -> float:
+    net_sales_amount = _sanitize_uncategorized_net(category.get('category_name'), category.get('net_sales_amount') or 0.0)
+    cost_amount = round(float(category.get('cost_amount') or 0.0), 2)
+    earning_amount = round(float(category.get('earning_amount') or 0.0), 2)
+    return round(net_sales_amount - cost_amount - earning_amount, 2)
+
+
+def _is_excluded_payroll_category_name(category_name: Any) -> bool:
+    return str(category_name or '').strip() == DEFAULT_CATEGORY_NAME
+
+
 def _recalculate_summary_totals_from_categories(day_payload: dict[str, Any]) -> None:
     categories = day_payload.get('categories') or []
     if not categories:
@@ -123,6 +136,10 @@ def _ms_client_enabled(token: str | None = None, location: str | None = None) ->
 
 
 def bootstrap_payroll_schema(connection) -> None:
+    tables = {
+        str(row[0])
+        for row in connection.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
     columns = {
         str(row[1])
         for row in connection.exec_driver_sql("PRAGMA table_info(payroll_settings_versions)").fetchall()
@@ -137,6 +154,34 @@ def bootstrap_payroll_schema(connection) -> None:
             "ALTER TABLE payroll_settings_versions "
             f"ADD COLUMN manager_salary_brackets_json TEXT NOT NULL DEFAULT '{default_json}'"
         )
+
+    if 'monthly_expense_entries' in tables:
+        expense_columns = {
+            str(row[1])
+            for row in connection.exec_driver_sql("PRAGMA table_info(monthly_expense_entries)").fetchall()
+        }
+        if 'expense_date' not in expense_columns:
+            connection.exec_driver_sql("ALTER TABLE monthly_expense_entries ADD COLUMN expense_date DATE")
+            connection.exec_driver_sql(
+                "UPDATE monthly_expense_entries SET expense_date = month_start WHERE expense_date IS NULL"
+            )
+        if 'distribution_mode' not in expense_columns:
+            connection.exec_driver_sql(
+                f"ALTER TABLE monthly_expense_entries ADD COLUMN distribution_mode VARCHAR(20) NOT NULL DEFAULT '{EXPENSE_MODE_SPREAD}'"
+            )
+            connection.exec_driver_sql(
+                f"UPDATE monthly_expense_entries SET distribution_mode = '{EXPENSE_MODE_SINGLE_DAY}' WHERE template_id IS NULL"
+            )
+
+    if 'shift_payroll_category_snapshots' in tables:
+        shift_category_columns = {
+            str(row[1])
+            for row in connection.exec_driver_sql("PRAGMA table_info(shift_payroll_category_snapshots)").fetchall()
+        }
+        if 'cost_amount' not in shift_category_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE shift_payroll_category_snapshots ADD COLUMN cost_amount FLOAT NOT NULL DEFAULT 0"
+            )
 
 
 class PayrollSettingsUpdateRequest(BaseModel):
@@ -183,6 +228,8 @@ class MonthlyExpenseEntryUpdateRequest(BaseModel):
     is_paid: bool = False
     assigned_employee_user_id: int | None = Field(default=None, ge=1)
     apply_to_employee_salary: bool = False
+    distribution_mode: str = Field(default=EXPENSE_MODE_SPREAD)
+    expense_date: date | None = None
     comment: str | None = Field(default=None, max_length=2000)
 
 
@@ -194,6 +241,8 @@ class ManualMonthlyExpenseCreateRequest(BaseModel):
     is_paid: bool = False
     assigned_employee_user_id: int | None = Field(default=None, ge=1)
     apply_to_employee_salary: bool = False
+    distribution_mode: str = Field(default=EXPENSE_MODE_SINGLE_DAY)
+    expense_date: date | None = None
     comment: str | None = Field(default=None, max_length=2000)
 
 
@@ -437,6 +486,80 @@ def _month_end(value: date) -> date:
     return date(value.year, value.month + 1, 1) - timedelta(days=1)
 
 
+def _normalize_expense_distribution_mode(value: Any, *, default: str = EXPENSE_MODE_SPREAD) -> str:
+    normalized_default = EXPENSE_MODE_SINGLE_DAY if default == EXPENSE_MODE_SINGLE_DAY else EXPENSE_MODE_SPREAD
+    normalized = str(value or '').strip().lower()
+    if normalized in {EXPENSE_MODE_SINGLE_DAY, 'single-day', 'one_day', 'oneday', 'day'}:
+        return EXPENSE_MODE_SINGLE_DAY
+    if normalized in {EXPENSE_MODE_SPREAD, 'month', 'monthly', 'spread_month'}:
+        return EXPENSE_MODE_SPREAD
+    return normalized_default
+
+
+def _clip_expense_date_to_month(expense_date: date, month_start: date) -> date:
+    month_key = _month_start(month_start)
+    month_last = _month_end(month_key)
+    if expense_date < month_key:
+        return month_key
+    if expense_date > month_last:
+        return month_last
+    return expense_date
+
+
+def _default_expense_date_for_month(month_start: date, *, day_of_month: int = 1) -> date:
+    month_key = _month_start(month_start)
+    month_last = _month_end(month_key)
+    safe_day = min(max(int(day_of_month or 1), 1), month_last.day)
+    return date(month_key.year, month_key.month, safe_day)
+
+
+def _resolve_entry_expense_date(entry: MonthlyExpenseEntry, template: ExpenseTemplate | None = None) -> date:
+    month_key = _month_start(entry.month_start)
+    existing_date = getattr(entry, 'expense_date', None)
+    if isinstance(existing_date, date):
+        return _clip_expense_date_to_month(existing_date, month_key)
+    template_day = int(template.day_of_month or 1) if template is not None else 1
+    return _default_expense_date_for_month(month_key, day_of_month=template_day)
+
+
+def _expense_entry_mode(entry: MonthlyExpenseEntry) -> str:
+    default_mode = EXPENSE_MODE_SINGLE_DAY if entry.template_id is None else EXPENSE_MODE_SPREAD
+    return _normalize_expense_distribution_mode(getattr(entry, 'distribution_mode', None), default=default_mode)
+
+
+def _expense_entry_amount_for_period(
+    entry: MonthlyExpenseEntry,
+    *,
+    date_from: date,
+    date_to: date,
+    template: ExpenseTemplate | None = None,
+) -> float:
+    if not entry.is_paid:
+        return 0.0
+
+    amount = round(float(entry.amount or 0.0), 2)
+    if amount <= 0:
+        return 0.0
+
+    month_key = _month_start(entry.month_start)
+    month_last = _month_end(month_key)
+    overlap_from = max(date_from, month_key)
+    overlap_to = min(date_to, month_last)
+    if overlap_from > overlap_to:
+        return 0.0
+
+    mode = _expense_entry_mode(entry)
+    if mode == EXPENSE_MODE_SINGLE_DAY:
+        expense_day = _resolve_entry_expense_date(entry, template)
+        return amount if overlap_from <= expense_day <= overlap_to else 0.0
+
+    days_in_month = (month_last - month_key).days + 1
+    overlap_days = (overlap_to - overlap_from).days + 1
+    if days_in_month <= 0 or overlap_days <= 0:
+        return 0.0
+    return round(amount * (overlap_days / days_in_month), 2)
+
+
 
 def _daterange(start: date, end: date) -> list[date]:
     days = (end - start).days
@@ -509,6 +632,74 @@ def _extract_position_amount(position: dict[str, Any]) -> float:
 
 
 
+def _extract_stock_cost_amount(stock_payload: Any, quantity: float) -> float | None:
+    total_fields = (
+        'costSum',
+        'costPriceSum',
+        'buyPriceSum',
+        'purchaseCostSum',
+        'costAmount',
+        'buySum',
+        'purchaseSum',
+        'cost',
+        'stockCost',
+        'stockCostSum',
+    )
+    unit_fields = (
+        'buyPrice',
+        'costPrice',
+        'purchasePrice',
+        'purchaseCost',
+        'costValue',
+        'price',
+    )
+
+    if isinstance(stock_payload, list):
+        total = 0.0
+        found = False
+        for item in stock_payload:
+            amount = _extract_stock_cost_amount(item, quantity)
+            if amount is None:
+                continue
+            total += amount
+            found = True
+        return round(max(total, 0.0), 2) if found else None
+
+    if not isinstance(stock_payload, dict):
+        return None
+
+    total_cost = _first_money_value(stock_payload, total_fields)
+    if total_cost is not None:
+        return round(max(total_cost, 0.0), 2)
+
+    unit_cost = _first_money_value(stock_payload, unit_fields)
+    if unit_cost is not None:
+        nested_quantity = _quantity(
+            stock_payload.get('quantity')
+            or stock_payload.get('qty')
+            or stock_payload.get('stock')
+            or stock_payload.get('available')
+        )
+        effective_quantity = nested_quantity if nested_quantity > 0 else quantity
+        if effective_quantity > 0:
+            return round(max(unit_cost, 0.0) * effective_quantity, 2)
+        return round(max(unit_cost, 0.0), 2)
+
+    nested_total = 0.0
+    found_nested = False
+    for key in ('rows', 'items', 'stocks', 'stores', 'stockByOperations', 'stockByStore'):
+        amount = _extract_stock_cost_amount(stock_payload.get(key), quantity)
+        if amount is None:
+            continue
+        nested_total += amount
+        found_nested = True
+    if found_nested:
+        return round(max(nested_total, 0.0), 2)
+
+    return None
+
+
+
 def _extract_position_cost_amount(position: dict[str, Any]) -> float | None:
     quantity = _quantity(position.get('quantity'))
     total_cost = _first_money_value(position, ('costSum', 'buySum', 'buyPriceSum', 'purchaseCostSum', 'costAmount', 'purchaseSum', 'cost'))
@@ -517,6 +708,10 @@ def _extract_position_cost_amount(position: dict[str, Any]) -> float | None:
     unit_cost = _first_money_value(position, ('buyPrice', 'costPrice', 'purchasePrice', 'purchaseCost', 'costValue'))
     if unit_cost is not None and quantity > 0:
         return round(max(unit_cost, 0.0) * quantity, 2)
+
+    stock_cost = _extract_stock_cost_amount(position.get('stock'), quantity)
+    if stock_cost is not None:
+        return stock_cost
     return None
 
 
@@ -1243,6 +1438,7 @@ async def _ensure_month_expense_entries(point: LocationPoint, month_start: date,
             .order_by(ExpenseTemplate.name.asc())
         )
     ).all()
+    template_by_id = {template.id: template for template in templates}
     existing_entries = (
         await db.scalars(
             select(MonthlyExpenseEntry)
@@ -1254,6 +1450,16 @@ async def _ensure_month_expense_entries(point: LocationPoint, month_start: date,
     ).all()
     entry_by_template = {entry.template_id: entry for entry in existing_entries}
     changed = False
+    for entry in existing_entries:
+        template = template_by_id.get(entry.template_id) if entry.template_id is not None else None
+        normalized_mode = _expense_entry_mode(entry)
+        if entry.distribution_mode != normalized_mode:
+            entry.distribution_mode = normalized_mode
+            changed = True
+        resolved_expense_date = _resolve_entry_expense_date(entry, template)
+        if entry.expense_date != resolved_expense_date:
+            entry.expense_date = resolved_expense_date
+            changed = True
     for template in templates:
         if template.id in entry_by_template:
             continue
@@ -1262,6 +1468,8 @@ async def _ensure_month_expense_entries(point: LocationPoint, month_start: date,
             template_id=template.id,
             location_point_id=point.id,
             month_start=month_start,
+            expense_date=_default_expense_date_for_month(month_start, day_of_month=template.day_of_month),
+            distribution_mode=EXPENSE_MODE_SPREAD,
             amount=amount,
             is_paid=False,
             assigned_employee_user_id=None,
@@ -1315,10 +1523,13 @@ async def create_expense_template(payload: ExpenseTemplateCreateRequest, db: Asy
         raise HTTPException(status_code=403, detail='Создавать шаблоны расходов может только управляющий.')
     await ensure_user_can_access_location(current_user, payload.location, db)
     point = await _get_location_point_by_name(payload.location, db)
+    normalized_name = payload.name.strip()
+    if not normalized_name:
+        raise HTTPException(status_code=400, detail='Введите название.')
     amount_type = payload.amount_type if payload.amount_type in {'static', 'dynamic'} else 'dynamic'
     template = ExpenseTemplate(
         location_point_id=point.id,
-        name=payload.name.strip(),
+        name=normalized_name,
         amount_type=amount_type,
         default_amount=payload.default_amount,
         assign_to_employee_by_default=payload.assign_to_employee_by_default,
@@ -1360,7 +1571,10 @@ async def update_expense_template(template_id: int, payload: ExpenseTemplateUpda
         'assign_to_employee_by_default': template.assign_to_employee_by_default,
         'is_active': template.is_active,
     }
-    template.name = payload.name.strip()
+    normalized_name = payload.name.strip()
+    if not normalized_name:
+        raise HTTPException(status_code=400, detail='Введите название.')
+    template.name = normalized_name
     template.amount_type = payload.amount_type if payload.amount_type in {'static', 'dynamic'} else 'dynamic'
     template.default_amount = payload.default_amount
     template.assign_to_employee_by_default = payload.assign_to_employee_by_default
@@ -1409,6 +1623,8 @@ def _serialize_monthly_expense_entry(
         'is_manual': entry.template_id is None,
         'amount_type': template.amount_type if template else 'manual',
         'month_start': entry.month_start.isoformat(),
+        'expense_date': _resolve_entry_expense_date(entry, template).isoformat(),
+        'distribution_mode': _expense_entry_mode(entry),
         'amount': round(float(entry.amount or 0), 2),
         'is_paid': entry.is_paid,
         'assigned_employee_user_id': entry.assigned_employee_user_id,
@@ -1426,6 +1642,9 @@ async def create_manual_monthly_expense(payload: ManualMonthlyExpenseCreateReque
     await ensure_user_can_access_location(current_user, payload.location, db)
     point = await _get_location_point_by_name(payload.location, db)
     month_key = _month_start(payload.month_start)
+    normalized_name = payload.name.strip()
+    if not normalized_name:
+        raise HTTPException(status_code=400, detail='Введите название.')
     if payload.assigned_employee_user_id:
         employee = await db.get(User, payload.assigned_employee_user_id)
         if not employee or employee.role != 'employee' or employee.location != point.name:
@@ -1434,7 +1653,9 @@ async def create_manual_monthly_expense(payload: ManualMonthlyExpenseCreateReque
         template_id=None,
         location_point_id=point.id,
         month_start=month_key,
-        custom_name=payload.name.strip(),
+        expense_date=_clip_expense_date_to_month(payload.expense_date or month_key, month_key),
+        distribution_mode=_normalize_expense_distribution_mode(payload.distribution_mode, default=EXPENSE_MODE_SINGLE_DAY),
+        custom_name=normalized_name,
         comment=(payload.comment or '').strip() or None,
         amount=payload.amount,
         is_paid=payload.is_paid,
@@ -1456,9 +1677,12 @@ async def create_manual_monthly_expense(payload: ManualMonthlyExpenseCreateReque
         details={
             'name': entry.custom_name,
             'month_start': month_key.isoformat(),
+            'expense_date': entry.expense_date.isoformat() if entry.expense_date else None,
+            'distribution_mode': entry.distribution_mode,
             'amount': entry.amount,
             'assigned_employee_user_id': entry.assigned_employee_user_id,
             'apply_to_employee_salary': entry.apply_to_employee_salary,
+            'is_paid': entry.is_paid,
             'comment': entry.comment,
         },
     )
@@ -1546,6 +1770,8 @@ async def delete_monthly_expense_entry(entry_id: int, db: AsyncSession, current_
     details = {
         'name': entry.custom_name or 'Свободный расход',
         'month_start': entry.month_start.isoformat(),
+        'expense_date': entry.expense_date.isoformat() if entry.expense_date else None,
+        'distribution_mode': entry.distribution_mode,
         'amount': float(entry.amount or 0),
         'assigned_employee_user_id': entry.assigned_employee_user_id,
         'comment': entry.comment,
@@ -1614,6 +1840,8 @@ async def update_monthly_expense_entry(entry_id: int, payload: MonthlyExpenseEnt
         'is_paid': entry.is_paid,
         'assigned_employee_user_id': entry.assigned_employee_user_id,
         'apply_to_employee_salary': entry.apply_to_employee_salary,
+        'distribution_mode': entry.distribution_mode,
+        'expense_date': entry.expense_date.isoformat() if entry.expense_date else None,
         'comment': entry.comment,
     }
     if payload.assigned_employee_user_id:
@@ -1624,6 +1852,14 @@ async def update_monthly_expense_entry(entry_id: int, payload: MonthlyExpenseEnt
     entry.is_paid = payload.is_paid
     entry.assigned_employee_user_id = payload.assigned_employee_user_id
     entry.apply_to_employee_salary = payload.apply_to_employee_salary
+    entry.distribution_mode = _normalize_expense_distribution_mode(
+        payload.distribution_mode,
+        default=EXPENSE_MODE_SINGLE_DAY if entry.template_id is None else EXPENSE_MODE_SPREAD,
+    )
+    entry.expense_date = _clip_expense_date_to_month(
+        payload.expense_date or _resolve_entry_expense_date(entry),
+        entry.month_start,
+    )
     entry.comment = (payload.comment or '').strip() or None
     entry.updated_by_user_id = current_user.id
     entry.updated_at = datetime.utcnow()
@@ -1639,6 +1875,8 @@ async def update_monthly_expense_entry(entry_id: int, payload: MonthlyExpenseEnt
             'is_paid': entry.is_paid,
             'assigned_employee_user_id': entry.assigned_employee_user_id,
             'apply_to_employee_salary': entry.apply_to_employee_salary,
+            'distribution_mode': entry.distribution_mode,
+            'expense_date': entry.expense_date.isoformat() if entry.expense_date else None,
             'comment': entry.comment,
         }},
     )
@@ -1684,6 +1922,7 @@ async def _fetch_document_rows(
     expand: str | None = None,
     include_positions: bool = False,
     positions_expand: str | None = None,
+    positions_fields: str | None = None,
 ) -> list[dict[str, Any]]:
     if not _ms_client_enabled(token=_point_ms_token(point), location=point.name):
         return []
@@ -1694,6 +1933,7 @@ async def _fetch_document_rows(
         expand=expand,
         include_positions=include_positions,
         positions_expand=positions_expand,
+        positions_fields=positions_fields,
         token=_point_ms_token(point),
         location=point.name,
     )
@@ -1958,6 +2198,7 @@ async def _load_point_sales_metrics_live(point: LocationPoint, date_from: date, 
             expand='store,retailStore,retailShift,retailShift.store,retailShift.retailStore',
             include_positions=True,
             positions_expand='assortment,assortment.productFolder',
+            positions_fields='stock',
         ),
         _fetch_document_rows(
             'retailsalesreturn',
@@ -1967,6 +2208,7 @@ async def _load_point_sales_metrics_live(point: LocationPoint, date_from: date, 
             expand='store,retailStore,retailShift,retailShift.store,retailShift.retailStore,demand,demand.store,demand.retailStore,demand.retailShift,demand.retailShift.store,demand.retailShift.retailStore',
             include_positions=True,
             positions_expand='assortment,assortment.productFolder',
+            positions_fields='stock',
         ),
         _fetch_retail_shift_rows(date_from, date_to, point),
     )
@@ -2350,19 +2592,35 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
         ).all()
         settings = await db.get(PayrollSettingsVersion, snapshot.settings_version_id) if snapshot.settings_version_id else await _get_settings_for_date(point, shift.shift_date, db)
         bonus_category_ids = _load_bonus_category_ids(settings)
-        snapshot_categories = [
-            _sanitize_uncategorized_row({
+        fallback_category_costs: dict[tuple[str, str], float] = {}
+        if category_rows and abs(float(snapshot.cost_amount or 0)) > 1e-9 and all(abs(float(getattr(row, 'cost_amount', 0) or 0)) <= 1e-9 for row in category_rows):
+            day_metrics_by_date = await _load_point_sales_metrics(point, shift.shift_date, shift.shift_date, db)
+            fallback_share_ratio = round(float(snapshot.share_ratio or 0), 4)
+            for metric_row in (day_metrics_by_date.get(shift.shift_date) or {}).get('categories') or []:
+                fallback_cost = round(float(metric_row.get('cost_amount') or 0.0) * fallback_share_ratio, 2)
+                fallback_key = (str(metric_row.get('category_id') or ''), str(metric_row.get('category_name') or ''))
+                fallback_category_costs[fallback_key] = fallback_cost
+
+        snapshot_categories = []
+        for row in category_rows:
+            category_payload = _sanitize_uncategorized_row({
                 'category_id': row.category_id,
                 'category_name': row.category_name,
                 'rate_percent': round(float(row.rate_percent or 0), 2),
                 'sales_amount': round(float(row.sales_amount or 0), 2),
                 'return_amount': round(float(row.return_amount or 0), 2),
                 'net_sales_amount': round(float(row.net_sales_amount or 0), 2),
+                'cost_amount': round(float(getattr(row, 'cost_amount', 0) or 0), 2),
                 'earning_amount': round(float(row.earning_amount or 0), 2),
                 'is_other_category': row.is_other_category,
             })
-            for row in category_rows
-        ]
+            if abs(float(category_payload.get('cost_amount') or 0.0)) <= 1e-9:
+                fallback_key = (str(category_payload.get('category_id') or ''), str(category_payload.get('category_name') or ''))
+                fallback_cost = fallback_category_costs.get(fallback_key)
+                if fallback_cost is not None:
+                    category_payload['cost_amount'] = fallback_cost
+            category_payload['profit_amount'] = _calculate_category_profit_amount(category_payload)
+            snapshot_categories.append(category_payload)
         snapshot_category_earnings_total = round(sum(float(item.get('earning_amount') or 0) for item in snapshot_categories), 2)
         snapshot_bonus_base = round(max(float(snapshot.non_tobacco_net_sales_for_bonus or 0), 0.0), 2)
         snapshot_bonus = round(float(snapshot.bonus_amount or 0), 2)
@@ -2420,21 +2678,25 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
         sales_amount = round(float(row['sales_amount']) * share_ratio, 2)
         return_amount = round(float(row['return_amount']) * share_ratio, 2)
         net_sales_amount = _sanitize_uncategorized_net(row.get('category_name'), round(float(row['net_sales_amount']) * share_ratio, 2))
+        cost_amount = round(float(row.get('cost_amount') or 0.0) * share_ratio, 2)
         category_id = row['category_id']
         rate_info = _get_rate_info_for_category(category_id, row.get('category_name'), rate_map, rate_name_map)
         rate_percent, is_other_category = _resolve_category_rate_percent(rate_info, settings.other_rate_percent)
         earning_amount = round(max(net_sales_amount, 0) * (rate_percent / 100.0), 2)
         category_earnings_total += earning_amount
-        categories.append({
+        category_payload = {
             'category_id': category_id,
             'category_name': row['category_name'],
             'rate_percent': round(rate_percent, 2),
             'sales_amount': sales_amount,
             'return_amount': return_amount,
             'net_sales_amount': net_sales_amount,
+            'cost_amount': cost_amount,
             'earning_amount': earning_amount,
             'is_other_category': is_other_category,
-        })
+        }
+        category_payload['profit_amount'] = _calculate_category_profit_amount(category_payload)
+        categories.append(category_payload)
         if bonus_category_ids:
             if category_id in bonus_category_ids:
                 bonus_base_sales_amount += net_sales_amount
@@ -2532,6 +2794,7 @@ async def close_shift(shift_id: int, db: AsyncSession, actor_user: User | None, 
             sales_amount=row['sales_amount'],
             return_amount=row['return_amount'],
             net_sales_amount=row['net_sales_amount'],
+            cost_amount=row.get('cost_amount', 0.0),
             earning_amount=row['earning_amount'],
             is_other_category=row['is_other_category'],
         ))
@@ -2662,7 +2925,10 @@ def _serialize_computed_shift(computed: ShiftComputedPayroll) -> dict[str, Any]:
         'bonus_amount': computed.bonus_amount,
         'category_earnings_total': computed.category_earnings_total,
         'gross_salary_amount': computed.gross_salary_amount,
-        'categories': computed.categories,
+        'categories': [
+            row for row in computed.categories
+            if not _is_excluded_payroll_category_name(row.get('category_name'))
+        ],
     }
 
 
@@ -2817,11 +3083,22 @@ async def _months_between(date_from: date, date_to: date) -> list[date]:
 
 async def _collect_employee_expenses(point: LocationPoint, employee_user_id: int, date_from: date, date_to: date, db: AsyncSession) -> float:
     months = await _months_between(date_from, date_to)
+    templates = {
+        row.id: row
+        for row in (
+            await db.scalars(select(ExpenseTemplate).where(ExpenseTemplate.location_point_id == point.id))
+        ).all()
+    }
     total = 0.0
     for month in months:
         entries = await _ensure_month_expense_entries(point, month, db)
         total += sum(
-            float(entry.amount or 0)
+            _expense_entry_amount_for_period(
+                entry,
+                date_from=date_from,
+                date_to=date_to,
+                template=templates.get(entry.template_id) if entry.template_id is not None else None,
+            )
             for entry in entries
             if entry.assigned_employee_user_id == employee_user_id and entry.apply_to_employee_salary
         )
@@ -2830,10 +3107,24 @@ async def _collect_employee_expenses(point: LocationPoint, employee_user_id: int
 
 async def _collect_period_company_expenses(point: LocationPoint, date_from: date, date_to: date, db: AsyncSession) -> float:
     months = await _months_between(date_from, date_to)
+    templates = {
+        row.id: row
+        for row in (
+            await db.scalars(select(ExpenseTemplate).where(ExpenseTemplate.location_point_id == point.id))
+        ).all()
+    }
     total = 0.0
     for month in months:
         entries = await _ensure_month_expense_entries(point, month, db)
-        total += sum(float(entry.amount or 0) for entry in entries)
+        total += sum(
+            _expense_entry_amount_for_period(
+                entry,
+                date_from=date_from,
+                date_to=date_to,
+                template=templates.get(entry.template_id) if entry.template_id is not None else None,
+            )
+            for entry in entries
+        )
     return round(total, 2)
 
 
@@ -2893,11 +3184,13 @@ async def get_employee_payroll_summary(location: str, date_from: date, date_to: 
                 'sales_amount': 0.0,
                 'return_amount': 0.0,
                 'net_sales_amount': 0.0,
+                'cost_amount': 0.0,
                 'earning_amount': 0.0,
             })
             bucket['sales_amount'] += float(category['sales_amount'] or 0)
             bucket['return_amount'] += float(category['return_amount'] or 0)
             bucket['net_sales_amount'] += float(category['net_sales_amount'] or 0)
+            bucket['cost_amount'] += float(category.get('cost_amount') or 0)
             bucket['earning_amount'] += float(category['earning_amount'] or 0)
 
     if target_employee_id is not None:
@@ -2923,12 +3216,153 @@ async def get_employee_payroll_summary(location: str, date_from: date, date_to: 
         'date_from': date_from.isoformat(),
         'date_to': date_to.isoformat(),
         'days': days,
-        'categories': sorted(category_totals.values(), key=lambda item: item['category_name'].lower()),
+        'categories': sorted(
+            [
+                {
+                    **item,
+                    'sales_amount': round(float(item['sales_amount']), 2),
+                    'return_amount': round(float(item['return_amount']), 2),
+                    'net_sales_amount': round(float(item['net_sales_amount']), 2),
+                    'cost_amount': round(float(item.get('cost_amount') or 0), 2),
+                    'earning_amount': round(float(item['earning_amount']), 2),
+                    'profit_amount': _calculate_category_profit_amount(item),
+                }
+                for item in category_totals.values()
+            ],
+            key=lambda item: item['category_name'].lower(),
+        ),
         'totals': {key: round(value, 2) for key, value in totals.items()},
         'employee_expenses_total': employee_expenses_total,
         'net_payout_amount': round(totals['gross_salary_amount'] - employee_expenses_total, 2),
     }
     return summary
+
+
+def _inclusive_days_between(date_from: date, date_to: date) -> int:
+    if date_to < date_from:
+        return 0
+    return (date_to - date_from).days + 1
+
+
+async def _compute_operating_profit_for_period(point: LocationPoint, period_from: date, period_to: date, db: AsyncSession) -> dict[str, float]:
+    if period_to < period_from:
+        return {
+            'gross_sales_amount': 0.0,
+            'return_amount': 0.0,
+            'net_sales_amount': 0.0,
+            'cost_amount': 0.0,
+            'employee_salary_total': 0.0,
+            'expenses_total': 0.0,
+            'operating_profit': 0.0,
+        }
+
+    day_metrics = await _load_point_sales_metrics(point, period_from, period_to, db)
+    gross_sales_amount = sum(float(day.get('gross_sales_amount') or 0.0) for day in day_metrics.values())
+    return_amount = sum(float(day.get('return_amount') or 0.0) for day in day_metrics.values())
+    net_sales_amount = sum(float(day.get('net_sales_amount') or 0.0) for day in day_metrics.values())
+    cost_amount = sum(float(day.get('cost_amount') or 0.0) for day in day_metrics.values())
+
+    shifts = (
+        await db.scalars(
+            select(WorkShift)
+            .where(
+                WorkShift.location_point_id == point.id,
+                WorkShift.shift_date >= period_from,
+                WorkShift.shift_date <= period_to,
+                WorkShift.is_deleted.is_(False),
+            )
+            .order_by(WorkShift.shift_date.asc(), WorkShift.id.asc())
+        )
+    ).all()
+    employee_salary_total = 0.0
+    for shift in shifts:
+        computed = await _build_computed_shift(shift, db)
+        employee_salary_total += float(computed.gross_salary_amount or 0.0)
+
+    expenses_total = await _collect_period_company_expenses(point, period_from, period_to, db)
+    operating_profit = round(net_sales_amount - cost_amount - employee_salary_total - expenses_total, 2)
+    return {
+        'gross_sales_amount': round(gross_sales_amount, 2),
+        'return_amount': round(return_amount, 2),
+        'net_sales_amount': round(net_sales_amount, 2),
+        'cost_amount': round(cost_amount, 2),
+        'employee_salary_total': round(employee_salary_total, 2),
+        'expenses_total': round(expenses_total, 2),
+        'operating_profit': operating_profit,
+    }
+
+
+async def _compute_prorated_manager_salary(
+    point: LocationPoint,
+    date_from: date,
+    date_to: date,
+    db: AsyncSession,
+) -> dict[str, Any]:
+    today = get_moscow_today()
+    months = await _months_between(date_from, date_to)
+    total_salary_raw = 0.0
+    weighted_rate_sum = 0.0
+    weighted_rate_days = 0
+    latest_brackets: list[dict[str, float]] = []
+    breakdown: list[dict[str, Any]] = []
+
+    for month_cursor in months:
+        month_from = _month_start(month_cursor)
+        month_to = _month_end(month_cursor)
+        selected_from = max(date_from, month_from)
+        selected_to = min(date_to, month_to)
+        if selected_to < selected_from:
+            continue
+
+        is_current_month = month_from.year == today.year and month_from.month == today.month
+        if month_from > today:
+            continue
+
+        basis_from = month_from
+        basis_to = min(month_to, today) if is_current_month else month_to
+        if basis_to < basis_from:
+            continue
+
+        allocated_from = max(selected_from, basis_from)
+        allocated_to = min(selected_to, basis_to)
+        allocated_days = _inclusive_days_between(allocated_from, allocated_to)
+        basis_days = _inclusive_days_between(basis_from, basis_to)
+        if allocated_days <= 0 or basis_days <= 0:
+            continue
+
+        basis_totals = await _compute_operating_profit_for_period(point, basis_from, basis_to, db)
+        month_settings = await _get_settings_for_date(point, basis_to, db)
+        month_brackets = _load_manager_salary_brackets(month_settings)
+        latest_brackets = month_brackets
+        month_rate_percent = _manager_rate_for_profit(basis_totals['operating_profit'], month_brackets)
+        full_basis_salary = round(max(basis_totals['operating_profit'], 0.0) * (month_rate_percent / 100.0), 2)
+        allocated_salary_raw = full_basis_salary * (allocated_days / basis_days)
+        total_salary_raw += allocated_salary_raw
+        weighted_rate_sum += month_rate_percent * allocated_days
+        weighted_rate_days += allocated_days
+        breakdown.append({
+            'month': month_from.isoformat(),
+            'basis_from': basis_from.isoformat(),
+            'basis_to': basis_to.isoformat(),
+            'basis_days': basis_days,
+            'selected_from': allocated_from.isoformat(),
+            'selected_to': allocated_to.isoformat(),
+            'selected_days': allocated_days,
+            'is_current_month': is_current_month,
+            'operating_profit_basis': round(float(basis_totals['operating_profit']), 2),
+            'manager_rate_percent': round(float(month_rate_percent), 2),
+            'manager_salary_full_basis': round(full_basis_salary, 2),
+            'manager_salary_allocated': round(allocated_salary_raw, 2),
+        })
+
+    manager_salary_amount = round(total_salary_raw, 2)
+    manager_rate_percent = round((weighted_rate_sum / weighted_rate_days), 2) if weighted_rate_days > 0 else 0.0
+    return {
+        'manager_salary_amount': manager_salary_amount,
+        'manager_rate_percent': manager_rate_percent,
+        'manager_salary_brackets': latest_brackets or _default_manager_salary_brackets(),
+        'breakdown': breakdown,
+    }
 
 
 async def get_manager_payroll_summary(location: str, date_from: date, date_to: date, db: AsyncSession, current_user: User) -> dict[str, Any]:
@@ -2958,8 +3392,8 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
         computed = await _build_computed_shift(shift, db)
         employee_salary_total += computed.gross_salary_amount
 
-    current_settings = await _get_settings_for_date(point, date_to, db)
-    manager_salary_brackets = _load_manager_salary_brackets(current_settings)
+    today = get_moscow_today()
+    current_settings = await _get_settings_for_date(point, min(date_to, today), db)
     settings_cache: dict[int, tuple[PayrollSettingsVersion, dict[str, dict[str, Any]], dict[str, dict[str, Any]]]] = {}
     category_totals: dict[str, dict[str, Any]] = {}
     for metric_day, metrics in day_metrics.items():
@@ -2974,6 +3408,8 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
         for row in metrics.get('categories') or []:
             category_id = str(row.get('category_id') or '__other__')
             category_name = str(row.get('category_name') or DEFAULT_CATEGORY_NAME)
+            if _is_excluded_payroll_category_name(category_name):
+                continue
             rate_info = _get_rate_info_for_category(category_id, category_name, day_rate_map, day_rate_name_map)
             rate_percent, is_other_category = _resolve_category_rate_percent(rate_info, day_settings.other_rate_percent)
             net_amount = _sanitize_uncategorized_net(category_name, float(row.get('net_sales_amount') or 0))
@@ -2985,12 +3421,14 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
                 'sales_amount': 0.0,
                 'return_amount': 0.0,
                 'net_sales_amount': 0.0,
+                'cost_amount': 0.0,
                 'earning_amount': 0.0,
                 'is_other_category': is_other_category,
             })
             bucket['sales_amount'] += float(row.get('sales_amount') or 0)
             bucket['return_amount'] += float(row.get('return_amount') or 0)
             bucket['net_sales_amount'] += net_amount
+            bucket['cost_amount'] += float(row.get('cost_amount') or 0)
             bucket['earning_amount'] += earning_amount
             # Для периода с несколькими версиями правил показываем последнюю ставку, действовавшую в этом периоде.
             bucket['rate_percent'] = rate_percent
@@ -2998,8 +3436,9 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
 
     expenses_total = await _collect_period_company_expenses(point, date_from, date_to, db)
     operating_profit = round(net_sales_amount - cost_amount - employee_salary_total - expenses_total, 2)
-    manager_rate_percent = _manager_rate_for_profit(operating_profit, manager_salary_brackets)
-    manager_salary_amount = round(max(operating_profit, 0) * (manager_rate_percent / 100.0), 2)
+    manager_salary_info = await _compute_prorated_manager_salary(point, date_from, date_to, db)
+    manager_rate_percent = float(manager_salary_info['manager_rate_percent'])
+    manager_salary_amount = float(manager_salary_info['manager_salary_amount'])
     net_profit_after_manager_salary = round(operating_profit - manager_salary_amount, 2)
     responsible_admin = await db.get(User, current_settings.responsible_admin_user_id) if current_settings.responsible_admin_user_id else None
     return {
@@ -3014,13 +3453,14 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
         'employee_salary_total': round(employee_salary_total, 2),
         'expenses_total': expenses_total,
         'operating_profit_before_manager_salary': operating_profit,
-        'manager_rate_percent': manager_rate_percent,
-        'manager_salary_amount': manager_salary_amount,
+        'manager_rate_percent': round(manager_rate_percent, 2),
+        'manager_salary_amount': round(manager_salary_amount, 2),
         'net_profit_after_manager_salary': net_profit_after_manager_salary,
         'profit_after_manager_salary': net_profit_after_manager_salary,
         'responsible_admin_user_id': responsible_admin.id if responsible_admin else None,
         'responsible_admin_name': responsible_admin.full_name if responsible_admin else None,
-        'manager_salary_brackets': manager_salary_brackets,
+        'manager_salary_brackets': manager_salary_info['manager_salary_brackets'],
+        'manager_salary_proration': manager_salary_info['breakdown'],
         'categories': sorted(
             [
                 {
@@ -3028,7 +3468,9 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
                     'sales_amount': round(float(row['sales_amount']), 2),
                     'return_amount': round(float(row['return_amount']), 2),
                     'net_sales_amount': round(float(row['net_sales_amount']), 2),
+                    'cost_amount': round(float(row.get('cost_amount') or 0), 2),
                     'earning_amount': round(float(row['earning_amount']), 2),
+                    'profit_amount': _calculate_category_profit_amount(row),
                 }
                 for row in category_totals.values()
             ],
@@ -3251,7 +3693,7 @@ async def export_employee_payroll_xlsx(location: str, date_from: date, date_to: 
             day['gross_salary_amount'],
         ])
     ws.append([])
-    ws.append(['Категория', 'Процент', 'Продажи', 'Возвраты', 'Чистая сумма', 'Начислено'])
+    ws.append(['Категория', 'Процент', 'Продажи', 'Возвраты', 'Сумма', 'Начислено', 'Прибыль'])
     for cell in ws[7 + len(summary['days'])]:
         cell.font = Font(bold=True)
     for category in summary['categories']:
@@ -3262,6 +3704,7 @@ async def export_employee_payroll_xlsx(location: str, date_from: date, date_to: 
             category['return_amount'],
             category['net_sales_amount'],
             category['earning_amount'],
+            category.get('profit_amount', _calculate_category_profit_amount(category)),
         ])
     ws.append([])
     ws.append(['Общий итог', summary['totals']['gross_salary_amount']])

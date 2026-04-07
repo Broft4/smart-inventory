@@ -457,12 +457,15 @@ class MoySkladClient:
         document_id: str,
         *,
         expand: str | None = None,
+        fields: str | None = None,
         token: str | None = None,
         location: str | None = None,
     ) -> list[dict[str, Any]]:
         params: dict[str, Any] = {}
         if expand:
             params['expand'] = expand
+        if fields:
+            params['fields'] = fields
         page_limit = 100 if expand else 1000
         return await self.get_all_pages(
             f'entity/{entity_name}/{document_id}/positions',
@@ -478,6 +481,7 @@ class MoySkladClient:
         rows: list[dict[str, Any]],
         *,
         expand: str | None = None,
+        fields: str | None = None,
         token: str | None = None,
         location: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -500,6 +504,7 @@ class MoySkladClient:
                     entity_name,
                     document_id,
                     expand=expand,
+                    fields=fields,
                     token=token,
                     location=location,
                 )
@@ -538,6 +543,7 @@ class MoySkladClient:
         expand: str | None = None,
         include_positions: bool = False,
         positions_expand: str | None = None,
+        positions_fields: str | None = None,
         token: str | None = None,
         location: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -568,6 +574,7 @@ class MoySkladClient:
                 entity_name,
                 rows,
                 expand=positions_expand,
+                fields=positions_fields,
                 token=token,
                 location=location,
             )

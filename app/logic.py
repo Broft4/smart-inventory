@@ -715,6 +715,9 @@ def bootstrap_schema_and_admin(sync_conn) -> None:
         if 'expense_date' not in cols:
             sync_conn.execute(text('ALTER TABLE monthly_expense_entries ADD COLUMN expense_date DATE'))
             sync_conn.execute(text('UPDATE monthly_expense_entries SET expense_date = month_start WHERE expense_date IS NULL'))
+        if 'distribution_mode' not in cols:
+            sync_conn.execute(text("ALTER TABLE monthly_expense_entries ADD COLUMN distribution_mode VARCHAR(20) NOT NULL DEFAULT 'spread'"))
+            sync_conn.execute(text("UPDATE monthly_expense_entries SET distribution_mode = 'single_day' WHERE template_id IS NULL"))
 
     if reset_reports:
         sync_conn.execute(text('DROP TABLE IF EXISTS check_results'))

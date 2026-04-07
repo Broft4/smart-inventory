@@ -61,7 +61,7 @@
             <summary class="report-summary-header payroll-collapse-summary">
                 <div>
                     <h2>Зарплата управляющего и прибыль точки</h2>
-                    <p class="muted-text">Расчёт по точке за выбранный период.</p>
+                    <p class="muted-text">Расчёт по точке за выбранный период. В статистику попадают только оплаченные расходы.</p>
                 </div>
                 <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
             </summary>
@@ -130,8 +130,10 @@
                                 <th>%</th>
                                 <th>Продажи</th>
                                 <th>Возвраты</th>
-                                <th>Чистая сумма</th>
+                                <th>Сумма</th>
+                                <th>Себестоимость</th>
                                 <th>Начислено</th>
+                                <th>Прибыль</th>
                             </tr>
                         </thead>
                         <tbody id="payroll-category-tbody"></tbody>
@@ -158,7 +160,19 @@
 
     <section class="category-card hidden" id="admin-settings-card">
         <details class="payroll-collapse">
-            <summary class="report-summary-header payroll-collapse-summary"><div><h2>Настройки зарплаты точки</h2><p class="muted-text">Версионные правила: новые изменения не переписывают прошлые закрытые смены.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span></summary>
+            <summary class="report-summary-header payroll-collapse-summary">
+                <div>
+                    <div class="payroll-title-with-loading">
+                        <h2>Настройки зарплаты точки</h2>
+                        <div id="settings-section-loading" class="payroll-inline-loading hidden" aria-live="polite">
+                            <span class="btn-loader" aria-hidden="true"></span>
+                            <span data-loading-text>Загружаем настройки...</span>
+                        </div>
+                    </div>
+                    <p class="muted-text">Версионные правила: новые изменения не переписывают прошлые закрытые смены.</p>
+                </div>
+                <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
+            </summary>
             <div class="payroll-collapse-body">
                 <div class="payroll-settings-grid">
                     <label>Дата вступления<input type="date" id="settings-effective-from"></label>
@@ -168,7 +182,7 @@
                     <label>Процент «Все остальное»<input type="number" id="settings-other-rate" min="0" step="0.01"></label>
                     <label>Ответственный управляющий<select id="settings-admin-select"></select></label>
                 </div>
-                <div class="payroll-settings-rates-card">
+                <div class="payroll-settings-rates-card" id="settings-rates-card" aria-busy="false">
                     <div class="payroll-settings-rates-head">
                         <div>
                             <h3>Проценты по категориям и бонус к выходу</h3>
@@ -176,7 +190,7 @@
                         </div>
                         <div id="settings-category-loading" class="payroll-inline-loading hidden" aria-live="polite">
                             <span class="btn-loader" aria-hidden="true"></span>
-                            <span id="settings-category-loading-text">Загружаем категории...</span>
+                            <span id="settings-category-loading-text" data-loading-text>Загружаем категории...</span>
                         </div>
                     </div>
                     <div id="settings-category-rates" class="settings-category-grid"></div>
@@ -235,7 +249,7 @@
                         <div class="expense-section-head expense-section-head--stacked">
                             <div>
                                 <h3>Расходы за месяц</h3>
-                                <p class="muted-text">Оплата, сотрудник, комментарий и удержание из зарплаты настраиваются по каждой записи отдельно.</p>
+                                <p class="muted-text">Для каждого расхода можно выбрать: растянуть сумму на весь месяц или списать её одним днём. В сводке учитываются только оплаченные расходы.</p>
                             </div>
                             <button id="expense-entries-toggle-btn" type="button" class="btn secondary btn-inline">Развернуть расходы</button>
                         </div>
@@ -262,6 +276,8 @@
                         <div class="payroll-filter-grid expense-manual-grid">
                             <label>Название<input type="text" id="manual-expense-name" placeholder="Например, уборка"></label>
                             <label>Сумма<input type="number" id="manual-expense-amount" min="0" step="0.01"></label>
+                            <label>Как учитывать<select id="manual-expense-mode"><option value="single_day">Одним днём</option><option value="spread">Растянуть на месяц</option></select></label>
+                            <label>Дата расхода<input type="date" id="manual-expense-date"></label>
                             <label>Сотрудник<select id="manual-expense-employee"><option value="">Без привязки</option></select></label>
                             <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline"><input type="checkbox" id="manual-expense-paid"> Уже оплачен</label>
                             <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline"><input type="checkbox" id="manual-expense-apply"> Вычитать из зарплаты сотрудника</label>

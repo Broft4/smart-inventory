@@ -1390,6 +1390,12 @@ body.modal-open {
     border-radius: 18px;
     padding: 18px;
     background: linear-gradient(180deg, #fbfcff 0%, #f8fbff 100%);
+    transition: opacity .18s ease, filter .18s ease;
+}
+
+.payroll-settings-rates-card.is-disabled {
+    opacity: 0.6;
+    filter: grayscale(0.12);
 }
 
 .payroll-settings-rates-head {
@@ -1679,6 +1685,26 @@ body.modal-open {
 .btn.is-loading {
     opacity: 0.92;
     cursor: wait;
+}
+
+.payroll-inline-loading {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    color: #4b5b70;
+    font-size: 13px;
+    white-space: nowrap;
+}
+
+.payroll-title-with-loading {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.payroll-title-with-loading h2 {
+    margin: 0;
 }
 
 @keyframes payroll-spin {
@@ -2375,11 +2401,11 @@ body.modal-open {
 .employee-shift-status {
     display: inline-flex;
     align-items: center;
-    padding: 6px 10px;
+    padding: 5px 9px;
     border-radius: 999px;
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 700;
-    margin-bottom: 10px;
+    margin-bottom: 8px;
 }
 
 .employee-shift-status.closed {
@@ -2410,8 +2436,8 @@ body.modal-open {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
-    font-size: 15px;
+    gap: 10px;
+    font-size: 13px;
     font-weight: 600;
 }
 
@@ -2423,7 +2449,7 @@ body.modal-open {
 .employee-shift-line strong {
     color: #1d2d44;
     white-space: nowrap;
-    font-size: 17px;
+    font-size: 15px;
     font-weight: 800;
 }
 
@@ -2436,6 +2462,15 @@ body.modal-open {
     white-space: nowrap;
 }
 
+.employee-shift-calendar-cell .shift-calendar-empty-day {
+    font-size: 13px;
+}
+
+.employee-shift-calendar-cell .shift-calendar-cell-head span {
+    font-size: 11px;
+}
+
+
 @media (max-width: 768px) {
     .employee-shift-calendar-grid .shift-calendar-cell {
         min-height: 150px;
@@ -2446,7 +2481,7 @@ body.modal-open {
     }
 
     .employee-shift-line strong {
-        font-size: 16px;
+        font-size: 14px;
     }
 
     .shift-calendar-scroller .shift-calendar-mobile-remove-btn--inline {
@@ -3006,6 +3041,20 @@ body.modal-open {
 
     .shift-calendar-scroller .employee-shift-status {
         margin-bottom: 0;
+    }
+
+    .shift-calendar-scroller .employee-shift-calendar-cell .shift-calendar-empty-day {
+        font-size: 11px;
+        line-height: 1.2;
+    }
+
+    .shift-calendar-scroller .employee-shift-status {
+        font-size: 10px;
+        padding: 4px 7px;
+    }
+
+    .shift-calendar-scroller .employee-shift-line {
+        font-size: 12px;
     }
 
     .shift-calendar-scroller .employee-shift-status-dot {
