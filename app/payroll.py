@@ -5,7 +5,7 @@ import json
 import logging
 import re
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from io import BytesIO
 from typing import Any
@@ -78,8 +78,6 @@ async def _sleep_for_locked_retry(attempt: int) -> None:
 
 
 def _sanitize_uncategorized_net(category_name: Any, net_sales_amount: float) -> float:
-    if str(category_name or '').strip() == DEFAULT_CATEGORY_NAME:
-        return round(max(float(net_sales_amount or 0.0), 0.0), 2)
     return round(float(net_sales_amount or 0.0), 2)
 
 
@@ -88,19 +86,9 @@ def _sanitize_uncategorized_row(row: dict[str, Any]) -> dict[str, Any]:
     net_sales_amount = _sanitize_uncategorized_net(category_name, row.get('net_sales_amount') or 0.0)
     row['net_sales_amount'] = net_sales_amount
     if str(category_name or '').strip() == DEFAULT_CATEGORY_NAME:
-        row['earning_amount'] = round(max(float(row.get('earning_amount') or 0.0), 0.0), 2)
+        row['earning_amount'] = 0.0
+        row['rate_percent'] = 0.0
     return row
-
-
-def _calculate_category_profit_amount(category: dict[str, Any]) -> float:
-    net_sales_amount = _sanitize_uncategorized_net(category.get('category_name'), category.get('net_sales_amount') or 0.0)
-    cost_amount = round(float(category.get('cost_amount') or 0.0), 2)
-    earning_amount = round(float(category.get('earning_amount') or 0.0), 2)
-    return round(net_sales_amount - cost_amount - earning_amount, 2)
-
-
-def _is_excluded_payroll_category_name(category_name: Any) -> bool:
-    return str(category_name or '').strip() == DEFAULT_CATEGORY_NAME
 
 
 def _recalculate_summary_totals_from_categories(day_payload: dict[str, Any]) -> None:
@@ -119,6 +107,73 @@ def _recalculate_summary_totals_from_categories(day_payload: dict[str, Any]) -> 
         + float(day_payload.get('category_earnings_total') or 0.0),
         2,
     )
+
+
+def _should_backfill_category_costs(categories: list[dict[str, Any]] | None, total_cost_amount: float) -> bool:
+    rows = categories or []
+    if not rows:
+        return False
+    visible_rows = [row for row in rows if str(row.get('category_name') or '').strip() != DEFAULT_CATEGORY_NAME]
+    has_visible_sales = any(
+        abs(float(row.get('sales_amount') or 0.0)) > 0.009
+        or abs(float(row.get('net_sales_amount') or 0.0)) > 0.009
+        for row in visible_rows
+    )
+    if not has_visible_sales:
+        return False
+
+    total_category_cost_sum = round(sum(float(row.get('cost_amount') or 0.0) for row in rows), 2)
+    if abs(total_category_cost_sum) <= 0.009:
+        return True
+
+    visible_cost_sum = round(sum(float(row.get('cost_amount') or 0.0) for row in visible_rows), 2)
+    if abs(visible_cost_sum) > 0.009:
+        return False
+
+    normalized_total_cost = round(float(total_cost_amount or 0.0), 2)
+    if abs(normalized_total_cost) <= 0.009:
+        return True
+
+    other_cost_sum = round(sum(float(row.get('cost_amount') or 0.0) for row in rows if str(row.get('category_name') or '').strip() == DEFAULT_CATEGORY_NAME), 2)
+    return abs(other_cost_sum - normalized_total_cost) <= 0.01
+
+
+async def _backfill_category_costs_from_day_metrics(
+    point: LocationPoint,
+    shift_date: date,
+    categories: list[dict[str, Any]],
+    total_cost_amount: float,
+    share_ratio: float,
+    db: AsyncSession,
+) -> list[dict[str, Any]]:
+    if not _should_backfill_category_costs(categories, total_cost_amount):
+        return categories
+
+    day_metrics = (await _load_point_sales_metrics(point, shift_date, shift_date, db)).get(shift_date, _empty_day_metrics())
+    source_rows = day_metrics.get('categories') or []
+    by_id = {str(row.get('category_id') or '').strip(): row for row in source_rows if str(row.get('category_id') or '').strip()}
+    by_name = {_normalize_category_name_key(row.get('category_name')): row for row in source_rows if _normalize_category_name_key(row.get('category_name'))}
+
+    patched: list[dict[str, Any]] = []
+    for row in categories:
+        cloned = dict(row)
+        key = str(cloned.get('category_id') or '').strip()
+        matched = by_id.get(key)
+        if matched is None:
+            matched = by_name.get(_normalize_category_name_key(cloned.get('category_name')))
+        if matched is not None:
+            cloned['cost_amount'] = round(float(matched.get('cost_amount') or 0.0) * float(share_ratio or 0.0), 2)
+        patched.append(_sanitize_uncategorized_row(cloned))
+
+    visible_cost_sum = round(sum(float(row.get('cost_amount') or 0.0) for row in patched if str(row.get('category_name') or '').strip() != DEFAULT_CATEGORY_NAME), 2)
+    source_total_cost_amount = round(float(day_metrics.get('cost_amount') or 0.0) * float(share_ratio or 0.0), 2)
+    target_total_cost_amount = round(float(total_cost_amount or 0.0), 2)
+    if abs(target_total_cost_amount) <= 0.009 and abs(source_total_cost_amount) > 0.009:
+        target_total_cost_amount = source_total_cost_amount
+    uncategorized_row = next((row for row in patched if str(row.get('category_name') or '').strip() == DEFAULT_CATEGORY_NAME), None)
+    if uncategorized_row is not None:
+        uncategorized_row['cost_amount'] = round(target_total_cost_amount - visible_cost_sum, 2)
+    return patched
 
 
 def _ms_client_enabled(token: str | None = None, location: str | None = None) -> bool:
@@ -261,6 +316,8 @@ class ProfitReportDayMetrics:
     cost_amount: float = 0.0
     gross_profit_amount: float = 0.0
     has_rows: bool = False
+    category_costs_by_id: dict[str, float] = field(default_factory=dict)
+    category_costs_by_name: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -486,6 +543,7 @@ def _month_end(value: date) -> date:
     return date(value.year, value.month + 1, 1) - timedelta(days=1)
 
 
+
 def _normalize_expense_distribution_mode(value: Any, *, default: str = EXPENSE_MODE_SPREAD) -> str:
     normalized_default = EXPENSE_MODE_SINGLE_DAY if default == EXPENSE_MODE_SINGLE_DAY else EXPENSE_MODE_SPREAD
     normalized = str(value or '').strip().lower()
@@ -494,7 +552,6 @@ def _normalize_expense_distribution_mode(value: Any, *, default: str = EXPENSE_M
     if normalized in {EXPENSE_MODE_SPREAD, 'month', 'monthly', 'spread_month'}:
         return EXPENSE_MODE_SPREAD
     return normalized_default
-
 
 def _clip_expense_date_to_month(expense_date: date, month_start: date) -> date:
     month_key = _month_start(month_start)
@@ -505,13 +562,11 @@ def _clip_expense_date_to_month(expense_date: date, month_start: date) -> date:
         return month_last
     return expense_date
 
-
 def _default_expense_date_for_month(month_start: date, *, day_of_month: int = 1) -> date:
     month_key = _month_start(month_start)
     month_last = _month_end(month_key)
     safe_day = min(max(int(day_of_month or 1), 1), month_last.day)
     return date(month_key.year, month_key.month, safe_day)
-
 
 def _resolve_entry_expense_date(entry: MonthlyExpenseEntry, template: ExpenseTemplate | None = None) -> date:
     month_key = _month_start(entry.month_start)
@@ -521,11 +576,9 @@ def _resolve_entry_expense_date(entry: MonthlyExpenseEntry, template: ExpenseTem
     template_day = int(template.day_of_month or 1) if template is not None else 1
     return _default_expense_date_for_month(month_key, day_of_month=template_day)
 
-
 def _expense_entry_mode(entry: MonthlyExpenseEntry) -> str:
     default_mode = EXPENSE_MODE_SINGLE_DAY if entry.template_id is None else EXPENSE_MODE_SPREAD
     return _normalize_expense_distribution_mode(getattr(entry, 'distribution_mode', None), default=default_mode)
-
 
 def _expense_entry_amount_for_period(
     entry: MonthlyExpenseEntry,
@@ -620,19 +673,7 @@ def _first_money_value(container: dict[str, Any], fields: tuple[str, ...]) -> fl
 
 
 
-def _extract_position_amount(position: dict[str, Any]) -> float:
-    quantity = _quantity(position.get('quantity'))
-    amount = _first_money_value(position, ('sum', 'amount', 'saleSum', 'retailSum'))
-    if amount is not None:
-        return round(amount, 2)
-    unit_price = _first_money_value(position, ('price', 'salePrice', 'sellingPrice'))
-    if unit_price is not None and quantity > 0:
-        return round(unit_price * quantity, 2)
-    return 0.0
-
-
-
-def _extract_stock_cost_amount(stock_payload: Any, quantity: float) -> float | None:
+def _extract_cost_from_stock_payload(payload: Any, quantity: float) -> float | None:
     total_fields = (
         'costSum',
         'costPriceSum',
@@ -654,31 +695,31 @@ def _extract_stock_cost_amount(stock_payload: Any, quantity: float) -> float | N
         'price',
     )
 
-    if isinstance(stock_payload, list):
+    if isinstance(payload, list):
         total = 0.0
         found = False
-        for item in stock_payload:
-            amount = _extract_stock_cost_amount(item, quantity)
+        for item in payload:
+            amount = _extract_cost_from_stock_payload(item, quantity)
             if amount is None:
                 continue
             total += amount
             found = True
         return round(max(total, 0.0), 2) if found else None
 
-    if not isinstance(stock_payload, dict):
+    if not isinstance(payload, dict):
         return None
 
-    total_cost = _first_money_value(stock_payload, total_fields)
+    total_cost = _first_money_value(payload, total_fields)
     if total_cost is not None:
         return round(max(total_cost, 0.0), 2)
 
-    unit_cost = _first_money_value(stock_payload, unit_fields)
+    unit_cost = _first_money_value(payload, unit_fields)
     if unit_cost is not None:
         nested_quantity = _quantity(
-            stock_payload.get('quantity')
-            or stock_payload.get('qty')
-            or stock_payload.get('stock')
-            or stock_payload.get('available')
+            payload.get('quantity')
+            or payload.get('qty')
+            or payload.get('stock')
+            or payload.get('available')
         )
         effective_quantity = nested_quantity if nested_quantity > 0 else quantity
         if effective_quantity > 0:
@@ -687,8 +728,8 @@ def _extract_stock_cost_amount(stock_payload: Any, quantity: float) -> float | N
 
     nested_total = 0.0
     found_nested = False
-    for key in ('rows', 'items', 'stocks', 'stores', 'stockByOperations', 'stockByStore'):
-        amount = _extract_stock_cost_amount(stock_payload.get(key), quantity)
+    for key in ('rows', 'items', 'stocks', 'stores', 'stockByOperations', 'stockByStore', 'data'):
+        amount = _extract_cost_from_stock_payload(payload.get(key), quantity)
         if amount is None:
             continue
         nested_total += amount
@@ -696,7 +737,26 @@ def _extract_stock_cost_amount(stock_payload: Any, quantity: float) -> float | N
     if found_nested:
         return round(max(nested_total, 0.0), 2)
 
+    for nested_value in payload.values():
+        if not isinstance(nested_value, (dict, list)):
+            continue
+        amount = _extract_cost_from_stock_payload(nested_value, quantity)
+        if amount is not None:
+            return amount
+
     return None
+
+
+
+def _extract_position_amount(position: dict[str, Any]) -> float:
+    quantity = _quantity(position.get('quantity'))
+    amount = _first_money_value(position, ('sum', 'amount', 'saleSum', 'retailSum'))
+    if amount is not None:
+        return round(amount, 2)
+    unit_price = _first_money_value(position, ('price', 'salePrice', 'sellingPrice'))
+    if unit_price is not None and quantity > 0:
+        return round(unit_price * quantity, 2)
+    return 0.0
 
 
 
@@ -708,8 +768,7 @@ def _extract_position_cost_amount(position: dict[str, Any]) -> float | None:
     unit_cost = _first_money_value(position, ('buyPrice', 'costPrice', 'purchasePrice', 'purchaseCost', 'costValue'))
     if unit_cost is not None and quantity > 0:
         return round(max(unit_cost, 0.0) * quantity, 2)
-
-    stock_cost = _extract_stock_cost_amount(position.get('stock'), quantity)
+    stock_cost = _extract_cost_from_stock_payload(position.get('stock'), quantity)
     if stock_cost is not None:
         return stock_cost
     return None
@@ -2130,6 +2189,37 @@ def _extract_profit_report_amount(row: dict[str, Any], *fields: str) -> float:
     return round(value, 2)
 
 
+def _extract_profit_report_category_info(
+    row: dict[str, Any],
+    category_lookup: dict[str, dict[str, str]],
+    category_ids_by_name: dict[str, str],
+) -> dict[str, str] | None:
+    category = _extract_position_category_info(row, category_lookup, category_ids_by_name)
+    if category is not None:
+        return category
+
+    for candidate_key in ('productFolder', 'folder', 'goodFolder', 'productfolder'):
+        folder = row.get(candidate_key)
+        if not isinstance(folder, dict):
+            continue
+        folder_name = str(folder.get('name') or '').strip()
+        if folder_name and folder_name in category_ids_by_name:
+            return {
+                'category_id': category_ids_by_name[folder_name],
+                'category_name': folder_name,
+            }
+
+    path_name = str(row.get('pathName') or row.get('path_name') or '').strip()
+    if path_name:
+        first_part = next((part.strip() for part in re.split(r'\s*/\s*', path_name) if part.strip()), '')
+        if first_part and first_part in category_ids_by_name:
+            return {
+                'category_id': category_ids_by_name[first_part],
+                'category_name': first_part,
+            }
+    return None
+
+
 async def _load_profitability_metrics_by_day(point: LocationPoint, date_from: date, date_to: date) -> dict[date, ProfitReportDayMetrics]:
     if not _ms_client_enabled(token=_point_ms_token(point), location=point.name):
         return {}
@@ -2466,6 +2556,24 @@ async def _store_point_sales_metrics_cache(point: LocationPoint, metrics_by_day:
 def _is_cached_day_fresh(day: date, metrics: dict[str, Any] | None) -> bool:
     if metrics is None:
         return False
+
+    categories = metrics.get('categories') or []
+    visible_rows = [row for row in categories if str(row.get('category_name') or '').strip() != DEFAULT_CATEGORY_NAME]
+    has_visible_sales = any(
+        abs(float(row.get('sales_amount') or 0.0)) > 0.009
+        or abs(float(row.get('net_sales_amount') or 0.0)) > 0.009
+        for row in visible_rows
+    )
+    if has_visible_sales:
+        total_cost_amount = round(float(metrics.get('cost_amount') or 0.0), 2)
+        visible_cost_sum = round(sum(float(row.get('cost_amount') or 0.0) for row in visible_rows), 2)
+        if abs(visible_cost_sum) <= 0.009:
+            if abs(total_cost_amount) <= 0.009:
+                return False
+            other_cost_sum = round(sum(float(row.get('cost_amount') or 0.0) for row in categories if str(row.get('category_name') or '').strip() == DEFAULT_CATEGORY_NAME), 2)
+            if abs(other_cost_sum - total_cost_amount) <= 0.01:
+                return False
+
     today = get_moscow_today()
     if day < today:
         return True
@@ -2592,39 +2700,49 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
         ).all()
         settings = await db.get(PayrollSettingsVersion, snapshot.settings_version_id) if snapshot.settings_version_id else await _get_settings_for_date(point, shift.shift_date, db)
         bonus_category_ids = _load_bonus_category_ids(settings)
-        fallback_category_costs: dict[tuple[str, str], float] = {}
-        if category_rows and abs(float(snapshot.cost_amount or 0)) > 1e-9 and all(abs(float(getattr(row, 'cost_amount', 0) or 0)) <= 1e-9 for row in category_rows):
-            day_metrics_by_date = await _load_point_sales_metrics(point, shift.shift_date, shift.shift_date, db)
-            fallback_share_ratio = round(float(snapshot.share_ratio or 0), 4)
-            for metric_row in (day_metrics_by_date.get(shift.shift_date) or {}).get('categories') or []:
-                fallback_cost = round(float(metric_row.get('cost_amount') or 0.0) * fallback_share_ratio, 2)
-                fallback_key = (str(metric_row.get('category_id') or ''), str(metric_row.get('category_name') or ''))
-                fallback_category_costs[fallback_key] = fallback_cost
-
-        snapshot_categories = []
+        rate_map = await _get_settings_rates(settings.id, db)
+        rate_name_map = _build_category_rate_name_map(rate_map)
+        snapshot_categories: list[dict[str, Any]] = []
         for row in category_rows:
-            category_payload = _sanitize_uncategorized_row({
-                'category_id': row.category_id,
-                'category_name': row.category_name,
-                'rate_percent': round(float(row.rate_percent or 0), 2),
+            category_name = str(row.category_name or '').strip() or DEFAULT_CATEGORY_NAME
+            category_id = str(row.category_id or '__other__')
+            net_sales_amount = _sanitize_uncategorized_net(category_name, round(float(row.net_sales_amount or 0), 2))
+            rate_info = _get_rate_info_for_category(category_id, category_name, rate_map, rate_name_map)
+            rate_percent, _used_other_rate = _resolve_category_rate_percent(rate_info, settings.other_rate_percent)
+            is_uncategorized = category_name == DEFAULT_CATEGORY_NAME or category_id == '__other__'
+            effective_rate_percent = 0.0 if is_uncategorized else rate_percent
+            earning_amount = round(max(net_sales_amount, 0.0) * (effective_rate_percent / 100.0), 2)
+            snapshot_categories.append(_sanitize_uncategorized_row({
+                'category_id': category_id,
+                'category_name': category_name,
+                'rate_percent': round(effective_rate_percent, 2),
                 'sales_amount': round(float(row.sales_amount or 0), 2),
                 'return_amount': round(float(row.return_amount or 0), 2),
-                'net_sales_amount': round(float(row.net_sales_amount or 0), 2),
-                'cost_amount': round(float(getattr(row, 'cost_amount', 0) or 0), 2),
-                'earning_amount': round(float(row.earning_amount or 0), 2),
-                'is_other_category': row.is_other_category,
-            })
-            if abs(float(category_payload.get('cost_amount') or 0.0)) <= 1e-9:
-                fallback_key = (str(category_payload.get('category_id') or ''), str(category_payload.get('category_name') or ''))
-                fallback_cost = fallback_category_costs.get(fallback_key)
-                if fallback_cost is not None:
-                    category_payload['cost_amount'] = fallback_cost
-            category_payload['profit_amount'] = _calculate_category_profit_amount(category_payload)
-            snapshot_categories.append(category_payload)
+                'net_sales_amount': net_sales_amount,
+                'cost_amount': round(float(row.cost_amount or 0), 2),
+                'earning_amount': earning_amount,
+                'is_other_category': is_uncategorized,
+            }))
+        snapshot_categories = await _backfill_category_costs_from_day_metrics(
+            point,
+            shift.shift_date,
+            snapshot_categories,
+            round(float(snapshot.cost_amount or 0), 2),
+            float(snapshot.share_ratio or 0),
+            db,
+        )
         snapshot_category_earnings_total = round(sum(float(item.get('earning_amount') or 0) for item in snapshot_categories), 2)
         snapshot_bonus_base = round(max(float(snapshot.non_tobacco_net_sales_for_bonus or 0), 0.0), 2)
         snapshot_bonus = round(float(snapshot.bonus_amount or 0), 2)
         snapshot_exit = round(float(snapshot.exit_amount or 0), 2)
+        snapshot_cost_amount = round(float(snapshot.cost_amount or 0), 2)
+        patched_snapshot_cost_amount = round(sum(float(item.get('cost_amount') or 0) for item in snapshot_categories), 2)
+        if abs(snapshot_cost_amount) <= 0.009 and abs(patched_snapshot_cost_amount) > 0.009:
+            snapshot_cost_amount = patched_snapshot_cost_amount
+        snapshot_gross_profit_amount = round(float(snapshot.gross_profit_amount or 0), 2)
+        expected_snapshot_gross_profit_amount = round(float(snapshot.net_sales_amount or 0) - snapshot_cost_amount, 2)
+        if abs(snapshot_gross_profit_amount) <= 0.009 and abs(expected_snapshot_gross_profit_amount) > 0.009:
+            snapshot_gross_profit_amount = expected_snapshot_gross_profit_amount
         snapshot_gross_salary = round(snapshot_exit + snapshot_bonus + snapshot_category_earnings_total, 2)
         return ShiftComputedPayroll(
             shift=shift,
@@ -2643,8 +2761,8 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
             gross_sales_amount=round(float(snapshot.gross_sales_amount or 0), 2),
             return_amount=round(float(snapshot.return_amount or 0), 2),
             net_sales_amount=round(float(snapshot.net_sales_amount or 0), 2),
-            cost_amount=round(float(snapshot.cost_amount or 0), 2),
-            gross_profit_amount=round(float(snapshot.gross_profit_amount or 0), 2),
+            cost_amount=snapshot_cost_amount,
+            gross_profit_amount=snapshot_gross_profit_amount,
             non_tobacco_net_sales_for_bonus=round(float(snapshot.non_tobacco_net_sales_for_bonus or 0), 2),
             category_earnings_total=snapshot_category_earnings_total,
             gross_salary_amount=snapshot_gross_salary,
@@ -2678,25 +2796,25 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
         sales_amount = round(float(row['sales_amount']) * share_ratio, 2)
         return_amount = round(float(row['return_amount']) * share_ratio, 2)
         net_sales_amount = _sanitize_uncategorized_net(row.get('category_name'), round(float(row['net_sales_amount']) * share_ratio, 2))
-        cost_amount = round(float(row.get('cost_amount') or 0.0) * share_ratio, 2)
         category_id = row['category_id']
         rate_info = _get_rate_info_for_category(category_id, row.get('category_name'), rate_map, rate_name_map)
-        rate_percent, is_other_category = _resolve_category_rate_percent(rate_info, settings.other_rate_percent)
-        earning_amount = round(max(net_sales_amount, 0) * (rate_percent / 100.0), 2)
+        rate_percent, _used_other_rate = _resolve_category_rate_percent(rate_info, settings.other_rate_percent)
+        cost_amount = round(float(row.get('cost_amount') or 0) * share_ratio, 2)
+        is_uncategorized = str(row.get('category_name') or '').strip() == DEFAULT_CATEGORY_NAME or category_id == '__other__'
+        effective_rate_percent = 0.0 if is_uncategorized else rate_percent
+        earning_amount = round(max(net_sales_amount, 0) * (effective_rate_percent / 100.0), 2)
         category_earnings_total += earning_amount
-        category_payload = {
+        categories.append(_sanitize_uncategorized_row({
             'category_id': category_id,
             'category_name': row['category_name'],
-            'rate_percent': round(rate_percent, 2),
+            'rate_percent': round(effective_rate_percent, 2),
             'sales_amount': sales_amount,
             'return_amount': return_amount,
             'net_sales_amount': net_sales_amount,
             'cost_amount': cost_amount,
             'earning_amount': earning_amount,
-            'is_other_category': is_other_category,
-        }
-        category_payload['profit_amount'] = _calculate_category_profit_amount(category_payload)
-        categories.append(category_payload)
+            'is_other_category': is_uncategorized,
+        }))
         if bonus_category_ids:
             if category_id in bonus_category_ids:
                 bonus_base_sales_amount += net_sales_amount
@@ -2925,10 +3043,7 @@ def _serialize_computed_shift(computed: ShiftComputedPayroll) -> dict[str, Any]:
         'bonus_amount': computed.bonus_amount,
         'category_earnings_total': computed.category_earnings_total,
         'gross_salary_amount': computed.gross_salary_amount,
-        'categories': [
-            row for row in computed.categories
-            if not _is_excluded_payroll_category_name(row.get('category_name'))
-        ],
+        'categories': computed.categories,
     }
 
 
@@ -3143,10 +3258,12 @@ async def get_employee_payroll_summary(location: str, date_from: date, date_to: 
         if not employee or employee.role != 'employee':
             raise HTTPException(status_code=404, detail='Сотрудник не найден.')
 
+    today = get_moscow_today()
+    effective_date_to = min(date_to, today)
     query = select(WorkShift).where(
         WorkShift.location_point_id == point.id,
         WorkShift.shift_date >= date_from,
-        WorkShift.shift_date <= date_to,
+        WorkShift.shift_date <= effective_date_to,
         WorkShift.is_deleted.is_(False),
     )
     if target_employee_id is not None:
@@ -3193,15 +3310,21 @@ async def get_employee_payroll_summary(location: str, date_from: date, date_to: 
             bucket['cost_amount'] += float(category.get('cost_amount') or 0)
             bucket['earning_amount'] += float(category['earning_amount'] or 0)
 
+    realized_expense_date_to = effective_date_to if effective_date_to >= date_from else None
     if target_employee_id is not None:
-        employee_expenses_total = await _collect_employee_expenses(point, target_employee_id, date_from, date_to, db)
+        employee_expenses_total = (
+            await _collect_employee_expenses(point, target_employee_id, date_from, realized_expense_date_to, db)
+            if realized_expense_date_to is not None
+            else 0.0
+        )
         employee_label = employee.full_name if employee else 'Сотрудник'
         employee_count = 1 if employee else 0
         employee_user_id_value = employee.id if employee else None
     else:
         employee_expenses_total = 0.0
-        for employee_id in employee_ids_in_result:
-            employee_expenses_total += await _collect_employee_expenses(point, employee_id, date_from, date_to, db)
+        if realized_expense_date_to is not None:
+            for employee_id in employee_ids_in_result:
+                employee_expenses_total += await _collect_employee_expenses(point, employee_id, date_from, realized_expense_date_to, db)
         employee_expenses_total = round(employee_expenses_total, 2)
         employee_label = 'Все сотрудники'
         employee_count = len(employee_ids_in_result)
@@ -3219,15 +3342,14 @@ async def get_employee_payroll_summary(location: str, date_from: date, date_to: 
         'categories': sorted(
             [
                 {
-                    **item,
-                    'sales_amount': round(float(item['sales_amount']), 2),
-                    'return_amount': round(float(item['return_amount']), 2),
-                    'net_sales_amount': round(float(item['net_sales_amount']), 2),
-                    'cost_amount': round(float(item.get('cost_amount') or 0), 2),
-                    'earning_amount': round(float(item['earning_amount']), 2),
-                    'profit_amount': _calculate_category_profit_amount(item),
+                    **row,
+                    'sales_amount': round(float(row['sales_amount']), 2),
+                    'return_amount': round(float(row['return_amount']), 2),
+                    'net_sales_amount': round(float(row['net_sales_amount']), 2),
+                    'cost_amount': round(float(row.get('cost_amount') or 0), 2),
+                    'earning_amount': round(float(row['earning_amount']), 2),
                 }
-                for item in category_totals.values()
+                for row in category_totals.values()
             ],
             key=lambda item: item['category_name'].lower(),
         ),
@@ -3238,143 +3360,10 @@ async def get_employee_payroll_summary(location: str, date_from: date, date_to: 
     return summary
 
 
-def _inclusive_days_between(date_from: date, date_to: date) -> int:
+
+async def _sum_shift_salaries(point: LocationPoint, date_from: date, date_to: date, db: AsyncSession) -> float:
     if date_to < date_from:
-        return 0
-    return (date_to - date_from).days + 1
-
-
-async def _compute_operating_profit_for_period(point: LocationPoint, period_from: date, period_to: date, db: AsyncSession) -> dict[str, float]:
-    if period_to < period_from:
-        return {
-            'gross_sales_amount': 0.0,
-            'return_amount': 0.0,
-            'net_sales_amount': 0.0,
-            'cost_amount': 0.0,
-            'employee_salary_total': 0.0,
-            'expenses_total': 0.0,
-            'operating_profit': 0.0,
-        }
-
-    day_metrics = await _load_point_sales_metrics(point, period_from, period_to, db)
-    gross_sales_amount = sum(float(day.get('gross_sales_amount') or 0.0) for day in day_metrics.values())
-    return_amount = sum(float(day.get('return_amount') or 0.0) for day in day_metrics.values())
-    net_sales_amount = sum(float(day.get('net_sales_amount') or 0.0) for day in day_metrics.values())
-    cost_amount = sum(float(day.get('cost_amount') or 0.0) for day in day_metrics.values())
-
-    shifts = (
-        await db.scalars(
-            select(WorkShift)
-            .where(
-                WorkShift.location_point_id == point.id,
-                WorkShift.shift_date >= period_from,
-                WorkShift.shift_date <= period_to,
-                WorkShift.is_deleted.is_(False),
-            )
-            .order_by(WorkShift.shift_date.asc(), WorkShift.id.asc())
-        )
-    ).all()
-    employee_salary_total = 0.0
-    for shift in shifts:
-        computed = await _build_computed_shift(shift, db)
-        employee_salary_total += float(computed.gross_salary_amount or 0.0)
-
-    expenses_total = await _collect_period_company_expenses(point, period_from, period_to, db)
-    operating_profit = round(net_sales_amount - cost_amount - employee_salary_total - expenses_total, 2)
-    return {
-        'gross_sales_amount': round(gross_sales_amount, 2),
-        'return_amount': round(return_amount, 2),
-        'net_sales_amount': round(net_sales_amount, 2),
-        'cost_amount': round(cost_amount, 2),
-        'employee_salary_total': round(employee_salary_total, 2),
-        'expenses_total': round(expenses_total, 2),
-        'operating_profit': operating_profit,
-    }
-
-
-async def _compute_prorated_manager_salary(
-    point: LocationPoint,
-    date_from: date,
-    date_to: date,
-    db: AsyncSession,
-) -> dict[str, Any]:
-    today = get_moscow_today()
-    months = await _months_between(date_from, date_to)
-    total_salary_raw = 0.0
-    weighted_rate_sum = 0.0
-    weighted_rate_days = 0
-    latest_brackets: list[dict[str, float]] = []
-    breakdown: list[dict[str, Any]] = []
-
-    for month_cursor in months:
-        month_from = _month_start(month_cursor)
-        month_to = _month_end(month_cursor)
-        selected_from = max(date_from, month_from)
-        selected_to = min(date_to, month_to)
-        if selected_to < selected_from:
-            continue
-
-        is_current_month = month_from.year == today.year and month_from.month == today.month
-        if month_from > today:
-            continue
-
-        basis_from = month_from
-        basis_to = min(month_to, today) if is_current_month else month_to
-        if basis_to < basis_from:
-            continue
-
-        allocated_from = max(selected_from, basis_from)
-        allocated_to = min(selected_to, basis_to)
-        allocated_days = _inclusive_days_between(allocated_from, allocated_to)
-        basis_days = _inclusive_days_between(basis_from, basis_to)
-        if allocated_days <= 0 or basis_days <= 0:
-            continue
-
-        basis_totals = await _compute_operating_profit_for_period(point, basis_from, basis_to, db)
-        month_settings = await _get_settings_for_date(point, basis_to, db)
-        month_brackets = _load_manager_salary_brackets(month_settings)
-        latest_brackets = month_brackets
-        month_rate_percent = _manager_rate_for_profit(basis_totals['operating_profit'], month_brackets)
-        full_basis_salary = round(max(basis_totals['operating_profit'], 0.0) * (month_rate_percent / 100.0), 2)
-        allocated_salary_raw = full_basis_salary * (allocated_days / basis_days)
-        total_salary_raw += allocated_salary_raw
-        weighted_rate_sum += month_rate_percent * allocated_days
-        weighted_rate_days += allocated_days
-        breakdown.append({
-            'month': month_from.isoformat(),
-            'basis_from': basis_from.isoformat(),
-            'basis_to': basis_to.isoformat(),
-            'basis_days': basis_days,
-            'selected_from': allocated_from.isoformat(),
-            'selected_to': allocated_to.isoformat(),
-            'selected_days': allocated_days,
-            'is_current_month': is_current_month,
-            'operating_profit_basis': round(float(basis_totals['operating_profit']), 2),
-            'manager_rate_percent': round(float(month_rate_percent), 2),
-            'manager_salary_full_basis': round(full_basis_salary, 2),
-            'manager_salary_allocated': round(allocated_salary_raw, 2),
-        })
-
-    manager_salary_amount = round(total_salary_raw, 2)
-    manager_rate_percent = round((weighted_rate_sum / weighted_rate_days), 2) if weighted_rate_days > 0 else 0.0
-    return {
-        'manager_salary_amount': manager_salary_amount,
-        'manager_rate_percent': manager_rate_percent,
-        'manager_salary_brackets': latest_brackets or _default_manager_salary_brackets(),
-        'breakdown': breakdown,
-    }
-
-
-async def get_manager_payroll_summary(location: str, date_from: date, date_to: date, db: AsyncSession, current_user: User) -> dict[str, Any]:
-    await ensure_user_can_access_location(current_user, location, db)
-    point = await _get_location_point_by_name(location, db)
-    await _ensure_shift_snapshots_for_point(point, db)
-    day_metrics = await _load_point_sales_metrics(point, date_from, date_to, db)
-    gross_sales_amount = sum(day['gross_sales_amount'] for day in day_metrics.values())
-    return_amount = sum(day['return_amount'] for day in day_metrics.values())
-    net_sales_amount = sum(day['net_sales_amount'] for day in day_metrics.values())
-    cost_amount = sum(day['cost_amount'] for day in day_metrics.values())
-
+        return 0.0
     shifts = (
         await db.scalars(
             select(WorkShift)
@@ -3387,13 +3376,85 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
             .order_by(WorkShift.shift_date.asc(), WorkShift.id.asc())
         )
     ).all()
-    employee_salary_total = 0.0
+    total = 0.0
     for shift in shifts:
         computed = await _build_computed_shift(shift, db)
-        employee_salary_total += computed.gross_salary_amount
+        total += computed.gross_salary_amount
+    return round(total, 2)
 
+
+async def _calculate_manager_salary_proration(
+    point: LocationPoint,
+    date_from: date,
+    date_to: date,
+    db: AsyncSession,
+) -> tuple[float, float, list[dict[str, Any]]]:
     today = get_moscow_today()
-    current_settings = await _get_settings_for_date(point, min(date_to, today), db)
+    details: list[dict[str, Any]] = []
+    total_salary = 0.0
+    representative_rate = 0.0
+
+    for month_start in await _months_between(date_from, date_to):
+        month_end = _month_end(month_start)
+        realized_end = min(month_end, today)
+        if realized_end < month_start:
+            continue
+        selected_from = max(date_from, month_start)
+        selected_to = min(date_to, realized_end)
+        if selected_to < selected_from:
+            continue
+
+        month_metrics = await _load_point_sales_metrics(point, month_start, realized_end, db)
+        month_net_sales = round(sum(float(day.get('net_sales_amount') or 0.0) for day in month_metrics.values()), 2)
+        month_cost_amount = round(sum(float(day.get('cost_amount') or 0.0) for day in month_metrics.values()), 2)
+        month_employee_salary_total = await _sum_shift_salaries(point, month_start, realized_end, db)
+        month_expenses_total = await _collect_period_company_expenses(point, month_start, realized_end, db)
+        month_operating_profit = round(month_net_sales - month_cost_amount - month_employee_salary_total - month_expenses_total, 2)
+
+        month_settings = await _get_settings_for_date(point, selected_to, db)
+        month_brackets = _load_manager_salary_brackets(month_settings)
+        month_rate_percent = _manager_rate_for_profit(month_operating_profit, month_brackets)
+        month_salary_amount = round(max(month_operating_profit, 0.0) * (month_rate_percent / 100.0), 2)
+
+        realized_days_count = (realized_end - month_start).days + 1
+        selected_days_count = (selected_to - selected_from).days + 1
+        prorated_amount = round(month_salary_amount / realized_days_count * selected_days_count, 2) if realized_days_count > 0 else 0.0
+        total_salary += prorated_amount
+        representative_rate = max(representative_rate, month_rate_percent)
+        details.append({
+            'month_start': month_start.isoformat(),
+            'month_end': month_end.isoformat(),
+            'realized_end': realized_end.isoformat(),
+            'selected_from': selected_from.isoformat(),
+            'selected_to': selected_to.isoformat(),
+            'realized_days_count': realized_days_count,
+            'selected_days_count': selected_days_count,
+            'operating_profit': month_operating_profit,
+            'manager_rate_percent': month_rate_percent,
+            'manager_salary_full_amount': month_salary_amount,
+            'manager_salary_prorated_amount': prorated_amount,
+        })
+
+    return round(total_salary, 2), round(representative_rate, 2), details
+
+
+async def get_manager_payroll_summary(location: str, date_from: date, date_to: date, db: AsyncSession, current_user: User) -> dict[str, Any]:
+    await ensure_user_can_access_location(current_user, location, db)
+    point = await _get_location_point_by_name(location, db)
+    await _ensure_shift_snapshots_for_point(point, db)
+    today = get_moscow_today()
+    effective_date_to = min(date_to, today)
+    day_metrics = await _load_point_sales_metrics(point, date_from, effective_date_to, db) if effective_date_to >= date_from else {}
+    gross_sales_amount = sum(day['gross_sales_amount'] for day in day_metrics.values())
+    return_amount = sum(day['return_amount'] for day in day_metrics.values())
+    net_sales_amount = sum(day['net_sales_amount'] for day in day_metrics.values())
+    cost_amount = sum(day['cost_amount'] for day in day_metrics.values())
+
+    employee_salary_total = await _sum_shift_salaries(point, date_from, effective_date_to, db) if effective_date_to >= date_from else 0.0
+
+    settings_effective_date = effective_date_to if effective_date_to >= date_from else date_from
+    current_settings = await _get_settings_for_date(point, settings_effective_date, db)
+    manager_salary_brackets = _load_manager_salary_brackets(current_settings)
     settings_cache: dict[int, tuple[PayrollSettingsVersion, dict[str, dict[str, Any]], dict[str, dict[str, Any]]]] = {}
     category_totals: dict[str, dict[str, Any]] = {}
     for metric_day, metrics in day_metrics.items():
@@ -3408,22 +3469,22 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
         for row in metrics.get('categories') or []:
             category_id = str(row.get('category_id') or '__other__')
             category_name = str(row.get('category_name') or DEFAULT_CATEGORY_NAME)
-            if _is_excluded_payroll_category_name(category_name):
-                continue
             rate_info = _get_rate_info_for_category(category_id, category_name, day_rate_map, day_rate_name_map)
-            rate_percent, is_other_category = _resolve_category_rate_percent(rate_info, day_settings.other_rate_percent)
+            rate_percent, _used_other_rate = _resolve_category_rate_percent(rate_info, day_settings.other_rate_percent)
             net_amount = _sanitize_uncategorized_net(category_name, float(row.get('net_sales_amount') or 0))
-            earning_amount = round(max(net_amount, 0.0) * (rate_percent / 100.0), 2)
+            is_uncategorized = category_name == DEFAULT_CATEGORY_NAME or category_id == '__other__'
+            effective_rate_percent = 0.0 if is_uncategorized else rate_percent
+            earning_amount = round(max(net_amount, 0.0) * (effective_rate_percent / 100.0), 2)
             bucket = category_totals.setdefault(category_id, {
                 'category_id': category_id,
                 'category_name': category_name,
-                'rate_percent': rate_percent,
+                'rate_percent': effective_rate_percent,
                 'sales_amount': 0.0,
                 'return_amount': 0.0,
                 'net_sales_amount': 0.0,
                 'cost_amount': 0.0,
                 'earning_amount': 0.0,
-                'is_other_category': is_other_category,
+                'is_other_category': is_uncategorized,
             })
             bucket['sales_amount'] += float(row.get('sales_amount') or 0)
             bucket['return_amount'] += float(row.get('return_amount') or 0)
@@ -3431,14 +3492,16 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
             bucket['cost_amount'] += float(row.get('cost_amount') or 0)
             bucket['earning_amount'] += earning_amount
             # Для периода с несколькими версиями правил показываем последнюю ставку, действовавшую в этом периоде.
-            bucket['rate_percent'] = rate_percent
-            bucket['is_other_category'] = is_other_category
+            bucket['rate_percent'] = effective_rate_percent
+            bucket['is_other_category'] = is_uncategorized
 
-    expenses_total = await _collect_period_company_expenses(point, date_from, date_to, db)
+    expenses_total = (
+        await _collect_period_company_expenses(point, date_from, effective_date_to, db)
+        if effective_date_to >= date_from
+        else 0.0
+    )
     operating_profit = round(net_sales_amount - cost_amount - employee_salary_total - expenses_total, 2)
-    manager_salary_info = await _compute_prorated_manager_salary(point, date_from, date_to, db)
-    manager_rate_percent = float(manager_salary_info['manager_rate_percent'])
-    manager_salary_amount = float(manager_salary_info['manager_salary_amount'])
+    manager_salary_amount, manager_rate_percent, manager_salary_proration = await _calculate_manager_salary_proration(point, date_from, date_to, db)
     net_profit_after_manager_salary = round(operating_profit - manager_salary_amount, 2)
     responsible_admin = await db.get(User, current_settings.responsible_admin_user_id) if current_settings.responsible_admin_user_id else None
     return {
@@ -3453,14 +3516,14 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
         'employee_salary_total': round(employee_salary_total, 2),
         'expenses_total': expenses_total,
         'operating_profit_before_manager_salary': operating_profit,
-        'manager_rate_percent': round(manager_rate_percent, 2),
-        'manager_salary_amount': round(manager_salary_amount, 2),
+        'manager_rate_percent': manager_rate_percent,
+        'manager_salary_amount': manager_salary_amount,
         'net_profit_after_manager_salary': net_profit_after_manager_salary,
         'profit_after_manager_salary': net_profit_after_manager_salary,
         'responsible_admin_user_id': responsible_admin.id if responsible_admin else None,
         'responsible_admin_name': responsible_admin.full_name if responsible_admin else None,
-        'manager_salary_brackets': manager_salary_info['manager_salary_brackets'],
-        'manager_salary_proration': manager_salary_info['breakdown'],
+        'manager_salary_brackets': manager_salary_brackets,
+        'manager_salary_proration': manager_salary_proration,
         'categories': sorted(
             [
                 {
@@ -3470,7 +3533,6 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
                     'net_sales_amount': round(float(row['net_sales_amount']), 2),
                     'cost_amount': round(float(row.get('cost_amount') or 0), 2),
                     'earning_amount': round(float(row['earning_amount']), 2),
-                    'profit_amount': _calculate_category_profit_amount(row),
                 }
                 for row in category_totals.values()
             ],
@@ -3693,7 +3755,7 @@ async def export_employee_payroll_xlsx(location: str, date_from: date, date_to: 
             day['gross_salary_amount'],
         ])
     ws.append([])
-    ws.append(['Категория', 'Процент', 'Продажи', 'Возвраты', 'Сумма', 'Начислено', 'Прибыль'])
+    ws.append(['Категория', 'Процент', 'Продажи', 'Возвраты', 'Чистая сумма', 'Начислено'])
     for cell in ws[7 + len(summary['days'])]:
         cell.font = Font(bold=True)
     for category in summary['categories']:
@@ -3704,7 +3766,6 @@ async def export_employee_payroll_xlsx(location: str, date_from: date, date_to: 
             category['return_amount'],
             category['net_sales_amount'],
             category['earning_amount'],
-            category.get('profit_amount', _calculate_category_profit_amount(category)),
         ])
     ws.append([])
     ws.append(['Общий итог', summary['totals']['gross_salary_amount']])

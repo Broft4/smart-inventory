@@ -8,6 +8,7 @@ const shiftsState = {
     selectedDate: '',
     payrollDaysLoaded: false,
     payrollDaysLoading: false,
+    payrollDaysContextKey: '',
 };
 
 const MONTH_OPTIONS = [
@@ -281,9 +282,16 @@ function isPayrollSectionOpen() {
     return !!qs('shift-payroll-section')?.open;
 }
 
+function currentPayrollDaysContextKey() {
+    const location = selectedLocation();
+    const { dateFrom, dateTo } = monthDateRange();
+    return [location, dateFrom, dateTo].join('|');
+}
+
 async function ensurePayrollDaysLoaded(force = false, options = {}) {
     const { showLoading = false } = options;
-    if (!force && shiftsState.payrollDaysLoaded) return;
+    const contextKey = currentPayrollDaysContextKey();
+    if (!force && shiftsState.payrollDaysLoaded && shiftsState.payrollDaysContextKey === contextKey) return;
     if (shiftsState.payrollDaysLoading) return;
     shiftsState.payrollDaysLoading = true;
     if (showLoading) {
@@ -292,6 +300,7 @@ async function ensurePayrollDaysLoaded(force = false, options = {}) {
     try {
         await loadPayrollDays();
         shiftsState.payrollDaysLoaded = true;
+        shiftsState.payrollDaysContextKey = contextKey;
     } finally {
         shiftsState.payrollDaysLoading = false;
     }
@@ -591,9 +600,14 @@ async function loadShiftCalendar() {
 async function loadPayrollDays() {
     const location = selectedLocation();
     const { dateFrom, dateTo } = monthDateRange();
-    if (!location || !dateFrom || !dateTo) return;
+    if (!location || !dateFrom || !dateTo) {
+        shiftsState.payrollDays = [];
+        shiftsState.payrollDaysContextKey = '';
+        return;
+    }
     const payload = await api(`/api/payroll/shifts/day-summary?location=${encodeURIComponent(location)}&date_from=${dateFrom}&date_to=${dateTo}`);
     shiftsState.payrollDays = payload.days || [];
+    shiftsState.payrollDaysContextKey = currentPayrollDaysContextKey();
     if (shiftsState.filterMode === 'date' && shiftsState.selectedDate) {
         const day = shiftsState.shiftDays.find(item => item.date === shiftsState.selectedDate);
         if (!day || !isShiftDaySelectable(day)) {
@@ -611,6 +625,8 @@ async function refreshPageData(showSuccess = true, options = {}) {
     try {
         if (forcePayrollReload) {
             shiftsState.payrollDaysLoaded = false;
+            shiftsState.payrollDaysContextKey = '';
+            shiftsState.payrollDays = [];
         }
         await loadSetupForLocation();
         await loadShiftCalendar();
@@ -779,17 +795,29 @@ async function bootstrap() {
 qs('shift-location-select')?.addEventListener('change', async () => {
     shiftsState.filterMode = 'month';
     shiftsState.selectedDate = '';
-    await refreshPageData();
+    shiftsState.payrollDays = [];
+    shiftsState.payrollDaysLoaded = false;
+    shiftsState.payrollDaysContextKey = '';
+    setPayrollDaysPlaceholder('Загружаем детализацию смен для новой точки...');
+    await refreshPageData(false, { forcePayrollReload: true });
 });
 qs('shift-year-input')?.addEventListener('change', async () => {
     shiftsState.filterMode = 'month';
     shiftsState.selectedDate = '';
-    await refreshPageData();
+    shiftsState.payrollDays = [];
+    shiftsState.payrollDaysLoaded = false;
+    shiftsState.payrollDaysContextKey = '';
+    setPayrollDaysPlaceholder('Загружаем детализацию смен за новый период...');
+    await refreshPageData(false, { forcePayrollReload: true });
 });
 qs('shift-month-select')?.addEventListener('change', async () => {
     shiftsState.filterMode = 'month';
     shiftsState.selectedDate = '';
-    await refreshPageData();
+    shiftsState.payrollDays = [];
+    shiftsState.payrollDaysLoaded = false;
+    shiftsState.payrollDaysContextKey = '';
+    setPayrollDaysPlaceholder('Загружаем детализацию смен за новый период...');
+    await refreshPageData(false, { forcePayrollReload: true });
 });
 qs('shift-view-all-btn')?.addEventListener('click', () => { void setShiftFilterMode('month'); });
 qs('shift-view-date-btn')?.addEventListener('click', () => { void setShiftFilterMode('date'); });

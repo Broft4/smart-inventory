@@ -74,13 +74,11 @@ function formatTimeRu(dateTimeValue) {
 function expenseModeLabel(mode) {
     return String(mode || '').trim() === 'spread' ? 'Растянуть на месяц' : 'Одним днём';
 }
-
 function defaultManualExpenseDate() {
     const selectedMonth = selectedMonthStart('expenses-month-input');
     const today = todayIso();
     return today.startsWith(selectedMonth.slice(0, 7)) ? today : selectedMonth;
 }
-
 function syncManualExpenseDefaults({ forceDate = false } = {}) {
     const modeInput = qs('manual-expense-mode');
     const dateInput = qs('manual-expense-date');
@@ -91,27 +89,6 @@ function syncManualExpenseDefaults({ forceDate = false } = {}) {
         dateInput.value = defaultManualExpenseDate();
     }
 }
-
-function normalizeSearch(value) {
-    return String(value ?? '').trim().toLowerCase();
-}
-
-const EXCLUDED_PAYROLL_CATEGORY_NAME = 'Без категории';
-
-function isExcludedPayrollCategory(categoryOrName) {
-    const categoryName = typeof categoryOrName === 'string'
-        ? categoryOrName
-        : (categoryOrName?.category_name || categoryOrName?.name || '');
-    const categoryId = typeof categoryOrName === 'object' && categoryOrName
-        ? String(categoryOrName.category_id || categoryOrName.id || '').trim()
-        : '';
-    return categoryId === '__other__' || normalizeSearch(categoryName) === normalizeSearch(EXCLUDED_PAYROLL_CATEGORY_NAME);
-}
-
-function filterVisiblePayrollCategories(categories = []) {
-    return (Array.isArray(categories) ? categories : []).filter((category) => !isExcludedPayrollCategory(category));
-}
-
 function formatApiErrorMessage(payload) {
     const detail = payload?.detail ?? payload?.message ?? payload;
 
@@ -151,7 +128,6 @@ function formatApiErrorMessage(payload) {
     }
     return 'Ошибка запроса';
 }
-
 function setSettingsCategoryInputsDisabled(disabled) {
     const card = qs('settings-rates-card');
     if (!card) return;
@@ -161,7 +137,6 @@ function setSettingsCategoryInputsDisabled(disabled) {
         element.disabled = Boolean(disabled);
     });
 }
-
 function setSettingsLoading(isLoading, text = 'Загружаем настройки...') {
     const indicators = [qs('settings-section-loading'), qs('settings-category-loading')].filter(Boolean);
     indicators.forEach((indicator) => {
@@ -172,6 +147,10 @@ function setSettingsLoading(isLoading, text = 'Загружаем настрой
         }
     });
     setSettingsCategoryInputsDisabled(isLoading);
+}
+
+function normalizeSearch(value) {
+    return String(value ?? '').trim().toLowerCase();
 }
 
 function compactCurrency(value) {
@@ -224,27 +203,34 @@ function hideStatus() {
 
 
 function normalizeCategoryDisplayNet(category) {
-    const raw = Number(category?.net_sales_amount || 0);
-    if ((category?.is_other_category || category?.category_id === '__other__') && raw < 0) {
-        return 0;
-    }
-    return raw;
+    return Number(category?.net_sales_amount || 0);
 }
 
-function calculateCategoryProfit(category) {
-    const hasFormulaParts = category && (
-        Object.prototype.hasOwnProperty.call(category, 'net_sales_amount')
-        || Object.prototype.hasOwnProperty.call(category, 'cost_amount')
-        || Object.prototype.hasOwnProperty.call(category, 'earning_amount')
-    );
-    if (hasFormulaParts) {
-        const sumAmount = normalizeCategoryDisplayNet(category);
-        const costAmount = Number(category?.cost_amount || 0);
-        const earningAmount = Number(category?.earning_amount || 0);
-        return sumAmount - costAmount - earningAmount;
+function normalizeCategoryProfit(category) {
+    const explicitProfit = Number(category?.profit_amount);
+    if (Number.isFinite(explicitProfit)) {
+        return explicitProfit;
     }
-    const explicitProfit = category?.profit_amount;
-    return Number(explicitProfit || 0);
+    return normalizeCategoryDisplayNet(category) - Number(category?.cost_amount || 0);
+}
+
+function sumPayrollCategoryColumns(categories = []) {
+    return (categories || []).reduce((acc, category) => {
+        acc.sales_amount += Number(category?.sales_amount || 0);
+        acc.return_amount += Number(category?.return_amount || 0);
+        acc.net_sales_amount += normalizeCategoryDisplayNet(category);
+        acc.cost_amount += Number(category?.cost_amount || 0);
+        acc.earning_amount += Number(category?.earning_amount || 0);
+        acc.profit_amount += normalizeCategoryProfit(category);
+        return acc;
+    }, {
+        sales_amount: 0,
+        return_amount: 0,
+        net_sales_amount: 0,
+        cost_amount: 0,
+        earning_amount: 0,
+        profit_amount: 0,
+    });
 }
 
 function stopRecalcPolling() {
@@ -533,7 +519,7 @@ function mergeCategoryCatalog(...sources) {
     const result = [];
     const seen = new Set();
     sources.flat().forEach((item) => {
-        if (!item || isExcludedPayrollCategory(item)) return;
+        if (!item) return;
         const id = String(item.category_id || item.id || '').trim();
         const name = String(item.category_name || item.name || '').trim();
         const nameKey = normalizeSearch(name);
@@ -548,16 +534,18 @@ function mergeCategoryCatalog(...sources) {
 }
 
 function renderShiftCategoryBreakdown(categories = []) {
-    const rows = filterVisiblePayrollCategories(categories).filter((category) => {
+    const rows = Array.isArray(categories) ? categories.filter((category) => {
         const net = Number(category?.net_sales_amount || 0);
         const earned = Number(category?.earning_amount || 0);
         const sales = Number(category?.sales_amount || 0);
         const returns = Number(category?.return_amount || 0);
-        return Math.abs(net) > 1e-9 || Math.abs(earned) > 1e-9 || Math.abs(sales) > 1e-9 || Math.abs(returns) > 1e-9;
-    });
+        const cost = Number(category?.cost_amount || 0);
+        return Math.abs(net) > 1e-9 || Math.abs(earned) > 1e-9 || Math.abs(sales) > 1e-9 || Math.abs(returns) > 1e-9 || Math.abs(cost) > 1e-9;
+    }) : [];
     if (!rows.length) {
         return '<div class="muted-text">По этой смене нет начислений по категориям.</div>';
     }
+    const totals = sumPayrollCategoryColumns(rows);
     return `
         <div class="table-wrap payroll-table-wrap payroll-shift-categories-wrap">
             <table class="table payroll-table payroll-category-table payroll-shift-category-table">
@@ -583,9 +571,19 @@ function renderShiftCategoryBreakdown(categories = []) {
                             <td data-label="Сумма">${formatMoney(normalizeCategoryDisplayNet(category))}</td>
                             <td data-label="Себестоимость">${formatMoney(category.cost_amount || 0)}</td>
                             <td data-label="Начислено"><strong>${formatMoney(category.earning_amount || 0)}</strong></td>
-                            <td data-label="Прибыль"><strong>${formatMoney(calculateCategoryProfit(category))}</strong></td>
+                            <td data-label="Прибыль"><strong>${formatMoney(normalizeCategoryProfit(category))}</strong></td>
                         </tr>
                     `).join('')}
+                    <tr class="payroll-table-total-row">
+                        <td data-label="Категория"><strong>Всего</strong></td>
+                        <td data-label="%">—</td>
+                        <td data-label="Продажи"><strong>${formatMoney(totals.sales_amount)}</strong></td>
+                        <td data-label="Возвраты"><strong>${formatMoney(totals.return_amount)}</strong></td>
+                        <td data-label="Сумма"><strong>${formatMoney(totals.net_sales_amount)}</strong></td>
+                        <td data-label="Себестоимость"><strong>${formatMoney(totals.cost_amount)}</strong></td>
+                        <td data-label="Начислено"><strong>${formatMoney(totals.earning_amount)}</strong></td>
+                        <td data-label="Прибыль"><strong>${formatMoney(totals.profit_amount)}</strong></td>
+                    </tr>
                 </tbody>
             </table>
         </div>
@@ -677,7 +675,7 @@ function getFilteredPayrollCategories(categories = []) {
     const view = payrollState.categoryFilters.view || 'all';
     const sort = payrollState.categoryFilters.sort || 'earning_desc';
 
-    const filtered = filterVisiblePayrollCategories(categories).filter(category => {
+    const filtered = (categories || []).filter(category => {
         const categoryName = String(category?.category_name || '');
         if (search && !normalizeSearch(categoryName).includes(search)) {
             return false;
@@ -712,8 +710,9 @@ function renderPayrollCategoryTable(categories = payrollState.summary?.categorie
         filterMeta.textContent = `Показано категорий: ${filtered.length} из ${Array.isArray(categories) ? categories.length : 0}`;
     }
 
+    const totals = sumPayrollCategoryColumns(filtered);
     categoryTbody.innerHTML = filtered.length
-        ? filtered.map(category => `
+        ? `${filtered.map(category => `
             <tr>
                 <td data-label="Категория">${escapeHtml(category.category_name)}</td>
                 <td data-label="%">${Number(category.rate_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%</td>
@@ -722,9 +721,19 @@ function renderPayrollCategoryTable(categories = payrollState.summary?.categorie
                 <td data-label="Сумма">${formatMoney(normalizeCategoryDisplayNet(category))}</td>
                 <td data-label="Себестоимость">${formatMoney(category.cost_amount || 0)}</td>
                 <td data-label="Начислено"><strong>${formatMoney(category.earning_amount)}</strong></td>
-                <td data-label="Прибыль"><strong>${formatMoney(calculateCategoryProfit(category))}</strong></td>
+                <td data-label="Прибыль"><strong>${formatMoney(normalizeCategoryProfit(category))}</strong></td>
             </tr>
-        `).join('')
+        `).join('')}
+        <tr class="payroll-table-total-row">
+            <td data-label="Категория"><strong>Всего</strong></td>
+            <td data-label="%">—</td>
+            <td data-label="Продажи"><strong>${formatMoney(totals.sales_amount)}</strong></td>
+            <td data-label="Возвраты"><strong>${formatMoney(totals.return_amount)}</strong></td>
+            <td data-label="Сумма"><strong>${formatMoney(totals.net_sales_amount)}</strong></td>
+            <td data-label="Себестоимость"><strong>${formatMoney(totals.cost_amount)}</strong></td>
+            <td data-label="Начислено"><strong>${formatMoney(totals.earning_amount)}</strong></td>
+            <td data-label="Прибыль"><strong>${formatMoney(totals.profit_amount)}</strong></td>
+        </tr>`
         : '<tr><td colspan="8" class="muted-text">По текущим фильтрам категории не найдены.</td></tr>';
 }
 
@@ -846,7 +855,7 @@ function renderManagerSummary(summary) {
         return;
     }
     card.classList.remove('hidden');
-    qs('manager-net-sales').textContent = formatMoney(summary.net_sales_amount || 0);
+    qs('manager-net-sales').textContent = formatMoney((summary.revenue_amount ?? summary.gross_sales_amount ?? summary.net_sales_amount) || 0);
     if (qs('manager-returns')) qs('manager-returns').textContent = formatMoney(summary.return_amount || 0);
     qs('manager-cost').textContent = formatMoney(summary.cost_amount || 0);
     qs('manager-employee-salary').textContent = formatMoney(summary.employee_salary_total || 0);
@@ -1543,16 +1552,11 @@ async function createExpenseTemplate() {
     const button = qs('create-expense-template-btn');
     const payload = {
         location: selectedLocation(),
-        name: qs('expense-template-name').value.trim(),
+        name: qs('expense-template-name').value,
         amount_type: qs('expense-template-type').value,
         default_amount: qs('expense-template-default').value ? Number(qs('expense-template-default').value) : null,
         assign_to_employee_by_default: qs('expense-template-employee').checked,
     };
-    if (!payload.name) {
-        showStatus('Введите название.', 'error');
-        showScopedStatus('create-expense-template-status', 'Введите название.', 'error');
-        return;
-    }
     showScopedStatus('create-expense-template-status', 'Сохраняем шаблон расхода...', 'loading');
     setButtonLoading(button, true, 'Сохраняем...');
     try {

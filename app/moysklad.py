@@ -466,7 +466,7 @@ class MoySkladClient:
             params['expand'] = expand
         if fields:
             params['fields'] = fields
-        page_limit = 100 if expand else 1000
+        page_limit = 100 if (expand or fields) else 1000
         return await self.get_all_pages(
             f'entity/{entity_name}/{document_id}/positions',
             params=params,
