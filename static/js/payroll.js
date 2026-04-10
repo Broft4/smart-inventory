@@ -559,7 +559,6 @@ function renderShiftCategoryBreakdown(categories = []) {
                         <th>%</th>
                         <th>Продажи</th>
                         <th>Возвраты</th>
-                        <th>Сумма</th>
                         <th>Себестоимость</th>
                         <th>Начислено</th>
                         <th>Прибыль</th>
@@ -572,7 +571,6 @@ function renderShiftCategoryBreakdown(categories = []) {
                             <td data-label="%">${Number(category.rate_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%</td>
                             <td data-label="Продажи">${formatMoney(category.sales_amount || 0)}</td>
                             <td data-label="Возвраты">${formatMoney(category.return_amount || 0)}</td>
-                            <td data-label="Сумма">${formatMoney(normalizeCategoryDisplayNet(category))}</td>
                             <td data-label="Себестоимость">${formatMoney(category.cost_amount || 0)}</td>
                             <td data-label="Начислено"><strong>${formatMoney(category.earning_amount || 0)}</strong></td>
                             <td data-label="Прибыль"><strong>${formatMoney(normalizeCategoryProfit(category))}</strong></td>
@@ -583,7 +581,6 @@ function renderShiftCategoryBreakdown(categories = []) {
                         <td data-label="%">—</td>
                         <td data-label="Продажи"><strong>${formatMoney(totals.sales_amount)}</strong></td>
                         <td data-label="Возвраты"><strong>${formatMoney(totals.return_amount)}</strong></td>
-                        <td data-label="Сумма"><strong>${formatMoney(totals.net_sales_amount)}</strong></td>
                         <td data-label="Себестоимость"><strong>${formatMoney(totals.cost_amount)}</strong></td>
                         <td data-label="Начислено"><strong>${formatMoney(totals.earning_amount)}</strong></td>
                         <td data-label="Прибыль"><strong>${formatMoney(totals.profit_amount)}</strong></td>
@@ -722,7 +719,6 @@ function renderPayrollCategoryTable(categories = payrollState.summary?.categorie
                 <td data-label="%">${Number(category.rate_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%</td>
                 <td data-label="Продажи">${formatMoney(category.sales_amount)}</td>
                 <td data-label="Возвраты">${formatMoney(category.return_amount)}</td>
-                <td data-label="Сумма">${formatMoney(normalizeCategoryDisplayNet(category))}</td>
                 <td data-label="Себестоимость">${formatMoney(category.cost_amount || 0)}</td>
                 <td data-label="Начислено"><strong>${formatMoney(category.earning_amount)}</strong></td>
                 <td data-label="Прибыль"><strong>${formatMoney(normalizeCategoryProfit(category))}</strong></td>
@@ -733,12 +729,11 @@ function renderPayrollCategoryTable(categories = payrollState.summary?.categorie
             <td data-label="%">—</td>
             <td data-label="Продажи"><strong>${formatMoney(totals.sales_amount)}</strong></td>
             <td data-label="Возвраты"><strong>${formatMoney(totals.return_amount)}</strong></td>
-            <td data-label="Сумма"><strong>${formatMoney(totals.net_sales_amount)}</strong></td>
             <td data-label="Себестоимость"><strong>${formatMoney(totals.cost_amount)}</strong></td>
             <td data-label="Начислено"><strong>${formatMoney(totals.earning_amount)}</strong></td>
             <td data-label="Прибыль"><strong>${formatMoney(totals.profit_amount)}</strong></td>
         </tr>`
-        : '<tr><td colspan="8" class="muted-text">По текущим фильтрам категории не найдены.</td></tr>';
+        : '<tr><td colspan="7" class="muted-text">По текущим фильтрам категории не найдены.</td></tr>';
 }
 
 function applyPayrollCategoryFiltersFromUi() {
