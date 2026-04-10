@@ -203,6 +203,10 @@ function hideStatus() {
 
 
 function normalizeCategoryDisplayNet(category) {
+    const salesAmount = Number(category?.sales_amount || 0);
+    if (Math.abs(salesAmount) > 1e-9) {
+        return salesAmount;
+    }
     return Number(category?.net_sales_amount || 0);
 }
 
