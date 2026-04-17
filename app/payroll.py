@@ -486,7 +486,6 @@ async def _run_payroll_recalc_job(job_id: int) -> None:
             async def progress(current: int, total: int) -> None:
                 await _update_recalc_job_progress(
                     job_id,
-                    status='running',
                     current=current,
                     total=total,
                     message=f'Пересчитываем закрытые смены: {current} из {total}.',
@@ -1528,9 +1527,12 @@ async def update_location_payroll_settings(payload: PayrollSettingsUpdateRequest
             WorkShift.shift_date >= payload.effective_from,
         )
     )
-    rebuild_to = rebuild_until or today
+    # После сохранения версии правил возвращаем живой пересчёт для всей затронутой части периода
+    # вплоть до текущего дня. Так интерфейс снова ведёт себя предсказуемо: пользователь видит
+    # очередь/прогресс пересчёта, а все уже закрытые смены за период пересобираются по новым ставкам.
+    rebuild_to = max(rebuild_until or payload.effective_from, today)
     recalc_job_payload: dict[str, Any] | None = None
-    if payload.effective_from <= rebuild_to:
+    if payload.effective_from <= today:
         recalc_job = await _enqueue_payroll_recalc_job(point, version.id, payload.effective_from, rebuild_to, current_user.id)
         recalc_job_payload = _serialize_recalc_job(recalc_job, point)
 
@@ -2948,23 +2950,27 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
     )
 
 
-async def close_shift(shift_id: int, db: AsyncSession, actor_user: User | None, auto: bool = False) -> dict[str, Any]:
-    shift = await db.get(WorkShift, shift_id)
-    if not shift or shift.is_deleted:
-        raise HTTPException(status_code=404, detail='Смена не найдена.')
-    point = await db.get(LocationPoint, shift.location_point_id)
-    if not point:
-        raise HTTPException(status_code=404, detail='Точка смены не найдена.')
-    if actor_user is not None:
-        if actor_user.role == 'employee' and actor_user.id != shift.employee_user_id:
-            raise HTTPException(status_code=403, detail='Можно закрыть только свою смену.')
-        if actor_user.role in {'admin', 'superadmin'}:
-            await ensure_user_can_access_location(actor_user, point.name, db)
-    if shift.status == 'closed':
-        computed = await _build_computed_shift(shift, db)
-        return {'success': True, 'message': 'Смена уже закрыта.', 'shift': _serialize_computed_shift(computed)}
+async def _persist_shift_snapshot(
+    shift: WorkShift,
+    point: LocationPoint,
+    computed: ShiftComputedPayroll,
+    db: AsyncSession,
+    *,
+    auto: bool,
+    actor_user: User | None,
+    action_type: str,
+    action_details: dict[str, Any] | None = None,
+    closed_at: datetime | None = None,
+) -> ShiftPayrollSnapshot:
+    snapshot = await db.scalar(select(ShiftPayrollSnapshot).where(ShiftPayrollSnapshot.shift_id == shift.id).limit(1))
+    preserved_closed_at = snapshot.closed_at if snapshot is not None else None
+    preserved_is_auto_closed = bool(snapshot.is_auto_closed) if snapshot is not None else False
+    if snapshot is not None:
+        await db.execute(delete(ShiftPayrollCategorySnapshot).where(ShiftPayrollCategorySnapshot.snapshot_id == snapshot.id))
+        await db.delete(snapshot)
+        await db.flush()
 
-    computed = await _build_computed_shift(shift, db)
+    effective_closed_at = closed_at or preserved_closed_at or shift.closed_at or datetime.utcnow()
     snapshot = ShiftPayrollSnapshot(
         shift_id=shift.id,
         location_point_id=point.id,
@@ -2987,8 +2993,8 @@ async def close_shift(shift_id: int, db: AsyncSession, actor_user: User | None, 
         employee_expense_amount=0.0,
         gross_salary_amount=computed.gross_salary_amount,
         net_salary_amount=computed.gross_salary_amount,
-        is_auto_closed=auto,
-        closed_at=datetime.utcnow(),
+        is_auto_closed=auto or preserved_is_auto_closed,
+        closed_at=effective_closed_at,
     )
     db.add(snapshot)
     await db.flush()
@@ -3005,27 +3011,155 @@ async def close_shift(shift_id: int, db: AsyncSession, actor_user: User | None, 
             earning_amount=row['earning_amount'],
             is_other_category=row['is_other_category'],
         ))
+
     shift.status = 'closed'
-    shift.closed_at = datetime.utcnow()
+    shift.closed_at = effective_closed_at
     shift.closed_by_user_id = None if auto else (actor_user.id if actor_user else None)
     shift.updated_at = datetime.utcnow()
+
+    details = {
+        'shift_date': shift.shift_date.isoformat(),
+        'employee_user_id': shift.employee_user_id,
+        'gross_salary_amount': computed.gross_salary_amount,
+        'split_count': computed.split_count,
+    }
+    if action_details:
+        details.update(action_details)
     await _log_payroll_action(
         db,
         actor_user_id=None if auto else (actor_user.id if actor_user else None),
         location_point_id=point.id,
         entity_type='work_shift',
         entity_id=str(shift.id),
+        action_type=action_type,
+        details=details,
+    )
+    return snapshot
+
+
+async def _build_forced_shift_fallback(shift: WorkShift, point: LocationPoint, employee: User, db: AsyncSession) -> ShiftComputedPayroll:
+    settings = await _get_settings_for_date(point, shift.shift_date, db)
+    split_count = await _get_active_shift_count(point, shift.shift_date, db)
+    split_count = max(int(split_count or 1), 1)
+    share_ratio = round(1.0 / split_count, 4)
+    bonus_category_ids = _load_bonus_category_ids(settings)
+    exit_amount = round(float(settings.exit_amount or 0.0), 2)
+    bonus_threshold = round(float(settings.bonus_threshold or 0.0), 2)
+    other_rate_percent = round(float(settings.other_rate_percent or 0.0), 2)
+    return ShiftComputedPayroll(
+        shift=shift,
+        location_point=point,
+        employee=employee,
+        settings=settings,
+        split_count=split_count,
+        share_ratio=share_ratio,
+        categories=[],
+        exit_amount=exit_amount,
+        bonus_threshold=bonus_threshold,
+        bonus_amount=0.0,
+        bonus_base_sales_amount=0.0,
+        bonus_category_ids=bonus_category_ids,
+        other_rate_percent=other_rate_percent,
+        gross_sales_amount=0.0,
+        return_amount=0.0,
+        net_sales_amount=0.0,
+        cost_amount=0.0,
+        gross_profit_amount=0.0,
+        non_tobacco_net_sales_for_bonus=0.0,
+        category_earnings_total=0.0,
+        gross_salary_amount=exit_amount,
+        is_closed=True,
+        closed_at=_datetime_to_str(datetime.utcnow()),
+        is_auto_closed=False,
+    )
+
+
+async def close_shift(shift_id: int, db: AsyncSession, actor_user: User | None, auto: bool = False) -> dict[str, Any]:
+    shift = await db.get(WorkShift, shift_id)
+    if not shift or shift.is_deleted:
+        raise HTTPException(status_code=404, detail='Смена не найдена.')
+    point = await db.get(LocationPoint, shift.location_point_id)
+    if not point:
+        raise HTTPException(status_code=404, detail='Точка смены не найдена.')
+    if actor_user is not None:
+        if actor_user.role == 'employee' and actor_user.id != shift.employee_user_id:
+            raise HTTPException(status_code=403, detail='Можно закрыть только свою смену.')
+        if actor_user.role in {'admin', 'superadmin'}:
+            await ensure_user_can_access_location(actor_user, point.name, db)
+    if shift.status == 'closed':
+        computed = await _build_computed_shift(shift, db)
+        return {'success': True, 'message': 'Смена уже закрыта.', 'shift': _serialize_computed_shift(computed)}
+
+    computed = await _build_computed_shift(shift, db)
+    await _persist_shift_snapshot(
+        shift,
+        point,
+        computed,
+        db,
+        auto=auto,
+        actor_user=actor_user,
         action_type='auto_close' if auto else 'close',
-        details={
-            'shift_date': shift.shift_date.isoformat(),
-            'employee_user_id': shift.employee_user_id,
-            'gross_salary_amount': computed.gross_salary_amount,
-            'split_count': computed.split_count,
-        },
+        closed_at=datetime.utcnow(),
     )
     await db.commit()
     computed = await _build_computed_shift(shift, db)
     return {'success': True, 'message': 'Смена закрыта.' if not auto else 'Смена автоматически закрыта.', 'shift': _serialize_computed_shift(computed)}
+
+
+async def force_close_shift(shift_id: int, db: AsyncSession, actor_user: User) -> dict[str, Any]:
+    if actor_user.role not in {'admin', 'superadmin'}:
+        raise HTTPException(status_code=403, detail='Принудительно закрывать смену может только управляющий.')
+
+    shift = await db.get(WorkShift, shift_id)
+    if not shift or shift.is_deleted:
+        raise HTTPException(status_code=404, detail='Смена не найдена.')
+    point = await db.get(LocationPoint, shift.location_point_id)
+    if not point:
+        raise HTTPException(status_code=404, detail='Точка смены не найдена.')
+    await ensure_user_can_access_location(actor_user, point.name, db)
+
+    if shift.status == 'closed':
+        computed = await _build_computed_shift(shift, db)
+        return {'success': True, 'message': 'Смена уже закрыта.', 'shift': _serialize_computed_shift(computed)}
+
+    try:
+        return await close_shift(shift_id, db, actor_user=actor_user, auto=False)
+    except Exception as exc:
+        logger.exception('Не удалось закрыть смену штатно; выполняем принудительное закрытие shift_id=%s', shift_id)
+        await db.rollback()
+
+        shift = await db.get(WorkShift, shift_id)
+        if not shift or shift.is_deleted:
+            raise HTTPException(status_code=404, detail='Смена не найдена.')
+        point = await db.get(LocationPoint, shift.location_point_id)
+        employee = await db.get(User, shift.employee_user_id)
+        if not point or not employee:
+            raise HTTPException(status_code=404, detail='Не удалось собрать данные смены.')
+        await ensure_user_can_access_location(actor_user, point.name, db)
+
+        fallback_reason = str(getattr(exc, 'detail', None) or str(exc) or 'unknown_error').strip() or 'unknown_error'
+        computed = await _build_forced_shift_fallback(shift, point, employee, db)
+        await _persist_shift_snapshot(
+            shift,
+            point,
+            computed,
+            db,
+            auto=False,
+            actor_user=actor_user,
+            action_type='force_close',
+            action_details={
+                'used_fallback': True,
+                'fallback_reason': fallback_reason[:500],
+            },
+            closed_at=datetime.utcnow(),
+        )
+        await db.commit()
+        computed = await _build_computed_shift(shift, db)
+        return {
+            'success': True,
+            'message': 'Смена принудительно закрыта администратором. Расчёт сохранён в безопасном режиме и может быть пересобран позже.',
+            'shift': _serialize_computed_shift(computed),
+        }
 
 
 async def upsert_work_shift(payload: WorkShiftUpsertRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
@@ -3714,52 +3848,18 @@ async def rebuild_closed_shift_snapshots(
         closed_at = snapshot.closed_at if snapshot else (shift.closed_at or datetime.utcnow())
         is_auto_closed = bool(snapshot.is_auto_closed) if snapshot else False
 
-        if snapshot is not None:
-            await db.execute(delete(ShiftPayrollCategorySnapshot).where(ShiftPayrollCategorySnapshot.snapshot_id == snapshot.id))
-            await db.delete(snapshot)
-            await db.flush()
-
         computed = await _build_computed_shift(shift, db, force_refresh_metrics=force_refresh_metrics)
-        new_snapshot = ShiftPayrollSnapshot(
-            shift_id=shift.id,
-            location_point_id=shift.location_point_id,
-            employee_user_id=shift.employee_user_id,
-            shift_date=shift.shift_date,
-            settings_version_id=computed.settings.id,
-            split_count=computed.split_count,
-            share_ratio=computed.share_ratio,
-            exit_amount=computed.exit_amount,
-            bonus_threshold=computed.bonus_threshold,
-            bonus_amount=computed.bonus_amount,
-            other_rate_percent=computed.other_rate_percent,
-            non_tobacco_net_sales_for_bonus=computed.bonus_base_sales_amount,
-            gross_sales_amount=computed.gross_sales_amount,
-            return_amount=computed.return_amount,
-            net_sales_amount=computed.net_sales_amount,
-            cost_amount=computed.cost_amount,
-            gross_profit_amount=computed.gross_profit_amount,
-            category_earnings_total=computed.category_earnings_total,
-            employee_expense_amount=0.0,
-            gross_salary_amount=computed.gross_salary_amount,
-            net_salary_amount=computed.gross_salary_amount,
-            is_auto_closed=is_auto_closed,
+        await _persist_shift_snapshot(
+            shift,
+            point,
+            computed,
+            db,
+            auto=is_auto_closed,
+            actor_user=None,
+            action_type='rebuild_closed_snapshot',
+            action_details={'rebuild_only': True},
             closed_at=closed_at,
         )
-        db.add(new_snapshot)
-        await db.flush()
-
-        for row in computed.categories:
-            db.add(ShiftPayrollCategorySnapshot(
-                snapshot_id=new_snapshot.id,
-                category_id=row['category_id'],
-                category_name=row['category_name'],
-                rate_percent=row['rate_percent'],
-                sales_amount=row['sales_amount'],
-                return_amount=row['return_amount'],
-                net_sales_amount=row['net_sales_amount'],
-                earning_amount=row['earning_amount'],
-                is_other_category=row['is_other_category'],
-            ))
 
         await db.commit()
         updated += 1
