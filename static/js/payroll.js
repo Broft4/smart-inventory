@@ -1438,10 +1438,9 @@ async function saveSettings() {
             showScopedStatus('settings-status', queuedMessage, 'loading');
             pollRecalcStatus(recalcJobId).catch((error) => console.error(error));
         } else {
-            await refreshAfterRecalcFinished();
             const successMessage = payload.effective_from
-                ? `Версия правил сохранена. Пересчёт не потребовался, правила применяются с ${formatDateRu(payload.effective_from)}.`
-                : 'Версия правил сохранена. Пересчёт не потребовался.';
+                ? `Версия правил сохранена. Новые правила применяются с ${formatDateRu(payload.effective_from)}.`
+                : 'Версия правил сохранена.';
             showStatus(successMessage, 'success');
             showScopedStatus('settings-status', successMessage, 'success');
         }
@@ -1537,25 +1536,16 @@ window.deleteShift = async function deleteShift(id) {
 
 window.closeOwnShift = async function closeOwnShift(id) {
     try {
-        const result = await api(`/api/payroll/shifts/${id}/close`, { method: 'POST' });
+        await api(`/api/payroll/shifts/${id}/close`, { method: 'POST' });
         await loadSummary();
         if (isAdminRole()) await loadShiftCalendar();
-        showStatus(result?.message || 'Смена закрыта.', 'success');
+        showStatus('Смена закрыта.', 'success');
     } catch (error) {
         showStatus(error.message || 'Не удалось закрыть смену.', 'error');
     }
 };
 
-window.closeAdminShift = async function closeAdminShift(id) {
-    try {
-        const result = await api(`/api/payroll/shifts/${id}/force-close`, { method: 'POST' });
-        await loadSummary();
-        if (isAdminRole()) await loadShiftCalendar();
-        showStatus(result?.message || 'Смена закрыта.', 'success');
-    } catch (error) {
-        showStatus(error.message || 'Не удалось закрыть смену.', 'error');
-    }
-};
+window.closeAdminShift = window.closeOwnShift;
 
 async function createExpenseTemplate() {
     const button = qs('create-expense-template-btn');

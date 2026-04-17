@@ -41,7 +41,6 @@ from app.models import (
     WorkShift,
 )
 from app.database import AsyncSessionLocal
-from app.logic import refresh_product_financial_cache
 from app.moysklad import DEFAULT_CATEGORY_NAME, ms_client
 
 logger = logging.getLogger(__name__)
@@ -51,6 +50,7 @@ DEFAULT_EXIT_AMOUNT = 2000.0
 DEFAULT_BONUS_THRESHOLD = 40000.0
 DEFAULT_BONUS_AMOUNT = 500.0
 DEFAULT_OTHER_RATE_PERCENT = 3.0
+CATEGORY_SALES_ALLOCATION_VERSION = 2
 EXPENSE_MODE_SPREAD = 'spread'
 EXPENSE_MODE_SINGLE_DAY = 'single_day'
 DEFAULT_MANAGER_SALARY_BRACKETS = [
@@ -445,7 +445,7 @@ async def _update_recalc_job_progress(job_id: int, *, status: str | None = None,
 
 async def _run_payroll_recalc_job(job_id: int) -> None:
     try:
-        await _update_recalc_job_progress(job_id, status='running', current=0, total=0, message='Запущено полное обновление данных из МоегоСклада...')
+        await _update_recalc_job_progress(job_id, status='running', current=0, message='Запущен пересчёт закрытых смен...')
         async with AsyncSessionLocal() as db:
             job = await db.get(PayrollRecalcJob, job_id)
             if job is None:
@@ -455,41 +455,8 @@ async def _run_payroll_recalc_job(job_id: int) -> None:
                 await _update_recalc_job_progress(job_id, status='failed', error_text='Точка для пересчёта не найдена.')
                 return
 
-            await _update_recalc_job_progress(
-                job_id,
-                status='running',
-                current=0,
-                total=0,
-                message='Обновляем дневной кеш продаж из МоегоСклада...',
-            )
-            cache_result = await refresh_payroll_metrics_cache(
-                job.date_from,
-                job.date_to,
-                db,
-                location=point.name,
-                force_refresh=True,
-            )
-
-            await _update_recalc_job_progress(
-                job_id,
-                status='running',
-                current=0,
-                total=0,
-                message='Обновляем локальный кеш себестоимости и цен товаров...',
-            )
-            product_financial_result = await refresh_product_financial_cache(
-                db,
-                location=point.name,
-                force_refresh=True,
-            )
-
             async def progress(current: int, total: int) -> None:
-                await _update_recalc_job_progress(
-                    job_id,
-                    current=current,
-                    total=total,
-                    message=f'Пересчитываем закрытые смены: {current} из {total}.',
-                )
+                await _update_recalc_job_progress(job_id, current=current, total=total, message=f'Пересчитываем смены: {current} из {total}.')
 
             result = await rebuild_closed_shift_snapshots(
                 job.date_from,
@@ -499,20 +466,13 @@ async def _run_payroll_recalc_job(job_id: int) -> None:
                 force_refresh_metrics=True,
                 progress_callback=progress,
             )
-            final_result = {
-                'cache_refresh': cache_result,
-                'product_financial_cache': product_financial_result,
-                'closed_shift_snapshots': result,
-                'updated': int(result.get('updated') or 0),
-                'processed': int(result.get('processed') or 0),
-            }
             await _update_recalc_job_progress(
                 job_id,
                 status='done',
                 current=int(result.get('processed') or 0),
                 total=int(result.get('processed') or 0),
-                message='Полный пересчёт завершён.',
-                result=final_result,
+                message='Пересчёт завершён.',
+                result=result,
             )
     except Exception as exc:
         logger.exception('Фоновый пересчёт зарплаты завершился ошибкой. job_id=%s', job_id)
@@ -723,6 +683,15 @@ def _money_or_none(value: Any) -> float | None:
         return None
 
 
+def _number_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 
 def _first_money_value(container: dict[str, Any], fields: tuple[str, ...]) -> float | None:
     for field in fields:
@@ -814,10 +783,70 @@ def _extract_position_amount(position: dict[str, Any]) -> float:
     amount = _first_money_value(position, ('sum', 'amount', 'saleSum', 'retailSum'))
     if amount is not None:
         return round(amount, 2)
+
     unit_price = _first_money_value(position, ('price', 'salePrice', 'sellingPrice'))
     if unit_price is not None and quantity > 0:
-        return round(unit_price * quantity, 2)
+        gross_amount = round(unit_price * quantity, 2)
+        discount_sum = _first_money_value(position, ('discountSum', 'discountsum', 'discountAmount', 'discountamount'))
+        if discount_sum is not None:
+            return round(max(gross_amount - discount_sum, 0.0), 2)
+
+        discount_percent = _number_or_none(position.get('discount'))
+        if discount_percent is not None:
+            normalized_discount = min(max(discount_percent, 0.0), 100.0)
+            return round(max(gross_amount * (1.0 - normalized_discount / 100.0), 0.0), 2)
+
+        return gross_amount
     return 0.0
+
+
+def _row_value(row: Any, field: str, default: Any = None) -> Any:
+    if isinstance(row, dict):
+        return row.get(field, default)
+    return getattr(row, field, default)
+
+
+def _is_uncategorized_row(row: Any) -> bool:
+    category_name = str(_row_value(row, 'category_name') or '').strip()
+    category_id = str(_row_value(row, 'category_id') or '').strip()
+    return category_name == DEFAULT_CATEGORY_NAME or category_id == '__other__'
+
+
+def _has_legacy_uncategorized_adjustment(rows: list[Any] | None) -> bool:
+    categories = list(rows or [])
+    if not categories:
+        return False
+
+    visible_rows = [row for row in categories if not _is_uncategorized_row(row)]
+    has_visible_turnover = any(
+        abs(float(_row_value(row, 'sales_amount') or 0.0)) > 0.009
+        or abs(float(_row_value(row, 'return_amount') or 0.0)) > 0.009
+        or abs(float(_row_value(row, 'net_sales_amount') or 0.0)) > 0.009
+        for row in visible_rows
+    )
+    if not has_visible_turnover:
+        return False
+
+    for row in categories:
+        if not _is_uncategorized_row(row):
+            continue
+        adjustment_version = int(_row_value(row, '_category_sales_allocation_version') or 0)
+        if adjustment_version >= CATEGORY_SALES_ALLOCATION_VERSION:
+            continue
+        sales_amount = round(float(_row_value(row, 'sales_amount') or 0.0), 2)
+        return_amount = round(float(_row_value(row, 'return_amount') or 0.0), 2)
+        if sales_amount < -0.009 or return_amount > 0.009:
+            return True
+    return False
+
+
+def _mark_category_sales_allocation_version(categories: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    marked: list[dict[str, Any]] = []
+    for row in categories or []:
+        cloned = dict(row)
+        cloned['_category_sales_allocation_version'] = CATEGORY_SALES_ALLOCATION_VERSION
+        marked.append(cloned)
+    return marked
 
 
 
@@ -1527,12 +1556,9 @@ async def update_location_payroll_settings(payload: PayrollSettingsUpdateRequest
             WorkShift.shift_date >= payload.effective_from,
         )
     )
-    # После сохранения версии правил возвращаем живой пересчёт для всей затронутой части периода
-    # вплоть до текущего дня. Так интерфейс снова ведёт себя предсказуемо: пользователь видит
-    # очередь/прогресс пересчёта, а все уже закрытые смены за период пересобираются по новым ставкам.
-    rebuild_to = max(rebuild_until or payload.effective_from, today)
+    rebuild_to = rebuild_until or today
     recalc_job_payload: dict[str, Any] | None = None
-    if payload.effective_from <= today:
+    if payload.effective_from <= rebuild_to:
         recalc_job = await _enqueue_payroll_recalc_job(point, version.id, payload.effective_from, rebuild_to, current_user.id)
         recalc_job_payload = _serialize_recalc_job(recalc_job, point)
 
@@ -2593,6 +2619,7 @@ async def _store_point_sales_metrics_cache(point: LocationPoint, metrics_by_day:
     timestamp = datetime.utcnow()
     for day, metrics in metrics_by_day.items():
         row = existing_by_day.get(day)
+        categories_payload = _mark_category_sales_allocation_version(metrics.get('categories') or [])
         payload = {
             'gross_sales_amount': round(float(metrics.get('gross_sales_amount') or 0), 2),
             'return_amount': round(float(metrics.get('return_amount') or 0), 2),
@@ -2600,7 +2627,7 @@ async def _store_point_sales_metrics_cache(point: LocationPoint, metrics_by_day:
             'cost_amount': round(float(metrics.get('cost_amount') or 0), 2),
             'gross_profit_amount': round(float(metrics.get('gross_profit_amount') or 0), 2),
             'non_tobacco_net_sales_for_bonus': round(float(metrics.get('non_tobacco_net_sales_for_bonus') or 0), 2),
-            'categories_json': json.dumps(metrics.get('categories') or [], ensure_ascii=False),
+            'categories_json': json.dumps(categories_payload, ensure_ascii=False),
             'source_refreshed_at': timestamp,
             'updated_at': timestamp,
         }
@@ -2623,6 +2650,9 @@ def _is_cached_day_fresh(day: date, metrics: dict[str, Any] | None) -> bool:
         return False
 
     categories = metrics.get('categories') or []
+    if _has_legacy_uncategorized_adjustment(categories):
+        return False
+
     visible_rows = [row for row in categories if str(row.get('category_name') or '').strip() != DEFAULT_CATEGORY_NAME]
     has_visible_sales = any(
         abs(float(row.get('sales_amount') or 0.0)) > 0.009
@@ -2763,94 +2793,101 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
                 .order_by(ShiftPayrollCategorySnapshot.category_name.asc())
             )
         ).all()
-        settings = await db.get(PayrollSettingsVersion, snapshot.settings_version_id) if snapshot.settings_version_id else await _get_settings_for_date(point, shift.shift_date, db)
-        bonus_category_ids = _load_bonus_category_ids(settings)
-        rate_map = await _get_settings_rates(settings.id, db)
-        rate_name_map = _build_category_rate_name_map(rate_map)
-        snapshot_categories: list[dict[str, Any]] = []
-        for row in category_rows:
-            category_name = str(row.category_name or '').strip() or DEFAULT_CATEGORY_NAME
-            category_id = str(row.category_id or '__other__')
-            net_sales_amount = _sanitize_uncategorized_net(category_name, round(float(row.net_sales_amount or 0), 2))
-            rate_info = _get_rate_info_for_category(category_id, category_name, rate_map, rate_name_map)
-            rate_percent, _used_other_rate = _resolve_category_rate_percent(rate_info, settings.other_rate_percent)
-            is_uncategorized = category_name == DEFAULT_CATEGORY_NAME or category_id == '__other__'
-            effective_rate_percent = 0.0 if is_uncategorized else rate_percent
-            calculation_base_amount = _resolve_calculation_sales_base(row.sales_amount, net_sales_amount)
-            earning_amount = _calculate_category_earning_amount(calculation_base_amount, effective_rate_percent)
-            snapshot_categories.append(_sanitize_uncategorized_row({
-                'category_id': category_id,
-                'category_name': category_name,
-                'rate_percent': round(effective_rate_percent, 2),
-                'sales_amount': round(float(row.sales_amount or 0), 2),
-                'return_amount': round(float(row.return_amount or 0), 2),
-                'net_sales_amount': net_sales_amount,
-                'cost_amount': round(float(row.cost_amount or 0), 2),
-                'earning_amount': earning_amount,
-                'is_other_category': is_uncategorized,
-            }))
-        snapshot_categories = await _backfill_category_costs_from_day_metrics(
-            point,
-            shift.shift_date,
-            snapshot_categories,
-            round(float(snapshot.cost_amount or 0), 2),
-            float(snapshot.share_ratio or 0),
-            db,
-        )
-        snapshot_category_earnings_total = round(sum(float(item.get('earning_amount') or 0) for item in snapshot_categories), 2)
-        snapshot_bonus_base = round(max(float(snapshot.non_tobacco_net_sales_for_bonus or 0), 0.0), 2)
-        if snapshot_categories:
-            if bonus_category_ids:
-                snapshot_bonus_base = round(sum(
-                    _resolve_category_calculation_base(item)
-                    for item in snapshot_categories
-                    if item.get('category_id') in bonus_category_ids
-                ), 2)
-            else:
-                snapshot_bonus_base = round(sum(
-                    max(_resolve_category_calculation_base(item), 0.0) if str(item.get('category_name') or '').strip() == DEFAULT_CATEGORY_NAME
-                    else _resolve_category_calculation_base(item)
-                    for item in snapshot_categories
-                    if not _is_tobacco_category(item.get('category_name'))
-                ), 2)
-        snapshot_bonus = round(float(snapshot.bonus_amount or 0), 2)
-        snapshot_exit = round(float(snapshot.exit_amount or 0), 2)
-        snapshot_cost_amount = round(float(snapshot.cost_amount or 0), 2)
-        patched_snapshot_cost_amount = round(sum(float(item.get('cost_amount') or 0) for item in snapshot_categories), 2)
-        if abs(snapshot_cost_amount) <= 0.009 and abs(patched_snapshot_cost_amount) > 0.009:
-            snapshot_cost_amount = patched_snapshot_cost_amount
-        snapshot_gross_profit_amount = round(float(snapshot.gross_profit_amount or 0), 2)
-        expected_snapshot_gross_profit_amount = _calculate_gross_profit_from_revenue(snapshot.gross_sales_amount, snapshot_cost_amount)
-        if abs(snapshot_gross_profit_amount) <= 0.009 and abs(expected_snapshot_gross_profit_amount) > 0.009:
-            snapshot_gross_profit_amount = expected_snapshot_gross_profit_amount
-        snapshot_gross_salary = round(snapshot_exit + snapshot_bonus + snapshot_category_earnings_total, 2)
-        return ShiftComputedPayroll(
-            shift=shift,
-            location_point=point,
-            employee=employee,
-            settings=settings,
-            split_count=snapshot.split_count,
-            share_ratio=float(snapshot.share_ratio or 0),
-            categories=snapshot_categories,
-            exit_amount=snapshot_exit,
-            bonus_threshold=round(float(snapshot.bonus_threshold or 0), 2),
-            bonus_amount=snapshot_bonus,
-            bonus_base_sales_amount=snapshot_bonus_base,
-            bonus_category_ids=bonus_category_ids,
-            other_rate_percent=round(float(snapshot.other_rate_percent or 0), 2),
-            gross_sales_amount=round(float(snapshot.gross_sales_amount or 0), 2),
-            return_amount=round(float(snapshot.return_amount or 0), 2),
-            net_sales_amount=round(float(snapshot.net_sales_amount or 0), 2),
-            cost_amount=snapshot_cost_amount,
-            gross_profit_amount=snapshot_gross_profit_amount,
-            non_tobacco_net_sales_for_bonus=round(float(snapshot.non_tobacco_net_sales_for_bonus or 0), 2),
-            category_earnings_total=snapshot_category_earnings_total,
-            gross_salary_amount=snapshot_gross_salary,
-            snapshot_id=snapshot.id,
-            is_closed=True,
-            closed_at=_datetime_to_str(snapshot.closed_at),
-            is_auto_closed=bool(snapshot.is_auto_closed),
-        )
+        if _has_legacy_uncategorized_adjustment(category_rows):
+            logger.info(
+                'Снимок смены %s за %s содержит legacy-коррекцию в «Без категории», пересчитываем зарплату по актуальным дневным метрикам.',
+                shift.id,
+                shift.shift_date.isoformat(),
+            )
+        else:
+            settings = await db.get(PayrollSettingsVersion, snapshot.settings_version_id) if snapshot.settings_version_id else await _get_settings_for_date(point, shift.shift_date, db)
+            bonus_category_ids = _load_bonus_category_ids(settings)
+            rate_map = await _get_settings_rates(settings.id, db)
+            rate_name_map = _build_category_rate_name_map(rate_map)
+            snapshot_categories: list[dict[str, Any]] = []
+            for row in category_rows:
+                category_name = str(row.category_name or '').strip() or DEFAULT_CATEGORY_NAME
+                category_id = str(row.category_id or '__other__')
+                net_sales_amount = _sanitize_uncategorized_net(category_name, round(float(row.net_sales_amount or 0), 2))
+                rate_info = _get_rate_info_for_category(category_id, category_name, rate_map, rate_name_map)
+                rate_percent, _used_other_rate = _resolve_category_rate_percent(rate_info, settings.other_rate_percent)
+                is_uncategorized = category_name == DEFAULT_CATEGORY_NAME or category_id == '__other__'
+                effective_rate_percent = 0.0 if is_uncategorized else rate_percent
+                calculation_base_amount = _resolve_calculation_sales_base(row.sales_amount, net_sales_amount)
+                earning_amount = _calculate_category_earning_amount(calculation_base_amount, effective_rate_percent)
+                snapshot_categories.append(_sanitize_uncategorized_row({
+                    'category_id': category_id,
+                    'category_name': category_name,
+                    'rate_percent': round(effective_rate_percent, 2),
+                    'sales_amount': round(float(row.sales_amount or 0), 2),
+                    'return_amount': round(float(row.return_amount or 0), 2),
+                    'net_sales_amount': net_sales_amount,
+                    'cost_amount': round(float(row.cost_amount or 0), 2),
+                    'earning_amount': earning_amount,
+                    'is_other_category': is_uncategorized,
+                }))
+            snapshot_categories = await _backfill_category_costs_from_day_metrics(
+                point,
+                shift.shift_date,
+                snapshot_categories,
+                round(float(snapshot.cost_amount or 0), 2),
+                float(snapshot.share_ratio or 0),
+                db,
+            )
+            snapshot_category_earnings_total = round(sum(float(item.get('earning_amount') or 0) for item in snapshot_categories), 2)
+            snapshot_bonus_base = round(max(float(snapshot.non_tobacco_net_sales_for_bonus or 0), 0.0), 2)
+            if snapshot_categories:
+                if bonus_category_ids:
+                    snapshot_bonus_base = round(sum(
+                        _resolve_category_calculation_base(item)
+                        for item in snapshot_categories
+                        if item.get('category_id') in bonus_category_ids
+                    ), 2)
+                else:
+                    snapshot_bonus_base = round(sum(
+                        max(_resolve_category_calculation_base(item), 0.0) if str(item.get('category_name') or '').strip() == DEFAULT_CATEGORY_NAME
+                        else _resolve_category_calculation_base(item)
+                        for item in snapshot_categories
+                        if not _is_tobacco_category(item.get('category_name'))
+                    ), 2)
+            snapshot_bonus = round(float(snapshot.bonus_amount or 0), 2)
+            snapshot_exit = round(float(snapshot.exit_amount or 0), 2)
+            snapshot_cost_amount = round(float(snapshot.cost_amount or 0), 2)
+            patched_snapshot_cost_amount = round(sum(float(item.get('cost_amount') or 0) for item in snapshot_categories), 2)
+            if abs(snapshot_cost_amount) <= 0.009 and abs(patched_snapshot_cost_amount) > 0.009:
+                snapshot_cost_amount = patched_snapshot_cost_amount
+            snapshot_gross_profit_amount = round(float(snapshot.gross_profit_amount or 0), 2)
+            expected_snapshot_gross_profit_amount = _calculate_gross_profit_from_revenue(snapshot.gross_sales_amount, snapshot_cost_amount)
+            if abs(snapshot_gross_profit_amount) <= 0.009 and abs(expected_snapshot_gross_profit_amount) > 0.009:
+                snapshot_gross_profit_amount = expected_snapshot_gross_profit_amount
+            snapshot_gross_salary = round(snapshot_exit + snapshot_bonus + snapshot_category_earnings_total, 2)
+            return ShiftComputedPayroll(
+                shift=shift,
+                location_point=point,
+                employee=employee,
+                settings=settings,
+                split_count=snapshot.split_count,
+                share_ratio=float(snapshot.share_ratio or 0),
+                categories=snapshot_categories,
+                exit_amount=snapshot_exit,
+                bonus_threshold=round(float(snapshot.bonus_threshold or 0), 2),
+                bonus_amount=snapshot_bonus,
+                bonus_base_sales_amount=snapshot_bonus_base,
+                bonus_category_ids=bonus_category_ids,
+                other_rate_percent=round(float(snapshot.other_rate_percent or 0), 2),
+                gross_sales_amount=round(float(snapshot.gross_sales_amount or 0), 2),
+                return_amount=round(float(snapshot.return_amount or 0), 2),
+                net_sales_amount=round(float(snapshot.net_sales_amount or 0), 2),
+                cost_amount=snapshot_cost_amount,
+                gross_profit_amount=snapshot_gross_profit_amount,
+                non_tobacco_net_sales_for_bonus=round(float(snapshot.non_tobacco_net_sales_for_bonus or 0), 2),
+                category_earnings_total=snapshot_category_earnings_total,
+                gross_salary_amount=snapshot_gross_salary,
+                snapshot_id=snapshot.id,
+                is_closed=True,
+                closed_at=_datetime_to_str(snapshot.closed_at),
+                is_auto_closed=bool(snapshot.is_auto_closed),
+            )
 
     settings = await _get_settings_for_date(point, shift.shift_date, db)
     bonus_category_ids = _load_bonus_category_ids(settings)
@@ -2950,27 +2987,23 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
     )
 
 
-async def _persist_shift_snapshot(
-    shift: WorkShift,
-    point: LocationPoint,
-    computed: ShiftComputedPayroll,
-    db: AsyncSession,
-    *,
-    auto: bool,
-    actor_user: User | None,
-    action_type: str,
-    action_details: dict[str, Any] | None = None,
-    closed_at: datetime | None = None,
-) -> ShiftPayrollSnapshot:
-    snapshot = await db.scalar(select(ShiftPayrollSnapshot).where(ShiftPayrollSnapshot.shift_id == shift.id).limit(1))
-    preserved_closed_at = snapshot.closed_at if snapshot is not None else None
-    preserved_is_auto_closed = bool(snapshot.is_auto_closed) if snapshot is not None else False
-    if snapshot is not None:
-        await db.execute(delete(ShiftPayrollCategorySnapshot).where(ShiftPayrollCategorySnapshot.snapshot_id == snapshot.id))
-        await db.delete(snapshot)
-        await db.flush()
+async def close_shift(shift_id: int, db: AsyncSession, actor_user: User | None, auto: bool = False) -> dict[str, Any]:
+    shift = await db.get(WorkShift, shift_id)
+    if not shift or shift.is_deleted:
+        raise HTTPException(status_code=404, detail='Смена не найдена.')
+    point = await db.get(LocationPoint, shift.location_point_id)
+    if not point:
+        raise HTTPException(status_code=404, detail='Точка смены не найдена.')
+    if actor_user is not None:
+        if actor_user.role == 'employee' and actor_user.id != shift.employee_user_id:
+            raise HTTPException(status_code=403, detail='Можно закрыть только свою смену.')
+        if actor_user.role in {'admin', 'superadmin'}:
+            await ensure_user_can_access_location(actor_user, point.name, db)
+    if shift.status == 'closed':
+        computed = await _build_computed_shift(shift, db)
+        return {'success': True, 'message': 'Смена уже закрыта.', 'shift': _serialize_computed_shift(computed)}
 
-    effective_closed_at = closed_at or preserved_closed_at or shift.closed_at or datetime.utcnow()
+    computed = await _build_computed_shift(shift, db)
     snapshot = ShiftPayrollSnapshot(
         shift_id=shift.id,
         location_point_id=point.id,
@@ -2993,8 +3026,8 @@ async def _persist_shift_snapshot(
         employee_expense_amount=0.0,
         gross_salary_amount=computed.gross_salary_amount,
         net_salary_amount=computed.gross_salary_amount,
-        is_auto_closed=auto or preserved_is_auto_closed,
-        closed_at=effective_closed_at,
+        is_auto_closed=auto,
+        closed_at=datetime.utcnow(),
     )
     db.add(snapshot)
     await db.flush()
@@ -3011,155 +3044,27 @@ async def _persist_shift_snapshot(
             earning_amount=row['earning_amount'],
             is_other_category=row['is_other_category'],
         ))
-
     shift.status = 'closed'
-    shift.closed_at = effective_closed_at
+    shift.closed_at = datetime.utcnow()
     shift.closed_by_user_id = None if auto else (actor_user.id if actor_user else None)
     shift.updated_at = datetime.utcnow()
-
-    details = {
-        'shift_date': shift.shift_date.isoformat(),
-        'employee_user_id': shift.employee_user_id,
-        'gross_salary_amount': computed.gross_salary_amount,
-        'split_count': computed.split_count,
-    }
-    if action_details:
-        details.update(action_details)
     await _log_payroll_action(
         db,
         actor_user_id=None if auto else (actor_user.id if actor_user else None),
         location_point_id=point.id,
         entity_type='work_shift',
         entity_id=str(shift.id),
-        action_type=action_type,
-        details=details,
-    )
-    return snapshot
-
-
-async def _build_forced_shift_fallback(shift: WorkShift, point: LocationPoint, employee: User, db: AsyncSession) -> ShiftComputedPayroll:
-    settings = await _get_settings_for_date(point, shift.shift_date, db)
-    split_count = await _get_active_shift_count(point, shift.shift_date, db)
-    split_count = max(int(split_count or 1), 1)
-    share_ratio = round(1.0 / split_count, 4)
-    bonus_category_ids = _load_bonus_category_ids(settings)
-    exit_amount = round(float(settings.exit_amount or 0.0), 2)
-    bonus_threshold = round(float(settings.bonus_threshold or 0.0), 2)
-    other_rate_percent = round(float(settings.other_rate_percent or 0.0), 2)
-    return ShiftComputedPayroll(
-        shift=shift,
-        location_point=point,
-        employee=employee,
-        settings=settings,
-        split_count=split_count,
-        share_ratio=share_ratio,
-        categories=[],
-        exit_amount=exit_amount,
-        bonus_threshold=bonus_threshold,
-        bonus_amount=0.0,
-        bonus_base_sales_amount=0.0,
-        bonus_category_ids=bonus_category_ids,
-        other_rate_percent=other_rate_percent,
-        gross_sales_amount=0.0,
-        return_amount=0.0,
-        net_sales_amount=0.0,
-        cost_amount=0.0,
-        gross_profit_amount=0.0,
-        non_tobacco_net_sales_for_bonus=0.0,
-        category_earnings_total=0.0,
-        gross_salary_amount=exit_amount,
-        is_closed=True,
-        closed_at=_datetime_to_str(datetime.utcnow()),
-        is_auto_closed=False,
-    )
-
-
-async def close_shift(shift_id: int, db: AsyncSession, actor_user: User | None, auto: bool = False) -> dict[str, Any]:
-    shift = await db.get(WorkShift, shift_id)
-    if not shift or shift.is_deleted:
-        raise HTTPException(status_code=404, detail='Смена не найдена.')
-    point = await db.get(LocationPoint, shift.location_point_id)
-    if not point:
-        raise HTTPException(status_code=404, detail='Точка смены не найдена.')
-    if actor_user is not None:
-        if actor_user.role == 'employee' and actor_user.id != shift.employee_user_id:
-            raise HTTPException(status_code=403, detail='Можно закрыть только свою смену.')
-        if actor_user.role in {'admin', 'superadmin'}:
-            await ensure_user_can_access_location(actor_user, point.name, db)
-    if shift.status == 'closed':
-        computed = await _build_computed_shift(shift, db)
-        return {'success': True, 'message': 'Смена уже закрыта.', 'shift': _serialize_computed_shift(computed)}
-
-    computed = await _build_computed_shift(shift, db)
-    await _persist_shift_snapshot(
-        shift,
-        point,
-        computed,
-        db,
-        auto=auto,
-        actor_user=actor_user,
         action_type='auto_close' if auto else 'close',
-        closed_at=datetime.utcnow(),
+        details={
+            'shift_date': shift.shift_date.isoformat(),
+            'employee_user_id': shift.employee_user_id,
+            'gross_salary_amount': computed.gross_salary_amount,
+            'split_count': computed.split_count,
+        },
     )
     await db.commit()
     computed = await _build_computed_shift(shift, db)
     return {'success': True, 'message': 'Смена закрыта.' if not auto else 'Смена автоматически закрыта.', 'shift': _serialize_computed_shift(computed)}
-
-
-async def force_close_shift(shift_id: int, db: AsyncSession, actor_user: User) -> dict[str, Any]:
-    if actor_user.role not in {'admin', 'superadmin'}:
-        raise HTTPException(status_code=403, detail='Принудительно закрывать смену может только управляющий.')
-
-    shift = await db.get(WorkShift, shift_id)
-    if not shift or shift.is_deleted:
-        raise HTTPException(status_code=404, detail='Смена не найдена.')
-    point = await db.get(LocationPoint, shift.location_point_id)
-    if not point:
-        raise HTTPException(status_code=404, detail='Точка смены не найдена.')
-    await ensure_user_can_access_location(actor_user, point.name, db)
-
-    if shift.status == 'closed':
-        computed = await _build_computed_shift(shift, db)
-        return {'success': True, 'message': 'Смена уже закрыта.', 'shift': _serialize_computed_shift(computed)}
-
-    try:
-        return await close_shift(shift_id, db, actor_user=actor_user, auto=False)
-    except Exception as exc:
-        logger.exception('Не удалось закрыть смену штатно; выполняем принудительное закрытие shift_id=%s', shift_id)
-        await db.rollback()
-
-        shift = await db.get(WorkShift, shift_id)
-        if not shift or shift.is_deleted:
-            raise HTTPException(status_code=404, detail='Смена не найдена.')
-        point = await db.get(LocationPoint, shift.location_point_id)
-        employee = await db.get(User, shift.employee_user_id)
-        if not point or not employee:
-            raise HTTPException(status_code=404, detail='Не удалось собрать данные смены.')
-        await ensure_user_can_access_location(actor_user, point.name, db)
-
-        fallback_reason = str(getattr(exc, 'detail', None) or str(exc) or 'unknown_error').strip() or 'unknown_error'
-        computed = await _build_forced_shift_fallback(shift, point, employee, db)
-        await _persist_shift_snapshot(
-            shift,
-            point,
-            computed,
-            db,
-            auto=False,
-            actor_user=actor_user,
-            action_type='force_close',
-            action_details={
-                'used_fallback': True,
-                'fallback_reason': fallback_reason[:500],
-            },
-            closed_at=datetime.utcnow(),
-        )
-        await db.commit()
-        computed = await _build_computed_shift(shift, db)
-        return {
-            'success': True,
-            'message': 'Смена принудительно закрыта администратором. Расчёт сохранён в безопасном режиме и может быть пересобран позже.',
-            'shift': _serialize_computed_shift(computed),
-        }
 
 
 async def upsert_work_shift(payload: WorkShiftUpsertRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
@@ -3290,6 +3195,32 @@ async def _serialize_shift_lightweight(
     )
     is_closed = bool(snapshot) or shift.status == 'closed'
     if snapshot:
+        category_rows = (
+            await db.scalars(
+                select(ShiftPayrollCategorySnapshot)
+                .where(ShiftPayrollCategorySnapshot.snapshot_id == snapshot.id)
+                .order_by(ShiftPayrollCategorySnapshot.category_name.asc())
+            )
+        ).all()
+        if _has_legacy_uncategorized_adjustment(category_rows):
+            computed = await _build_computed_shift(shift, db)
+            return {
+                'id': shift.id,
+                'shift_date': shift.shift_date.isoformat(),
+                'employee_user_id': shift.employee_user_id,
+                'employee_name': employee_name,
+                'location': point.name,
+                'status': shift.status,
+                'is_closed': computed.is_closed,
+                'closed_at': computed.closed_at,
+                'gross_sales_amount': computed.gross_sales_amount,
+                'return_amount': computed.return_amount,
+                'net_sales_amount': computed.net_sales_amount,
+                'exit_amount': computed.exit_amount,
+                'bonus_amount': computed.bonus_amount,
+                'category_earnings_total': computed.category_earnings_total,
+                'gross_salary_amount': computed.gross_salary_amount,
+            }
         exit_amount = round(float(snapshot.exit_amount or 0), 2)
         bonus_amount = round(float(snapshot.bonus_amount or 0), 2)
         category_earnings_total = round(float(snapshot.category_earnings_total or 0), 2)
@@ -3848,18 +3779,52 @@ async def rebuild_closed_shift_snapshots(
         closed_at = snapshot.closed_at if snapshot else (shift.closed_at or datetime.utcnow())
         is_auto_closed = bool(snapshot.is_auto_closed) if snapshot else False
 
+        if snapshot is not None:
+            await db.execute(delete(ShiftPayrollCategorySnapshot).where(ShiftPayrollCategorySnapshot.snapshot_id == snapshot.id))
+            await db.delete(snapshot)
+            await db.flush()
+
         computed = await _build_computed_shift(shift, db, force_refresh_metrics=force_refresh_metrics)
-        await _persist_shift_snapshot(
-            shift,
-            point,
-            computed,
-            db,
-            auto=is_auto_closed,
-            actor_user=None,
-            action_type='rebuild_closed_snapshot',
-            action_details={'rebuild_only': True},
+        new_snapshot = ShiftPayrollSnapshot(
+            shift_id=shift.id,
+            location_point_id=shift.location_point_id,
+            employee_user_id=shift.employee_user_id,
+            shift_date=shift.shift_date,
+            settings_version_id=computed.settings.id,
+            split_count=computed.split_count,
+            share_ratio=computed.share_ratio,
+            exit_amount=computed.exit_amount,
+            bonus_threshold=computed.bonus_threshold,
+            bonus_amount=computed.bonus_amount,
+            other_rate_percent=computed.other_rate_percent,
+            non_tobacco_net_sales_for_bonus=computed.bonus_base_sales_amount,
+            gross_sales_amount=computed.gross_sales_amount,
+            return_amount=computed.return_amount,
+            net_sales_amount=computed.net_sales_amount,
+            cost_amount=computed.cost_amount,
+            gross_profit_amount=computed.gross_profit_amount,
+            category_earnings_total=computed.category_earnings_total,
+            employee_expense_amount=0.0,
+            gross_salary_amount=computed.gross_salary_amount,
+            net_salary_amount=computed.gross_salary_amount,
+            is_auto_closed=is_auto_closed,
             closed_at=closed_at,
         )
+        db.add(new_snapshot)
+        await db.flush()
+
+        for row in computed.categories:
+            db.add(ShiftPayrollCategorySnapshot(
+                snapshot_id=new_snapshot.id,
+                category_id=row['category_id'],
+                category_name=row['category_name'],
+                rate_percent=row['rate_percent'],
+                sales_amount=row['sales_amount'],
+                return_amount=row['return_amount'],
+                net_sales_amount=row['net_sales_amount'],
+                earning_amount=row['earning_amount'],
+                is_other_category=row['is_other_category'],
+            ))
 
         await db.commit()
         updated += 1
