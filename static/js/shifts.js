@@ -691,11 +691,12 @@ window.deleteShift = async function deleteShift(id) {
 window.closeAdminShift = async function closeAdminShift(id) {
     showScopedStatus('shift-calendar-status', 'Закрываем смену...', 'loading');
     try {
-        await api(`/api/payroll/shifts/${id}/close`, { method: 'POST' });
+        const result = await api(`/api/payroll/shifts/${id}/force-close`, { method: 'POST' });
         await refreshPageData(false, { forcePayrollReload: true });
-        showStatus('Смена закрыта.', 'success');
-        showScopedStatus('shift-calendar-status', 'Смена закрыта.', 'success');
-        setTimeout(hideStatus, 1200);
+        const successMessage = result?.message || 'Смена закрыта.';
+        showStatus(successMessage, 'success');
+        showScopedStatus('shift-calendar-status', successMessage, 'success');
+        setTimeout(hideStatus, 1800);
     } catch (error) {
         showStatus(error.message || 'Не удалось закрыть смену.', 'error');
         showScopedStatus('shift-calendar-status', error.message || 'Не удалось закрыть смену.', 'error');

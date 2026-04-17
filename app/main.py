@@ -69,6 +69,7 @@ from app.payroll import (
     PayrollSettingsUpdateRequest,
     WorkShiftUpsertRequest,
     close_shift,
+    force_close_shift,
     bootstrap_payroll_schema,
     create_expense_template,
     create_manual_monthly_expense,
@@ -787,6 +788,11 @@ async def api_payroll_shift_delete(shift_id: int, user: User = Depends(require_a
 @app.post('/api/payroll/shifts/{shift_id}/close')
 async def api_payroll_shift_close(shift_id: int, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
     return await close_shift(shift_id, db, actor_user=user, auto=False)
+
+
+@app.post('/api/payroll/shifts/{shift_id}/force-close')
+async def api_payroll_shift_force_close(shift_id: int, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await force_close_shift(shift_id, db, actor_user=user)
 
 
 @app.get('/api/payroll/employee-summary')

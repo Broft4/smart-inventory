@@ -1536,16 +1536,25 @@ window.deleteShift = async function deleteShift(id) {
 
 window.closeOwnShift = async function closeOwnShift(id) {
     try {
-        await api(`/api/payroll/shifts/${id}/close`, { method: 'POST' });
+        const result = await api(`/api/payroll/shifts/${id}/close`, { method: 'POST' });
         await loadSummary();
         if (isAdminRole()) await loadShiftCalendar();
-        showStatus('Смена закрыта.', 'success');
+        showStatus(result?.message || 'Смена закрыта.', 'success');
     } catch (error) {
         showStatus(error.message || 'Не удалось закрыть смену.', 'error');
     }
 };
 
-window.closeAdminShift = window.closeOwnShift;
+window.closeAdminShift = async function closeAdminShift(id) {
+    try {
+        const result = await api(`/api/payroll/shifts/${id}/force-close`, { method: 'POST' });
+        await loadSummary();
+        if (isAdminRole()) await loadShiftCalendar();
+        showStatus(result?.message || 'Смена закрыта.', 'success');
+    } catch (error) {
+        showStatus(error.message || 'Не удалось закрыть смену.', 'error');
+    }
+};
 
 async function createExpenseTemplate() {
     const button = qs('create-expense-template-btn');
