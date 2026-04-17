@@ -1486,9 +1486,12 @@ async def update_location_payroll_settings(payload: PayrollSettingsUpdateRequest
             WorkShift.shift_date >= payload.effective_from,
         )
     )
-    rebuild_to = rebuild_until or today
+    # После сохранения версии правил возвращаем живой пересчёт для всей затронутой части периода
+    # вплоть до текущего дня. Так интерфейс снова ведёт себя предсказуемо: пользователь видит
+    # очередь/прогресс пересчёта, а все уже закрытые смены за период пересобираются по новым ставкам.
+    rebuild_to = max(rebuild_until or payload.effective_from, today)
     recalc_job_payload: dict[str, Any] | None = None
-    if payload.effective_from <= rebuild_to:
+    if payload.effective_from <= today:
         recalc_job = await _enqueue_payroll_recalc_job(point, version.id, payload.effective_from, rebuild_to, current_user.id)
         recalc_job_payload = _serialize_recalc_job(recalc_job, point)
 

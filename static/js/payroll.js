@@ -1438,9 +1438,10 @@ async function saveSettings() {
             showScopedStatus('settings-status', queuedMessage, 'loading');
             pollRecalcStatus(recalcJobId).catch((error) => console.error(error));
         } else {
+            await refreshAfterRecalcFinished();
             const successMessage = payload.effective_from
-                ? `Версия правил сохранена. Новые правила применяются с ${formatDateRu(payload.effective_from)}.`
-                : 'Версия правил сохранена.';
+                ? `Версия правил сохранена. Пересчёт не потребовался, правила применяются с ${formatDateRu(payload.effective_from)}.`
+                : 'Версия правил сохранена. Пересчёт не потребовался.';
             showStatus(successMessage, 'success');
             showScopedStatus('settings-status', successMessage, 'success');
         }
