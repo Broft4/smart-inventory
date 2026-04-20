@@ -2144,14 +2144,14 @@ def _extract_document_day(doc: dict[str, Any]) -> date | None:
 
 
 def _extract_shift_sales_amount(doc: dict[str, Any]) -> float:
-    proceeds_fields = ('proceedsCash', 'proceedsNoCash')
-    if any(doc.get(field) is not None for field in proceeds_fields):
-        amount = round(sum(_money(doc.get(field)) for field in proceeds_fields if doc.get(field) is not None), 2)
+    for field in ('saleSum', 'retailSum', 'sum'):
+        amount = _money(doc.get(field))
         if amount > 0:
             return amount
 
-    for field in ('saleSum', 'retailSum', 'sum'):
-        amount = _money(doc.get(field))
+    proceeds_fields = ('proceedsCash', 'proceedsNoCash')
+    if any(doc.get(field) is not None for field in proceeds_fields):
+        amount = round(sum(_money(doc.get(field)) for field in proceeds_fields if doc.get(field) is not None), 2)
         if amount > 0:
             return amount
 
@@ -2462,8 +2462,17 @@ async def _load_point_sales_metrics_live(point: LocationPoint, date_from: date, 
         doc_totals = totals_by_day.get(day, {'gross_sales': 0.0, 'returns': 0.0, 'sales_cost': 0.0, 'return_cost': 0.0})
         shift_sales_amount = round(float(shift_sales_by_day.get(day, 0.0) or 0.0), 2)
         shift_return_amount = round(float(shift_returns_by_day.get(day, 0.0) or 0.0), 2)
-        gross_sales_amount = shift_sales_amount if shift_sales_amount > 0 else round(doc_totals['gross_sales'], 2)
-        return_amount = shift_return_amount if shift_return_amount > 0 else round(doc_totals['returns'], 2)
+        doc_gross_sales_amount = round(doc_totals['gross_sales'], 2)
+        doc_return_amount = round(doc_totals['returns'], 2)
+        has_document_turnover = bool(category_rows) or doc_gross_sales_amount > 0 or doc_return_amount > 0
+
+        # Для распределения продаж по категориям нельзя брать в приоритет proceedsCash/proceedsNoCash
+        # из retailshift: на днях с возвратами эти поля часто отражают уже «чистую» выручку,
+        # поэтому сверка с позициями retaildemand/retailsalesreturn создает ложный минус в «Без категории».
+        # Если у нас есть сами документы продаж/возвратов, считаем gross/return именно по ним,
+        # а retailshift используем только как fallback для дней без позиционных документов.
+        gross_sales_amount = doc_gross_sales_amount if has_document_turnover else shift_sales_amount
+        return_amount = doc_return_amount if has_document_turnover else shift_return_amount
         net_sales_amount = round(gross_sales_amount - return_amount, 2)
         doc_cost_amount = round(doc_totals['sales_cost'] - doc_totals['return_cost'], 2)
         legacy_cost_amount = round(float(shift_cost_by_day.get(day, 0.0) or 0.0), 2) if day in shift_cost_days else doc_cost_amount
@@ -2983,10 +2992,7 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
         non_tobacco_net_sales_for_bonus=non_tobacco_net,
         category_earnings_total=round(category_earnings_total, 2),
         gross_salary_amount=gross_salary_amount,
-        snapshot_id=snapshot.id if snapshot else None,
-        is_closed=bool(snapshot) or str(shift.status or '').strip().lower() == 'closed',
-        closed_at=_datetime_to_str(snapshot.closed_at) if snapshot else _datetime_to_str(shift.closed_at),
-        is_auto_closed=bool(snapshot.is_auto_closed) if snapshot else False,
+        is_closed=False,
     )
 
 
@@ -3158,7 +3164,7 @@ def _serialize_computed_shift(computed: ShiftComputedPayroll) -> dict[str, Any]:
         'status': computed.shift.status,
         'split_count': computed.split_count,
         'share_ratio': computed.share_ratio,
-        'is_closed': bool(computed.is_closed) or str(computed.shift.status or '').strip().lower() == 'closed' or computed.snapshot_id is not None,
+        'is_closed': computed.is_closed,
         'is_auto_closed': computed.is_auto_closed,
         'closed_at': computed.closed_at,
         'gross_sales_amount': computed.gross_sales_amount,
