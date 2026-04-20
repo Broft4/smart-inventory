@@ -2983,7 +2983,10 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
         non_tobacco_net_sales_for_bonus=non_tobacco_net,
         category_earnings_total=round(category_earnings_total, 2),
         gross_salary_amount=gross_salary_amount,
-        is_closed=False,
+        snapshot_id=snapshot.id if snapshot else None,
+        is_closed=bool(snapshot) or str(shift.status or '').strip().lower() == 'closed',
+        closed_at=_datetime_to_str(snapshot.closed_at) if snapshot else _datetime_to_str(shift.closed_at),
+        is_auto_closed=bool(snapshot.is_auto_closed) if snapshot else False,
     )
 
 
@@ -3155,7 +3158,7 @@ def _serialize_computed_shift(computed: ShiftComputedPayroll) -> dict[str, Any]:
         'status': computed.shift.status,
         'split_count': computed.split_count,
         'share_ratio': computed.share_ratio,
-        'is_closed': computed.is_closed,
+        'is_closed': bool(computed.is_closed) or str(computed.shift.status or '').strip().lower() == 'closed' or computed.snapshot_id is not None,
         'is_auto_closed': computed.is_auto_closed,
         'closed_at': computed.closed_at,
         'gross_sales_amount': computed.gross_sales_amount,
