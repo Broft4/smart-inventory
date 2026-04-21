@@ -65,6 +65,18 @@ function payrollCategoryDisplayName(category) {
     return String(category?.category_name || category?.name || '').trim();
 }
 
+function isDisplayedReturnsCategory(category) {
+    const categoryName = payrollCategoryDisplayName(category);
+    return categoryName === 'Возвраты';
+}
+
+function formatPayrollCategoryRate(category) {
+    if (isDisplayedReturnsCategory(category)) {
+        return '—';
+    }
+    return `${Number(category?.rate_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%`;
+}
+
 function escapeHtml(value) {
     return String(value ?? '')
         .replace(/&/g, '&amp;')
@@ -585,7 +597,7 @@ function renderShiftCategoryBreakdown(categories = []) {
                     ${rows.map((category) => `
                         <tr>
                             <td data-label="Категория">${escapeHtml(payrollCategoryDisplayName(category))}</td>
-                            <td data-label="%">${Number(category.rate_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%</td>
+                            <td data-label="%">${formatPayrollCategoryRate(category)}</td>
                             <td data-label="Продажи">${formatMoney(category.sales_amount || 0)}</td>
                             <td data-label="Возвраты">${formatMoney(category.return_amount || 0)}</td>
                             <td data-label="Себестоимость">${formatMoney(category.cost_amount || 0)}</td>
@@ -733,7 +745,7 @@ function renderPayrollCategoryTable(categories = payrollState.summary?.categorie
         ? `${filtered.map(category => `
             <tr>
                 <td data-label="Категория">${escapeHtml(payrollCategoryDisplayName(category))}</td>
-                <td data-label="%">${Number(category.rate_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%</td>
+                <td data-label="%">${formatPayrollCategoryRate(category)}</td>
                 <td data-label="Продажи">${formatMoney(category.sales_amount)}</td>
                 <td data-label="Возвраты">${formatMoney(category.return_amount)}</td>
                 <td data-label="Себестоимость">${formatMoney(category.cost_amount || 0)}</td>

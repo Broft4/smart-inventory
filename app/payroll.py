@@ -118,7 +118,7 @@ def _sanitize_uncategorized_row(row: dict[str, Any]) -> dict[str, Any]:
     category_name = row.get('category_name')
     net_sales_amount = _sanitize_uncategorized_net(category_name, row.get('net_sales_amount') or 0.0)
     row['net_sales_amount'] = net_sales_amount
-    if _is_uncategorized_category(category_name, row.get('category_id')) and not _is_uncategorized_return_adjustment_row(row):
+    if _is_uncategorized_category(category_name, row.get('category_id')):
         row['earning_amount'] = 0.0
         row['rate_percent'] = 0.0
     return row
@@ -2846,7 +2846,7 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
                 rate_percent, _used_other_rate = _resolve_category_rate_percent(rate_info, settings.other_rate_percent)
                 is_uncategorized = _is_uncategorized_category(category_name, category_id)
                 is_return_adjustment = _is_uncategorized_return_adjustment_values(row.sales_amount, row.return_amount, net_sales_amount)
-                effective_rate_percent = rate_percent if (not is_uncategorized or is_return_adjustment) else 0.0
+                effective_rate_percent = rate_percent if not is_uncategorized else 0.0
                 calculation_base_amount = _resolve_calculation_sales_base(row.sales_amount, net_sales_amount)
                 earning_amount = _calculate_category_earning_amount(calculation_base_amount, effective_rate_percent)
                 snapshot_categories.append(_sanitize_uncategorized_row({
@@ -2953,7 +2953,7 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
         cost_amount = round(float(row.get('cost_amount') or 0) * share_ratio, 2)
         is_uncategorized = _is_uncategorized_category(row.get('category_name'), category_id)
         is_return_adjustment = _is_uncategorized_return_adjustment_values(sales_amount, return_amount, net_sales_amount)
-        effective_rate_percent = rate_percent if (not is_uncategorized or is_return_adjustment) else 0.0
+        effective_rate_percent = rate_percent if not is_uncategorized else 0.0
         calculation_base_amount = _resolve_calculation_sales_base(sales_amount, net_sales_amount)
         earning_amount = _calculate_category_earning_amount(calculation_base_amount, effective_rate_percent)
         category_earnings_total += earning_amount
@@ -3671,7 +3671,7 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
             net_amount = _sanitize_uncategorized_net(category_name, float(row.get('net_sales_amount') or 0))
             is_uncategorized = _is_uncategorized_category(category_name, category_id)
             is_return_adjustment = _is_uncategorized_return_adjustment_values(row.get('sales_amount'), row.get('return_amount'), net_amount)
-            effective_rate_percent = rate_percent if (not is_uncategorized or is_return_adjustment) else 0.0
+            effective_rate_percent = rate_percent if not is_uncategorized else 0.0
             calculation_base_amount = _resolve_calculation_sales_base(row.get('sales_amount'), net_amount)
             earning_amount = _calculate_category_earning_amount(calculation_base_amount, effective_rate_percent)
             bucket = category_totals.setdefault(category_id, {
