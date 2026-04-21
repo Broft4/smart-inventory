@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 
 MSK_TZ = timezone(timedelta(hours=3))
 DEFAULT_EXIT_AMOUNT = 2000.0
+PAYROLL_RETURNS_CATEGORY_NAME = 'Возвраты'
 DEFAULT_BONUS_THRESHOLD = 40000.0
 DEFAULT_BONUS_AMOUNT = 500.0
 DEFAULT_OTHER_RATE_PERCENT = 3.0
@@ -82,21 +83,52 @@ def _sanitize_uncategorized_net(category_name: Any, net_sales_amount: float) -> 
     return round(float(net_sales_amount or 0.0), 2)
 
 
+def _is_uncategorized_category(category_name: Any = None, category_id: Any = None) -> bool:
+    normalized_name = str(category_name or '').strip()
+    normalized_id = str(category_id or '').strip()
+    return normalized_name == DEFAULT_CATEGORY_NAME or normalized_id == '__other__'
+
+
+def _is_uncategorized_return_adjustment_values(sales_amount: Any, return_amount: Any, net_sales_amount: Any) -> bool:
+    sales = round(float(sales_amount or 0.0), 2)
+    returns = round(float(return_amount or 0.0), 2)
+    net = round(float(net_sales_amount or 0.0), 2)
+    return returns > 0.009 or sales < -0.009 or net < -0.009
+
+
+def _is_uncategorized_return_adjustment_row(row: Any) -> bool:
+    return _is_uncategorized_category(
+        _row_value(row, 'category_name'),
+        _row_value(row, 'category_id'),
+    ) and _is_uncategorized_return_adjustment_values(
+        _row_value(row, 'sales_amount'),
+        _row_value(row, 'return_amount'),
+        _row_value(row, 'net_sales_amount'),
+    )
+
+
+def _get_payroll_display_category_name(row: Any) -> str:
+    category_name = str(_row_value(row, 'category_name') or '').strip()
+    if _is_uncategorized_return_adjustment_row(row):
+        return PAYROLL_RETURNS_CATEGORY_NAME
+    return category_name or DEFAULT_CATEGORY_NAME
+
+
 def _sanitize_uncategorized_row(row: dict[str, Any]) -> dict[str, Any]:
     category_name = row.get('category_name')
     net_sales_amount = _sanitize_uncategorized_net(category_name, row.get('net_sales_amount') or 0.0)
     row['net_sales_amount'] = net_sales_amount
-    if str(category_name or '').strip() == DEFAULT_CATEGORY_NAME:
+    if _is_uncategorized_category(category_name, row.get('category_id')) and not _is_uncategorized_return_adjustment_row(row):
         row['earning_amount'] = 0.0
         row['rate_percent'] = 0.0
     return row
 
 
 def _resolve_calculation_sales_base(sales_amount: Any, net_sales_amount: Any = None) -> float:
-    sales = round(float(sales_amount or 0.0), 2)
     net = round(float(net_sales_amount or 0.0), 2)
-    if abs(sales) <= 0.009 and abs(net) > 0.009:
+    if net_sales_amount is not None:
         return net
+    sales = round(float(sales_amount or 0.0), 2)
     return sales
 
 
@@ -105,7 +137,7 @@ def _resolve_category_calculation_base(row: dict[str, Any]) -> float:
 
 
 def _calculate_category_earning_amount(base_amount: Any, rate_percent: Any) -> float:
-    return round(max(float(base_amount or 0.0), 0.0) * (float(rate_percent or 0.0) / 100.0), 2)
+    return round(float(base_amount or 0.0) * (float(rate_percent or 0.0) / 100.0), 2)
 
 
 def _calculate_gross_profit_from_revenue(revenue_amount: Any, cost_amount: Any) -> float:
@@ -807,9 +839,10 @@ def _row_value(row: Any, field: str, default: Any = None) -> Any:
 
 
 def _is_uncategorized_row(row: Any) -> bool:
-    category_name = str(_row_value(row, 'category_name') or '').strip()
-    category_id = str(_row_value(row, 'category_id') or '').strip()
-    return category_name == DEFAULT_CATEGORY_NAME or category_id == '__other__'
+    return _is_uncategorized_category(
+        _row_value(row, 'category_name'),
+        _row_value(row, 'category_id'),
+    )
 
 
 def _has_legacy_uncategorized_adjustment(rows: list[Any] | None) -> bool:
@@ -2811,8 +2844,9 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
                 net_sales_amount = _sanitize_uncategorized_net(category_name, round(float(row.net_sales_amount or 0), 2))
                 rate_info = _get_rate_info_for_category(category_id, category_name, rate_map, rate_name_map)
                 rate_percent, _used_other_rate = _resolve_category_rate_percent(rate_info, settings.other_rate_percent)
-                is_uncategorized = category_name == DEFAULT_CATEGORY_NAME or category_id == '__other__'
-                effective_rate_percent = 0.0 if is_uncategorized else rate_percent
+                is_uncategorized = _is_uncategorized_category(category_name, category_id)
+                is_return_adjustment = _is_uncategorized_return_adjustment_values(row.sales_amount, row.return_amount, net_sales_amount)
+                effective_rate_percent = rate_percent if (not is_uncategorized or is_return_adjustment) else 0.0
                 calculation_base_amount = _resolve_calculation_sales_base(row.sales_amount, net_sales_amount)
                 earning_amount = _calculate_category_earning_amount(calculation_base_amount, effective_rate_percent)
                 snapshot_categories.append(_sanitize_uncategorized_row({
@@ -2917,8 +2951,9 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
         rate_info = _get_rate_info_for_category(category_id, row.get('category_name'), rate_map, rate_name_map)
         rate_percent, _used_other_rate = _resolve_category_rate_percent(rate_info, settings.other_rate_percent)
         cost_amount = round(float(row.get('cost_amount') or 0) * share_ratio, 2)
-        is_uncategorized = str(row.get('category_name') or '').strip() == DEFAULT_CATEGORY_NAME or category_id == '__other__'
-        effective_rate_percent = 0.0 if is_uncategorized else rate_percent
+        is_uncategorized = _is_uncategorized_category(row.get('category_name'), category_id)
+        is_return_adjustment = _is_uncategorized_return_adjustment_values(sales_amount, return_amount, net_sales_amount)
+        effective_rate_percent = rate_percent if (not is_uncategorized or is_return_adjustment) else 0.0
         calculation_base_amount = _resolve_calculation_sales_base(sales_amount, net_sales_amount)
         earning_amount = _calculate_category_earning_amount(calculation_base_amount, effective_rate_percent)
         category_earnings_total += earning_amount
@@ -2983,7 +3018,9 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
         non_tobacco_net_sales_for_bonus=non_tobacco_net,
         category_earnings_total=round(category_earnings_total, 2),
         gross_salary_amount=gross_salary_amount,
-        is_closed=False,
+        is_closed=shift.status == 'closed',
+        closed_at=_datetime_to_str(shift.closed_at),
+        is_auto_closed=bool(snapshot.is_auto_closed) if snapshot else False,
     )
 
 
@@ -3146,6 +3183,11 @@ async def delete_work_shift(shift_id: int, db: AsyncSession, current_user: User)
 
 
 def _serialize_computed_shift(computed: ShiftComputedPayroll) -> dict[str, Any]:
+    serialized_categories: list[dict[str, Any]] = []
+    for row in computed.categories:
+        cloned = dict(row)
+        cloned['category_name'] = _get_payroll_display_category_name(cloned)
+        serialized_categories.append(cloned)
     return {
         'id': computed.shift.id,
         'shift_date': computed.shift.shift_date.isoformat(),
@@ -3171,7 +3213,7 @@ def _serialize_computed_shift(computed: ShiftComputedPayroll) -> dict[str, Any]:
         'bonus_amount': computed.bonus_amount,
         'category_earnings_total': computed.category_earnings_total,
         'gross_salary_amount': computed.gross_salary_amount,
-        'categories': computed.categories,
+        'categories': serialized_categories,
     }
 
 
@@ -3497,6 +3539,7 @@ async def get_employee_payroll_summary(location: str, date_from: date, date_to: 
             [
                 {
                     **row,
+                    'category_name': _get_payroll_display_category_name(row),
                     'sales_amount': round(float(row['sales_amount']), 2),
                     'return_amount': round(float(row['return_amount']), 2),
                     'net_sales_amount': round(float(row['net_sales_amount']), 2),
@@ -3626,8 +3669,9 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
             rate_info = _get_rate_info_for_category(category_id, category_name, day_rate_map, day_rate_name_map)
             rate_percent, _used_other_rate = _resolve_category_rate_percent(rate_info, day_settings.other_rate_percent)
             net_amount = _sanitize_uncategorized_net(category_name, float(row.get('net_sales_amount') or 0))
-            is_uncategorized = category_name == DEFAULT_CATEGORY_NAME or category_id == '__other__'
-            effective_rate_percent = 0.0 if is_uncategorized else rate_percent
+            is_uncategorized = _is_uncategorized_category(category_name, category_id)
+            is_return_adjustment = _is_uncategorized_return_adjustment_values(row.get('sales_amount'), row.get('return_amount'), net_amount)
+            effective_rate_percent = rate_percent if (not is_uncategorized or is_return_adjustment) else 0.0
             calculation_base_amount = _resolve_calculation_sales_base(row.get('sales_amount'), net_amount)
             earning_amount = _calculate_category_earning_amount(calculation_base_amount, effective_rate_percent)
             bucket = category_totals.setdefault(category_id, {
@@ -3683,6 +3727,7 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
             [
                 {
                     **row,
+                    'category_name': _get_payroll_display_category_name(row),
                     'sales_amount': round(float(row['sales_amount']), 2),
                     'return_amount': round(float(row['return_amount']), 2),
                     'net_sales_amount': round(float(row['net_sales_amount']), 2),

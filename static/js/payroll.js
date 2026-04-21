@@ -48,6 +48,23 @@ function formatMoney(value) {
     return `${num.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`;
 }
 
+function isPayrollReturnsCategory(category) {
+    const categoryId = String(category?.category_id || '').trim();
+    const categoryName = String(category?.category_name || '').trim();
+    const salesAmount = Number(category?.sales_amount || 0);
+    const returnAmount = Number(category?.return_amount || 0);
+    const netSalesAmount = Number(category?.net_sales_amount || 0);
+    const isUncategorized = categoryId === '__other__' || categoryName === 'Без категории';
+    return isUncategorized && (returnAmount > 0.009 || salesAmount < -0.009 || netSalesAmount < -0.009);
+}
+
+function payrollCategoryDisplayName(category) {
+    if (isPayrollReturnsCategory(category)) {
+        return 'Возвраты';
+    }
+    return String(category?.category_name || category?.name || '').trim();
+}
+
 function escapeHtml(value) {
     return String(value ?? '')
         .replace(/&/g, '&amp;')
@@ -525,7 +542,7 @@ function mergeCategoryCatalog(...sources) {
     sources.flat().forEach((item) => {
         if (!item) return;
         const id = String(item.category_id || item.id || '').trim();
-        const name = String(item.category_name || item.name || '').trim();
+        const name = payrollCategoryDisplayName(item);
         const nameKey = normalizeSearch(name);
         if (!id || !name || seen.has(id) || seen.has(`name:${nameKey}`)) return;
         seen.add(id);
@@ -567,7 +584,7 @@ function renderShiftCategoryBreakdown(categories = []) {
                 <tbody>
                     ${rows.map((category) => `
                         <tr>
-                            <td data-label="Категория">${escapeHtml(category.category_name || '')}</td>
+                            <td data-label="Категория">${escapeHtml(payrollCategoryDisplayName(category))}</td>
                             <td data-label="%">${Number(category.rate_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%</td>
                             <td data-label="Продажи">${formatMoney(category.sales_amount || 0)}</td>
                             <td data-label="Возвраты">${formatMoney(category.return_amount || 0)}</td>
@@ -677,7 +694,7 @@ function getFilteredPayrollCategories(categories = []) {
     const sort = payrollState.categoryFilters.sort || 'earning_desc';
 
     const filtered = (categories || []).filter(category => {
-        const categoryName = String(category?.category_name || '');
+        const categoryName = payrollCategoryDisplayName(category);
         if (search && !normalizeSearch(categoryName).includes(search)) {
             return false;
         }
@@ -690,7 +707,7 @@ function getFilteredPayrollCategories(categories = []) {
 
     filtered.sort((left, right) => {
         if (sort === 'name_asc') {
-            return String(left?.category_name || '').localeCompare(String(right?.category_name || ''), 'ru');
+            return payrollCategoryDisplayName(left).localeCompare(payrollCategoryDisplayName(right), 'ru');
         }
         if (sort === 'sales_desc') {
             return Number(right?.sales_amount || 0) - Number(left?.sales_amount || 0);
@@ -715,7 +732,7 @@ function renderPayrollCategoryTable(categories = payrollState.summary?.categorie
     categoryTbody.innerHTML = filtered.length
         ? `${filtered.map(category => `
             <tr>
-                <td data-label="Категория">${escapeHtml(category.category_name)}</td>
+                <td data-label="Категория">${escapeHtml(payrollCategoryDisplayName(category))}</td>
                 <td data-label="%">${Number(category.rate_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%</td>
                 <td data-label="Продажи">${formatMoney(category.sales_amount)}</td>
                 <td data-label="Возвраты">${formatMoney(category.return_amount)}</td>
