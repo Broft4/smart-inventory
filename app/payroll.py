@@ -2969,6 +2969,8 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
     gross_profit_amount = _calculate_gross_profit_from_revenue(gross_sales_amount, cost_amount)
     bonus = float(settings.bonus_amount or 0) if bonus_base_sales_amount >= float(settings.bonus_threshold or 0) else 0.0
     gross_salary_amount = round(float(settings.exit_amount or 0) + bonus + category_earnings_total, 2)
+    normalized_shift_status = str(shift.status or '').strip().lower()
+    resolved_closed_at = _datetime_to_str(snapshot.closed_at) if snapshot and snapshot.closed_at else _datetime_to_str(shift.closed_at)
 
     return ShiftComputedPayroll(
         shift=shift,
@@ -2992,7 +2994,10 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
         non_tobacco_net_sales_for_bonus=non_tobacco_net,
         category_earnings_total=round(category_earnings_total, 2),
         gross_salary_amount=gross_salary_amount,
-        is_closed=False,
+        snapshot_id=snapshot.id if snapshot else None,
+        is_closed=bool(snapshot) or normalized_shift_status == 'closed',
+        closed_at=resolved_closed_at,
+        is_auto_closed=bool(snapshot.is_auto_closed) if snapshot else False,
     )
 
 
