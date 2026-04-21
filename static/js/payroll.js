@@ -203,11 +203,11 @@ function hideStatus() {
 
 
 function normalizeCategoryDisplayNet(category) {
-    const salesAmount = Number(category?.sales_amount || 0);
-    if (Math.abs(salesAmount) > 1e-9) {
-        return salesAmount;
+    const explicitNetAmount = Number(category?.net_sales_amount);
+    if (Number.isFinite(explicitNetAmount)) {
+        return explicitNetAmount;
     }
-    return Number(category?.net_sales_amount || 0);
+    return Number(category?.sales_amount || 0) - Number(category?.return_amount || 0);
 }
 
 function normalizeCategoryProfit(category) {

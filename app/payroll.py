@@ -94,10 +94,10 @@ def _sanitize_uncategorized_row(row: dict[str, Any]) -> dict[str, Any]:
 
 def _resolve_calculation_sales_base(sales_amount: Any, net_sales_amount: Any = None) -> float:
     sales = round(float(sales_amount or 0.0), 2)
+    if net_sales_amount is None:
+        return sales
     net = round(float(net_sales_amount or 0.0), 2)
-    if abs(sales) <= 0.009 and abs(net) > 0.009:
-        return net
-    return sales
+    return net
 
 
 def _resolve_category_calculation_base(row: dict[str, Any]) -> float:
@@ -2345,11 +2345,26 @@ async def _load_profitability_metrics_by_day(point: LocationPoint, date_from: da
 
         metrics = ProfitReportDayMetrics(has_rows=True)
         for row in rows:
-            metrics.sales_amount += _extract_profit_report_amount(row, 'sellSum')
-            metrics.return_amount += _extract_profit_report_amount(row, 'returnSum')
-            metrics.cost_amount += _extract_profit_report_amount(row, 'sellCostSum')
-            metrics.cost_amount -= _extract_profit_report_amount(row, 'returnCostSum')
-            metrics.gross_profit_amount += _extract_profit_report_amount(row, 'profit')
+            sell_amount = _extract_profit_report_amount(row, 'sellSum')
+            return_amount = _extract_profit_report_amount(row, 'returnSum')
+            sell_cost_amount = _extract_profit_report_amount(row, 'sellCostSum')
+            return_cost_amount = _extract_profit_report_amount(row, 'returnCostSum')
+            category_cost_amount = round(sell_cost_amount - return_cost_amount, 2)
+
+            metrics.sales_amount += sell_amount
+            metrics.return_amount += return_amount
+            metrics.cost_amount += category_cost_amount
+            metrics.gross_profit_amount += round((sell_amount - return_amount) - category_cost_amount, 2)
+
+            category = _extract_profit_report_category_info(row, category_lookup, category_ids_by_name)
+            if category is not None:
+                category_id = str(category.get('category_id') or '').strip()
+                category_name = str(category.get('category_name') or '').strip()
+                if category_id:
+                    metrics.category_costs_by_id[category_id] = round(float(metrics.category_costs_by_id.get(category_id) or 0.0) + category_cost_amount, 2)
+                if category_name:
+                    key = _normalize_category_name_key(category_name)
+                    metrics.category_costs_by_name[key] = round(float(metrics.category_costs_by_name.get(key) or 0.0) + category_cost_amount, 2)
 
         metrics.sales_amount = round(metrics.sales_amount, 2)
         metrics.return_amount = round(metrics.return_amount, 2)
@@ -2485,12 +2500,16 @@ async def _load_point_sales_metrics_live(point: LocationPoint, date_from: date, 
             legacy_gross_profit_amount = round(net_sales_amount - legacy_cost_amount, 2)
 
         report_metrics = profit_report_by_day.get(day)
+        category_costs_by_id = {}
+        category_costs_by_name = {}
         if report_metrics and report_metrics.has_rows:
             cost_amount = round(report_metrics.cost_amount, 2)
-            gross_profit_amount = round(report_metrics.gross_profit_amount, 2)
+            category_costs_by_id = {str(key): round(float(value or 0.0), 2) for key, value in (report_metrics.category_costs_by_id or {}).items()}
+            category_costs_by_name = {str(key): round(float(value or 0.0), 2) for key, value in (report_metrics.category_costs_by_name or {}).items()}
         else:
             cost_amount = legacy_cost_amount
-            gross_profit_amount = legacy_gross_profit_amount
+
+        gross_profit_amount = _calculate_gross_profit_from_revenue(net_sales_amount, cost_amount)
 
         categories = []
         non_tobacco_net = 0.0
@@ -2501,6 +2520,11 @@ async def _load_point_sales_metrics_live(point: LocationPoint, date_from: date, 
             category_name = category_names_by_id.get(category_id, DEFAULT_CATEGORY_NAME)
             net_sales = _sanitize_uncategorized_net(category_name, round(metrics.sales - metrics.returns, 2))
             category_cost = round(metrics.sales_cost - metrics.return_cost, 2)
+            matched_report_cost = category_costs_by_id.get(str(category_id).strip())
+            if matched_report_cost is None:
+                matched_report_cost = category_costs_by_name.get(_normalize_category_name_key(category_name))
+            if matched_report_cost is not None:
+                category_cost = round(float(matched_report_cost or 0.0), 2)
             category_cost_sum += category_cost
             category_sales_sum += round(metrics.sales, 2)
             category_return_sum += round(metrics.returns, 2)
@@ -2514,6 +2538,7 @@ async def _load_point_sales_metrics_live(point: LocationPoint, date_from: date, 
                 'return_amount': round(metrics.returns, 2),
                 'net_sales_amount': net_sales,
                 'cost_amount': category_cost,
+                'profit_amount': _calculate_gross_profit_from_revenue(net_sales, category_cost),
             })
 
         sales_delta = round(gross_sales_amount - category_sales_sum, 2)
@@ -2528,11 +2553,13 @@ async def _load_point_sales_metrics_live(point: LocationPoint, date_from: date, 
                     'return_amount': 0.0,
                     'net_sales_amount': 0.0,
                     'cost_amount': 0.0,
+                    'profit_amount': 0.0,
                 }
                 categories.append(other_bucket)
             other_bucket['sales_amount'] = round(float(other_bucket.get('sales_amount') or 0.0) + sales_delta, 2)
             other_bucket['return_amount'] = round(float(other_bucket.get('return_amount') or 0.0) + return_delta, 2)
             other_bucket['net_sales_amount'] = _sanitize_uncategorized_net(DEFAULT_CATEGORY_NAME, round(float(other_bucket.get('sales_amount') or 0.0) - float(other_bucket.get('return_amount') or 0.0), 2))
+            other_bucket['profit_amount'] = _calculate_gross_profit_from_revenue(other_bucket.get('net_sales_amount') or 0.0, other_bucket.get('cost_amount') or 0.0)
             if not _is_tobacco_category(DEFAULT_CATEGORY_NAME):
                 non_tobacco_net += max(_resolve_calculation_sales_base(sales_delta, round(sales_delta - return_delta, 2)), 0.0)
 
@@ -2547,6 +2574,7 @@ async def _load_point_sales_metrics_live(point: LocationPoint, date_from: date, 
                 'return_amount': return_amount,
                 'net_sales_amount': synthetic_net,
                 'cost_amount': cost_amount,
+                'profit_amount': _calculate_gross_profit_from_revenue(synthetic_net, cost_amount),
             })
         elif categories:
             cost_delta = round(cost_amount - category_cost_sum, 2)
@@ -2563,6 +2591,7 @@ async def _load_point_sales_metrics_live(point: LocationPoint, date_from: date, 
                     }
                     categories.append(other_bucket)
                 other_bucket['cost_amount'] = round(float(other_bucket.get('cost_amount') or 0.0) + cost_delta, 2)
+                other_bucket['profit_amount'] = _calculate_gross_profit_from_revenue(other_bucket.get('net_sales_amount') or 0.0, other_bucket.get('cost_amount') or 0.0)
 
         categories.sort(key=lambda item: item['category_name'].lower())
         output[day] = {
@@ -2832,6 +2861,7 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
                     'return_amount': round(float(row.return_amount or 0), 2),
                     'net_sales_amount': net_sales_amount,
                     'cost_amount': round(float(row.cost_amount or 0), 2),
+                    'profit_amount': _calculate_gross_profit_from_revenue(net_sales_amount, round(float(row.cost_amount or 0), 2)),
                     'earning_amount': earning_amount,
                     'is_other_category': is_uncategorized,
                 }))
@@ -2866,8 +2896,8 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
             if abs(snapshot_cost_amount) <= 0.009 and abs(patched_snapshot_cost_amount) > 0.009:
                 snapshot_cost_amount = patched_snapshot_cost_amount
             snapshot_gross_profit_amount = round(float(snapshot.gross_profit_amount or 0), 2)
-            expected_snapshot_gross_profit_amount = _calculate_gross_profit_from_revenue(snapshot.gross_sales_amount, snapshot_cost_amount)
-            if abs(snapshot_gross_profit_amount) <= 0.009 and abs(expected_snapshot_gross_profit_amount) > 0.009:
+            expected_snapshot_gross_profit_amount = _calculate_gross_profit_from_revenue(snapshot.net_sales_amount, snapshot_cost_amount)
+            if abs(snapshot_gross_profit_amount - expected_snapshot_gross_profit_amount) > 0.009:
                 snapshot_gross_profit_amount = expected_snapshot_gross_profit_amount
             snapshot_gross_salary = round(snapshot_exit + snapshot_bonus + snapshot_category_earnings_total, 2)
             return ShiftComputedPayroll(
@@ -2939,6 +2969,7 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
             'return_amount': return_amount,
             'net_sales_amount': net_sales_amount,
             'cost_amount': cost_amount,
+            'profit_amount': _calculate_gross_profit_from_revenue(net_sales_amount, cost_amount),
             'earning_amount': earning_amount,
             'is_other_category': is_uncategorized,
         }))
@@ -2966,7 +2997,7 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
     return_amount = round(float(day_metrics['return_amount']) * share_ratio, 2)
     net_sales_amount = round(float(day_metrics['net_sales_amount']) * share_ratio, 2)
     cost_amount = round(float(day_metrics['cost_amount']) * share_ratio, 2)
-    gross_profit_amount = _calculate_gross_profit_from_revenue(gross_sales_amount, cost_amount)
+    gross_profit_amount = _calculate_gross_profit_from_revenue(net_sales_amount, cost_amount)
     bonus = float(settings.bonus_amount or 0) if bonus_base_sales_amount >= float(settings.bonus_threshold or 0) else 0.0
     gross_salary_amount = round(float(settings.exit_amount or 0) + bonus + category_earnings_total, 2)
     normalized_shift_status = str(shift.status or '').strip().lower()
@@ -3515,6 +3546,7 @@ async def get_employee_payroll_summary(location: str, date_from: date, date_to: 
                     'return_amount': round(float(row['return_amount']), 2),
                     'net_sales_amount': round(float(row['net_sales_amount']), 2),
                     'cost_amount': round(float(row.get('cost_amount') or 0), 2),
+                    'profit_amount': _calculate_gross_profit_from_revenue(float(row.get('net_sales_amount') or 0), float(row.get('cost_amount') or 0)),
                     'earning_amount': round(float(row['earning_amount']), 2),
                 }
                 for row in category_totals.values()
@@ -3669,7 +3701,7 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
         if effective_date_to >= date_from
         else 0.0
     )
-    operating_profit = round(gross_sales_amount - cost_amount - employee_salary_total - expenses_total, 2)
+    operating_profit = round(net_sales_amount - cost_amount - employee_salary_total - expenses_total, 2)
     manager_salary_amount, manager_rate_percent, manager_salary_proration = await _calculate_manager_salary_proration(point, date_from, date_to, db)
     net_profit_after_manager_salary = round(operating_profit - manager_salary_amount, 2)
     responsible_admin = await db.get(User, current_settings.responsible_admin_user_id) if current_settings.responsible_admin_user_id else None
@@ -3701,6 +3733,7 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
                     'return_amount': round(float(row['return_amount']), 2),
                     'net_sales_amount': round(float(row['net_sales_amount']), 2),
                     'cost_amount': round(float(row.get('cost_amount') or 0), 2),
+                    'profit_amount': _calculate_gross_profit_from_revenue(float(row.get('net_sales_amount') or 0), float(row.get('cost_amount') or 0)),
                     'earning_amount': round(float(row['earning_amount']), 2),
                 }
                 for row in category_totals.values()
