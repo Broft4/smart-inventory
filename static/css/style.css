@@ -3031,7 +3031,8 @@ body.modal-open {
     }
 
     .shift-calendar-scroller .employee-shift-calendar-cell {
-        min-height: 72px;
+        min-height: 74px;
+        padding: 4px;
     }
 
     .shift-calendar-scroller .employee-shift-calendar-cell .shift-calendar-day-meta {
@@ -3039,13 +3040,23 @@ body.modal-open {
         text-align: left;
     }
 
+    .shift-calendar-scroller .employee-shift-calendar-cell .shift-calendar-cell-body {
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+    }
+
     .shift-calendar-scroller .employee-shift-status {
         margin-bottom: 0;
     }
 
     .shift-calendar-scroller .employee-shift-calendar-cell .shift-calendar-empty-day {
-        font-size: 11px;
-        line-height: 1.2;
+        width: 100%;
+        font-size: 10px;
+        line-height: 1.15;
+        text-align: center;
+        overflow-wrap: anywhere;
+        word-break: break-word;
     }
 
     .shift-calendar-scroller .employee-shift-status {
@@ -3061,6 +3072,16 @@ body.modal-open {
         width: 10px;
         height: 10px;
         margin-bottom: 2px;
+    }
+
+    .shift-calendar-scroller .employee-shift-compact-total {
+        width: 100%;
+        font-size: 10px;
+        line-height: 1.15;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        text-align: center;
     }
 
     .shift-calendar-scroller .employee-shift-lines,
