@@ -10,6 +10,7 @@ from app.database import AsyncSessionLocal
 from app.logic import refresh_product_financial_cache
 from app.payroll import (
     get_moscow_today,
+    get_payroll_operational_today,
     rebuild_closed_shift_snapshots,
     refresh_payroll_metrics_cache,
 )

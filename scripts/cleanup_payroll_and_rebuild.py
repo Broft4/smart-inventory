@@ -23,7 +23,7 @@ from app.models import (  # noqa: E402
     ShiftPayrollSnapshot,
     WorkShift,
 )
-from app.payroll import get_moscow_today, rebuild_closed_shift_snapshots  # noqa: E402
+from app.payroll import get_moscow_today, get_payroll_operational_today, rebuild_closed_shift_snapshots  # noqa: E402
 
 
 @dataclass(slots=True)
@@ -79,13 +79,13 @@ def _resolve_period(args: argparse.Namespace) -> tuple[date, date]:
         return date_from, date_to
 
     if date_from and not date_to:
-        return date_from, get_moscow_today()
+        return date_from, get_payroll_operational_today()
 
     if date_to and not date_from:
         raise SystemExit('Если передан --date-to, нужно передать и --date-from.')
 
     days = max(int(args.days or 1), 1)
-    date_to = get_moscow_today()
+    date_to = get_payroll_operational_today()
     date_from = date_to - timedelta(days=days - 1)
     return date_from, date_to
 

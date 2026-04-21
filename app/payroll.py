@@ -65,6 +65,7 @@ TOBACCO_KEYWORDS = ('сигарет', 'сигарилл', 'стик')
 
 SALES_METRICS_TTL_SECONDS = 90
 PAYROLL_DAILY_CACHE_RECENT_TTL_SECONDS = 900
+PAYROLL_SHIFT_AUTO_CLOSE_TIME = time(hour=3, minute=55)
 _sales_metrics_cache: dict[tuple[int, str, str], tuple[float, dict[date, dict[str, Any]]]] = {}
 _category_lookup_cache: dict[str, tuple[float, dict[str, dict[str, str]]]] = {}
 _payroll_recalc_tasks: dict[int, asyncio.Task[Any]] = {}
@@ -407,8 +408,22 @@ def _now_msk() -> datetime:
     return datetime.now(MSK_TZ)
 
 
+def _normalize_msk_datetime(value: datetime | None = None) -> datetime:
+    current = value or _now_msk()
+    if current.tzinfo is None:
+        return current.replace(tzinfo=MSK_TZ)
+    return current.astimezone(MSK_TZ)
+
+
 def get_moscow_today() -> date:
     return _now_msk().date()
+
+
+def get_payroll_operational_today(value: datetime | None = None) -> date:
+    current = _normalize_msk_datetime(value)
+    if current.timetz().replace(tzinfo=None) < PAYROLL_SHIFT_AUTO_CLOSE_TIME:
+        return current.date() - timedelta(days=1)
+    return current.date()
 
 
 
@@ -2702,7 +2717,7 @@ def _is_cached_day_fresh(day: date, metrics: dict[str, Any] | None) -> bool:
             if abs(other_cost_sum - total_cost_amount) <= 0.01:
                 return False
 
-    today = get_moscow_today()
+    today = get_payroll_operational_today()
     if day < today:
         return True
     if day > today:
@@ -2723,7 +2738,7 @@ async def _load_point_sales_metrics(
     force_refresh: bool = False,
 ) -> dict[date, dict[str, Any]]:
     cache_key = (point.id, date_from.isoformat(), date_to.isoformat())
-    today = get_moscow_today()
+    today = get_payroll_operational_today()
     includes_today = date_from <= today <= date_to
     if not force_refresh:
         cached = _sales_metrics_cache.get(cache_key)
@@ -2794,7 +2809,7 @@ async def _get_active_shift_count(point: LocationPoint, shift_date: date, db: As
 
 
 async def _ensure_shift_snapshots_for_point(point: LocationPoint, db: AsyncSession) -> None:
-    today = get_moscow_today()
+    today = get_payroll_operational_today()
     due_shifts = (
         await db.scalars(
             select(WorkShift)
@@ -3150,7 +3165,7 @@ async def upsert_work_shift(payload: WorkShiftUpsertRequest, db: AsyncSession, c
         details={'shift_date': payload.shift_date.isoformat(), 'employee_user_id': employee.id},
     )
     await db.commit()
-    if payload.shift_date < get_moscow_today() and shift.status != 'closed':
+    if payload.shift_date < get_payroll_operational_today() and shift.status != 'closed':
         await close_shift(shift.id, db, actor_user=current_user, auto=True)
     return {'success': True, 'message': 'Смена сохранена.'}
 
@@ -3454,7 +3469,7 @@ async def get_employee_payroll_summary(location: str, date_from: date, date_to: 
         if not employee or employee.role != 'employee':
             raise HTTPException(status_code=404, detail='Сотрудник не найден.')
 
-    today = get_moscow_today()
+    today = get_payroll_operational_today()
     effective_date_to = min(date_to, today)
     query = select(WorkShift).where(
         WorkShift.location_point_id == point.id,
@@ -3586,7 +3601,7 @@ async def _calculate_manager_salary_proration(
     date_to: date,
     db: AsyncSession,
 ) -> tuple[float, float, list[dict[str, Any]]]:
-    today = get_moscow_today()
+    today = get_payroll_operational_today()
     details: list[dict[str, Any]] = []
     total_salary = 0.0
     representative_rate = 0.0
@@ -3639,7 +3654,7 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
     await ensure_user_can_access_location(current_user, location, db)
     point = await _get_location_point_by_name(location, db)
     await _ensure_shift_snapshots_for_point(point, db)
-    today = get_moscow_today()
+    today = get_payroll_operational_today()
     effective_date_to = min(date_to, today)
     day_metrics = await _load_point_sales_metrics(point, date_from, effective_date_to, db) if effective_date_to >= date_from else {}
     gross_sales_amount = sum(day['gross_sales_amount'] for day in day_metrics.values())

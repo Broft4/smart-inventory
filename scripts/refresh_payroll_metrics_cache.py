@@ -10,6 +10,7 @@ from app.database import AsyncSessionLocal
 from app.logic import refresh_product_financial_cache
 from app.payroll import (
     get_moscow_today,
+    get_payroll_operational_today,
     rebuild_closed_shift_snapshots,
     refresh_payroll_metrics_cache,
 )
@@ -47,7 +48,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _resolve_period(args: argparse.Namespace) -> tuple[date, date]:
     if bool(args.yesterday_only):
-        yesterday = get_moscow_today() - timedelta(days=1)
+        yesterday = get_payroll_operational_today() - timedelta(days=1)
         return yesterday, yesterday
 
     date_from = _parse_iso_date(args.date_from)
@@ -60,7 +61,7 @@ def _resolve_period(args: argparse.Namespace) -> tuple[date, date]:
         raise SystemExit('Нужно передать обе даты: и --date-from, и --date-to.')
 
     days = max(int(args.days or 1), 1)
-    date_to = get_moscow_today()
+    date_to = get_payroll_operational_today()
     date_from = date_to - timedelta(days=days - 1)
     return date_from, date_to
 

@@ -7,7 +7,7 @@ import logging
 from datetime import date, timedelta
 
 from app.database import AsyncSessionLocal
-from app.payroll import get_moscow_today, rebuild_closed_shift_snapshots
+from app.payroll import get_moscow_today, get_payroll_operational_today, rebuild_closed_shift_snapshots
 
 
 def _parse_iso_date(value: str | None) -> date | None:
@@ -37,7 +37,7 @@ def _resolve_period(args: argparse.Namespace) -> tuple[date, date]:
         raise SystemExit('Нужно передать обе даты: и --date-from, и --date-to.')
 
     days = max(int(args.days or 1), 1)
-    date_to = get_moscow_today()
+    date_to = get_payroll_operational_today()
     date_from = date_to - timedelta(days=days - 1)
     return date_from, date_to
 
