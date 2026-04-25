@@ -9,8 +9,8 @@ from datetime import date, timedelta
 from app.database import AsyncSessionLocal
 from app.logic import refresh_product_financial_cache
 from app.payroll import (
+    auto_close_open_shifts_in_period,
     get_moscow_today,
-    get_payroll_operational_today,
     rebuild_closed_shift_snapshots,
     refresh_payroll_metrics_cache,
 )
@@ -31,6 +31,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--date-from', type=str, default=None, help='Начальная дата периода в формате YYYY-MM-DD.')
     parser.add_argument('--date-to', type=str, default=None, help='Конечная дата периода в формате YYYY-MM-DD.')
     parser.add_argument('--location', type=str, default=None, help='Название точки. Если не указано, обновляются все точки.')
+    parser.add_argument('--yesterday-only', action='store_true', help='Обновить только вчерашний день по Москве.')
+    parser.add_argument('--auto-close-open-shifts', action='store_true', help='Перед обновлением кеша автоматически закрыть все открытые смены за выбранный период.')
     parser.add_argument('--force-refresh', action='store_true', help='Игнорировать существующий кеш и перезапросить данные.')
     parser.add_argument(
         '--rebuild-closed-shifts',
@@ -46,6 +48,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _resolve_period(args: argparse.Namespace) -> tuple[date, date]:
+    if bool(args.yesterday_only):
+        yesterday = get_moscow_today() - timedelta(days=1)
+        return yesterday, yesterday
+
     date_from = _parse_iso_date(args.date_from)
     date_to = _parse_iso_date(args.date_to)
     if date_from and date_to:
@@ -68,6 +74,15 @@ async def _run() -> None:
     date_from, date_to = _resolve_period(args)
 
     async with AsyncSessionLocal() as db:
+        payload: dict[str, object] = {}
+        if args.auto_close_open_shifts:
+            payload['auto_closed_shifts'] = await auto_close_open_shifts_in_period(
+                date_from,
+                date_to,
+                db,
+                location=args.location,
+            )
+
         cache_result = await refresh_payroll_metrics_cache(
             date_from,
             date_to,
@@ -76,9 +91,7 @@ async def _run() -> None:
             force_refresh=bool(args.force_refresh),
         )
 
-        payload: dict[str, object] = {
-            'cache_refresh': cache_result,
-        }
+        payload['cache_refresh'] = cache_result
         if not args.skip_product_financials:
             payload['product_financial_cache'] = await refresh_product_financial_cache(
                 db,
@@ -91,7 +104,7 @@ async def _run() -> None:
                 date_to,
                 db,
                 location=args.location,
-                force_refresh_metrics=bool(args.force_refresh),
+                force_refresh_metrics=False,
             )
 
     print(json.dumps(payload, ensure_ascii=False, indent=2))

@@ -2,7 +2,7 @@
 
 ## Что обновлять ночью
 
-- **Кеш бухгалтерии / зарплаты** — только **вчерашний день**. Это минимально нагружает МойСклад и обычно достаточно для ежедневной работы.
+- **Кеш бухгалтерии / зарплаты** — только **вчерашний день**, но с обязательным live-обновлением. Это закрывает вчерашние зависшие смены и не оставляет старый кеш.
 - **Кеш себестоимости и розницы товаров для админ-ревизий** — отдельным запуском, потому что это не дневные продажи, а карточки товаров.
 - **Старые периоды** за последние 40 дней добирайте вручную отдельной командой, когда нужно пересчитать историю.
 
@@ -10,7 +10,7 @@
 
 ```cron
 CRON_TZ=Europe/Moscow
-0 4 * * * flock -n /tmp/smart_inventory_payroll_cache.lock sh -c 'cd /opt/smart_inventory && /opt/smart_inventory/.venv/bin/python -m scripts.refresh_payroll_metrics_cache --yesterday-only --rebuild-closed-shifts --skip-product-financials >> /var/log/smart_inventory_payroll_cache.log 2>&1'
+0 4 * * * flock -n /tmp/smart_inventory_payroll_cache.lock sh -c 'cd /opt/smart_inventory && /opt/smart_inventory/.venv/bin/python -m scripts.refresh_payroll_metrics_cache --yesterday-only --auto-close-open-shifts --force-refresh --rebuild-closed-shifts --skip-product-financials >> /var/log/smart_inventory_payroll_cache.log 2>&1'
 20 4 * * * flock -n /tmp/smart_inventory_product_financial_cache.lock sh -c 'cd /opt/smart_inventory && /opt/smart_inventory/.venv/bin/python -m scripts.refresh_product_financial_cache >> /var/log/smart_inventory_product_financial_cache.log 2>&1'
 ```
 
@@ -18,7 +18,7 @@ CRON_TZ=Europe/Moscow
 
 ```cron
 CRON_TZ=Europe/Moscow
-0 4 * * * root flock -n /tmp/smart_inventory_payroll_cache.lock sh -c 'cd /opt/smart_inventory && /opt/smart_inventory/.venv/bin/python -m scripts.refresh_payroll_metrics_cache --yesterday-only --rebuild-closed-shifts --skip-product-financials >> /var/log/smart_inventory_payroll_cache.log 2>&1'
+0 4 * * * root flock -n /tmp/smart_inventory_payroll_cache.lock sh -c 'cd /opt/smart_inventory && /opt/smart_inventory/.venv/bin/python -m scripts.refresh_payroll_metrics_cache --yesterday-only --auto-close-open-shifts --force-refresh --rebuild-closed-shifts --skip-product-financials >> /var/log/smart_inventory_payroll_cache.log 2>&1'
 20 4 * * * root flock -n /tmp/smart_inventory_product_financial_cache.lock sh -c 'cd /opt/smart_inventory && /opt/smart_inventory/.venv/bin/python -m scripts.refresh_product_financial_cache >> /var/log/smart_inventory_product_financial_cache.log 2>&1'
 ```
 
