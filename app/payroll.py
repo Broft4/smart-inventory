@@ -47,7 +47,6 @@ logger = logging.getLogger(__name__)
 
 MSK_TZ = timezone(timedelta(hours=3))
 DEFAULT_EXIT_AMOUNT = 2000.0
-PAYROLL_RETURNS_CATEGORY_NAME = 'Возвраты'
 DEFAULT_BONUS_THRESHOLD = 40000.0
 DEFAULT_BONUS_AMOUNT = 500.0
 DEFAULT_OTHER_RATE_PERCENT = 3.0
@@ -65,7 +64,6 @@ TOBACCO_KEYWORDS = ('сигарет', 'сигарилл', 'стик')
 
 SALES_METRICS_TTL_SECONDS = 90
 PAYROLL_DAILY_CACHE_RECENT_TTL_SECONDS = 900
-PAYROLL_SHIFT_AUTO_CLOSE_TIME = time(hour=3, minute=55)
 _sales_metrics_cache: dict[tuple[int, str, str], tuple[float, dict[date, dict[str, Any]]]] = {}
 _category_lookup_cache: dict[str, tuple[float, dict[str, dict[str, str]]]] = {}
 _payroll_recalc_tasks: dict[int, asyncio.Task[Any]] = {}
@@ -84,52 +82,21 @@ def _sanitize_uncategorized_net(category_name: Any, net_sales_amount: float) -> 
     return round(float(net_sales_amount or 0.0), 2)
 
 
-def _is_uncategorized_category(category_name: Any = None, category_id: Any = None) -> bool:
-    normalized_name = str(category_name or '').strip()
-    normalized_id = str(category_id or '').strip()
-    return normalized_name == DEFAULT_CATEGORY_NAME or normalized_id == '__other__'
-
-
-def _is_uncategorized_return_adjustment_values(sales_amount: Any, return_amount: Any, net_sales_amount: Any) -> bool:
-    sales = round(float(sales_amount or 0.0), 2)
-    returns = round(float(return_amount or 0.0), 2)
-    net = round(float(net_sales_amount or 0.0), 2)
-    return returns > 0.009 or sales < -0.009 or net < -0.009
-
-
-def _is_uncategorized_return_adjustment_row(row: Any) -> bool:
-    return _is_uncategorized_category(
-        _row_value(row, 'category_name'),
-        _row_value(row, 'category_id'),
-    ) and _is_uncategorized_return_adjustment_values(
-        _row_value(row, 'sales_amount'),
-        _row_value(row, 'return_amount'),
-        _row_value(row, 'net_sales_amount'),
-    )
-
-
-def _get_payroll_display_category_name(row: Any) -> str:
-    category_name = str(_row_value(row, 'category_name') or '').strip()
-    if _is_uncategorized_return_adjustment_row(row):
-        return PAYROLL_RETURNS_CATEGORY_NAME
-    return category_name or DEFAULT_CATEGORY_NAME
-
-
 def _sanitize_uncategorized_row(row: dict[str, Any]) -> dict[str, Any]:
     category_name = row.get('category_name')
     net_sales_amount = _sanitize_uncategorized_net(category_name, row.get('net_sales_amount') or 0.0)
     row['net_sales_amount'] = net_sales_amount
-    if _is_uncategorized_category(category_name, row.get('category_id')):
+    if str(category_name or '').strip() == DEFAULT_CATEGORY_NAME:
         row['earning_amount'] = 0.0
         row['rate_percent'] = 0.0
     return row
 
 
 def _resolve_calculation_sales_base(sales_amount: Any, net_sales_amount: Any = None) -> float:
-    net = round(float(net_sales_amount or 0.0), 2)
-    if net_sales_amount is not None:
-        return net
     sales = round(float(sales_amount or 0.0), 2)
+    net = round(float(net_sales_amount or 0.0), 2)
+    if abs(sales) <= 0.009 and abs(net) > 0.009:
+        return net
     return sales
 
 
@@ -138,7 +105,7 @@ def _resolve_category_calculation_base(row: dict[str, Any]) -> float:
 
 
 def _calculate_category_earning_amount(base_amount: Any, rate_percent: Any) -> float:
-    return round(float(base_amount or 0.0) * (float(rate_percent or 0.0) / 100.0), 2)
+    return round(max(float(base_amount or 0.0), 0.0) * (float(rate_percent or 0.0) / 100.0), 2)
 
 
 def _calculate_gross_profit_from_revenue(revenue_amount: Any, cost_amount: Any) -> float:
@@ -408,22 +375,8 @@ def _now_msk() -> datetime:
     return datetime.now(MSK_TZ)
 
 
-def _normalize_msk_datetime(value: datetime | None = None) -> datetime:
-    current = value or _now_msk()
-    if current.tzinfo is None:
-        return current.replace(tzinfo=MSK_TZ)
-    return current.astimezone(MSK_TZ)
-
-
 def get_moscow_today() -> date:
     return _now_msk().date()
-
-
-def get_payroll_operational_today(value: datetime | None = None) -> date:
-    current = _normalize_msk_datetime(value)
-    if current.timetz().replace(tzinfo=None) < PAYROLL_SHIFT_AUTO_CLOSE_TIME:
-        return current.date() - timedelta(days=1)
-    return current.date()
 
 
 
@@ -854,10 +807,9 @@ def _row_value(row: Any, field: str, default: Any = None) -> Any:
 
 
 def _is_uncategorized_row(row: Any) -> bool:
-    return _is_uncategorized_category(
-        _row_value(row, 'category_name'),
-        _row_value(row, 'category_id'),
-    )
+    category_name = str(_row_value(row, 'category_name') or '').strip()
+    category_id = str(_row_value(row, 'category_id') or '').strip()
+    return category_name == DEFAULT_CATEGORY_NAME or category_id == '__other__'
 
 
 def _has_legacy_uncategorized_adjustment(rows: list[Any] | None) -> bool:
@@ -2717,7 +2669,7 @@ def _is_cached_day_fresh(day: date, metrics: dict[str, Any] | None) -> bool:
             if abs(other_cost_sum - total_cost_amount) <= 0.01:
                 return False
 
-    today = get_payroll_operational_today()
+    today = get_moscow_today()
     if day < today:
         return True
     if day > today:
@@ -2738,7 +2690,7 @@ async def _load_point_sales_metrics(
     force_refresh: bool = False,
 ) -> dict[date, dict[str, Any]]:
     cache_key = (point.id, date_from.isoformat(), date_to.isoformat())
-    today = get_payroll_operational_today()
+    today = get_moscow_today()
     includes_today = date_from <= today <= date_to
     if not force_refresh:
         cached = _sales_metrics_cache.get(cache_key)
@@ -2808,66 +2760,8 @@ async def _get_active_shift_count(point: LocationPoint, shift_date: date, db: As
     return max(int(count or 0), 1)
 
 
-async def auto_close_open_shifts_in_period(
-    date_from: date,
-    date_to: date,
-    db: AsyncSession,
-    location: str | None = None,
-) -> dict[str, Any]:
-    query = (
-        select(WorkShift)
-        .where(
-            WorkShift.is_deleted.is_(False),
-            WorkShift.status != 'closed',
-            WorkShift.shift_date >= date_from,
-            WorkShift.shift_date <= date_to,
-        )
-        .order_by(WorkShift.shift_date.asc(), WorkShift.id.asc())
-    )
-    normalized_location: str | None = None
-    if location:
-        normalized_location = _normalize_location(location)
-        point = await db.scalar(select(LocationPoint).where(LocationPoint.name == normalized_location).limit(1))
-        if point is None:
-            return {
-                'date_from': date_from.isoformat(),
-                'date_to': date_to.isoformat(),
-                'location': normalized_location,
-                'matched': 0,
-                'closed': 0,
-                'details': [],
-                'warning': 'location_not_found',
-            }
-        query = query.where(WorkShift.location_point_id == point.id)
-
-    shifts = (await db.scalars(query)).all()
-    details: list[dict[str, Any]] = []
-    closed_count = 0
-    for shift in shifts:
-        result = await close_shift(shift.id, db, actor_user=None, auto=True)
-        serialized = result.get('shift') or {}
-        details.append({
-            'shift_id': shift.id,
-            'shift_date': shift.shift_date.isoformat(),
-            'location_point_id': shift.location_point_id,
-            'employee_user_id': shift.employee_user_id,
-            'status': serialized.get('status') or shift.status,
-            'message': result.get('message'),
-        })
-        closed_count += 1
-
-    return {
-        'date_from': date_from.isoformat(),
-        'date_to': date_to.isoformat(),
-        'location': normalized_location,
-        'matched': len(shifts),
-        'closed': closed_count,
-        'details': details,
-    }
-
-
 async def _ensure_shift_snapshots_for_point(point: LocationPoint, db: AsyncSession) -> None:
-    today = get_payroll_operational_today()
+    today = get_moscow_today()
     due_shifts = (
         await db.scalars(
             select(WorkShift)
@@ -2917,9 +2811,8 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
                 net_sales_amount = _sanitize_uncategorized_net(category_name, round(float(row.net_sales_amount or 0), 2))
                 rate_info = _get_rate_info_for_category(category_id, category_name, rate_map, rate_name_map)
                 rate_percent, _used_other_rate = _resolve_category_rate_percent(rate_info, settings.other_rate_percent)
-                is_uncategorized = _is_uncategorized_category(category_name, category_id)
-                is_return_adjustment = _is_uncategorized_return_adjustment_values(row.sales_amount, row.return_amount, net_sales_amount)
-                effective_rate_percent = rate_percent if not is_uncategorized else 0.0
+                is_uncategorized = category_name == DEFAULT_CATEGORY_NAME or category_id == '__other__'
+                effective_rate_percent = 0.0 if is_uncategorized else rate_percent
                 calculation_base_amount = _resolve_calculation_sales_base(row.sales_amount, net_sales_amount)
                 earning_amount = _calculate_category_earning_amount(calculation_base_amount, effective_rate_percent)
                 snapshot_categories.append(_sanitize_uncategorized_row({
@@ -3024,9 +2917,8 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
         rate_info = _get_rate_info_for_category(category_id, row.get('category_name'), rate_map, rate_name_map)
         rate_percent, _used_other_rate = _resolve_category_rate_percent(rate_info, settings.other_rate_percent)
         cost_amount = round(float(row.get('cost_amount') or 0) * share_ratio, 2)
-        is_uncategorized = _is_uncategorized_category(row.get('category_name'), category_id)
-        is_return_adjustment = _is_uncategorized_return_adjustment_values(sales_amount, return_amount, net_sales_amount)
-        effective_rate_percent = rate_percent if not is_uncategorized else 0.0
+        is_uncategorized = str(row.get('category_name') or '').strip() == DEFAULT_CATEGORY_NAME or category_id == '__other__'
+        effective_rate_percent = 0.0 if is_uncategorized else rate_percent
         calculation_base_amount = _resolve_calculation_sales_base(sales_amount, net_sales_amount)
         earning_amount = _calculate_category_earning_amount(calculation_base_amount, effective_rate_percent)
         category_earnings_total += earning_amount
@@ -3091,9 +2983,7 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
         non_tobacco_net_sales_for_bonus=non_tobacco_net,
         category_earnings_total=round(category_earnings_total, 2),
         gross_salary_amount=gross_salary_amount,
-        is_closed=shift.status == 'closed',
-        closed_at=_datetime_to_str(shift.closed_at),
-        is_auto_closed=bool(snapshot.is_auto_closed) if snapshot else False,
+        is_closed=False,
     )
 
 
@@ -3223,7 +3113,7 @@ async def upsert_work_shift(payload: WorkShiftUpsertRequest, db: AsyncSession, c
         details={'shift_date': payload.shift_date.isoformat(), 'employee_user_id': employee.id},
     )
     await db.commit()
-    if payload.shift_date < get_payroll_operational_today() and shift.status != 'closed':
+    if payload.shift_date < get_moscow_today() and shift.status != 'closed':
         await close_shift(shift.id, db, actor_user=current_user, auto=True)
     return {'success': True, 'message': 'Смена сохранена.'}
 
@@ -3256,11 +3146,6 @@ async def delete_work_shift(shift_id: int, db: AsyncSession, current_user: User)
 
 
 def _serialize_computed_shift(computed: ShiftComputedPayroll) -> dict[str, Any]:
-    serialized_categories: list[dict[str, Any]] = []
-    for row in computed.categories:
-        cloned = dict(row)
-        cloned['category_name'] = _get_payroll_display_category_name(cloned)
-        serialized_categories.append(cloned)
     return {
         'id': computed.shift.id,
         'shift_date': computed.shift.shift_date.isoformat(),
@@ -3286,7 +3171,7 @@ def _serialize_computed_shift(computed: ShiftComputedPayroll) -> dict[str, Any]:
         'bonus_amount': computed.bonus_amount,
         'category_earnings_total': computed.category_earnings_total,
         'gross_salary_amount': computed.gross_salary_amount,
-        'categories': serialized_categories,
+        'categories': computed.categories,
     }
 
 
@@ -3302,6 +3187,36 @@ async def _serialize_shift_lightweight(
     if employee_name is None:
         employee = await db.get(User, shift.employee_user_id)
         employee_name = employee.full_name if employee else 'Сотрудник'
+
+    def _pack_lightweight(
+        *,
+        is_closed: bool,
+        closed_at: str | None,
+        gross_sales_amount: float,
+        return_amount: float,
+        net_sales_amount: float,
+        exit_amount: float,
+        bonus_amount: float,
+        category_earnings_total: float,
+        gross_salary_amount: float,
+    ) -> dict[str, Any]:
+        return {
+            'id': shift.id,
+            'shift_date': shift.shift_date.isoformat(),
+            'employee_user_id': shift.employee_user_id,
+            'employee_name': employee_name,
+            'location': point.name,
+            'status': shift.status,
+            'is_closed': is_closed,
+            'closed_at': closed_at,
+            'gross_sales_amount': gross_sales_amount,
+            'return_amount': return_amount,
+            'net_sales_amount': net_sales_amount,
+            'exit_amount': exit_amount,
+            'bonus_amount': bonus_amount,
+            'category_earnings_total': category_earnings_total,
+            'gross_salary_amount': gross_salary_amount,
+        }
 
     snapshot = await db.scalar(
         select(ShiftPayrollSnapshot)
@@ -3319,23 +3234,17 @@ async def _serialize_shift_lightweight(
         ).all()
         if _has_legacy_uncategorized_adjustment(category_rows):
             computed = await _build_computed_shift(shift, db)
-            return {
-                'id': shift.id,
-                'shift_date': shift.shift_date.isoformat(),
-                'employee_user_id': shift.employee_user_id,
-                'employee_name': employee_name,
-                'location': point.name,
-                'status': shift.status,
-                'is_closed': computed.is_closed,
-                'closed_at': computed.closed_at,
-                'gross_sales_amount': computed.gross_sales_amount,
-                'return_amount': computed.return_amount,
-                'net_sales_amount': computed.net_sales_amount,
-                'exit_amount': computed.exit_amount,
-                'bonus_amount': computed.bonus_amount,
-                'category_earnings_total': computed.category_earnings_total,
-                'gross_salary_amount': computed.gross_salary_amount,
-            }
+            return _pack_lightweight(
+                is_closed=bool(shift.status == 'closed' or computed.is_closed),
+                closed_at=computed.closed_at if computed.closed_at else _datetime_to_str(shift.closed_at),
+                gross_sales_amount=computed.gross_sales_amount,
+                return_amount=computed.return_amount,
+                net_sales_amount=computed.net_sales_amount,
+                exit_amount=computed.exit_amount,
+                bonus_amount=computed.bonus_amount,
+                category_earnings_total=computed.category_earnings_total,
+                gross_salary_amount=computed.gross_salary_amount,
+            )
         exit_amount = round(float(snapshot.exit_amount or 0), 2)
         bonus_amount = round(float(snapshot.bonus_amount or 0), 2)
         category_earnings_total = round(float(snapshot.category_earnings_total or 0), 2)
@@ -3344,34 +3253,54 @@ async def _serialize_shift_lightweight(
         net_sales_amount = round(float(snapshot.net_sales_amount or 0), 2)
         gross_salary_amount = round(float(snapshot.gross_salary_amount or 0), 2)
         closed_at = _datetime_to_str(snapshot.closed_at)
-    else:
-        settings = await _get_settings_for_date(point, shift.shift_date, db)
-        exit_amount = round(float(settings.exit_amount or 0), 2)
-        bonus_amount = 0.0
-        category_earnings_total = 0.0
-        gross_sales_amount = 0.0
-        return_amount = 0.0
-        net_sales_amount = 0.0
-        gross_salary_amount = round(exit_amount + bonus_amount + category_earnings_total, 2)
-        closed_at = _datetime_to_str(shift.closed_at)
+        return _pack_lightweight(
+            is_closed=is_closed,
+            closed_at=closed_at,
+            gross_sales_amount=gross_sales_amount,
+            return_amount=return_amount,
+            net_sales_amount=net_sales_amount,
+            exit_amount=exit_amount,
+            bonus_amount=bonus_amount,
+            category_earnings_total=category_earnings_total,
+            gross_salary_amount=gross_salary_amount,
+        )
 
-    return {
-        'id': shift.id,
-        'shift_date': shift.shift_date.isoformat(),
-        'employee_user_id': shift.employee_user_id,
-        'employee_name': employee_name,
-        'location': point.name,
-        'status': shift.status,
-        'is_closed': is_closed,
-        'closed_at': closed_at,
-        'gross_sales_amount': gross_sales_amount,
-        'return_amount': return_amount,
-        'net_sales_amount': net_sales_amount,
-        'exit_amount': exit_amount,
-        'bonus_amount': bonus_amount,
-        'category_earnings_total': category_earnings_total,
-        'gross_salary_amount': gross_salary_amount,
-    }
+    should_show_realized_amounts = shift.status == 'closed' or shift.shift_date < get_moscow_today()
+    if should_show_realized_amounts:
+        computed = await _build_computed_shift(shift, db)
+        return _pack_lightweight(
+            is_closed=bool(shift.status == 'closed' or computed.is_closed),
+            closed_at=_datetime_to_str(shift.closed_at) if shift.status == 'closed' else computed.closed_at,
+            gross_sales_amount=computed.gross_sales_amount,
+            return_amount=computed.return_amount,
+            net_sales_amount=computed.net_sales_amount,
+            exit_amount=computed.exit_amount,
+            bonus_amount=computed.bonus_amount,
+            category_earnings_total=computed.category_earnings_total,
+            gross_salary_amount=computed.gross_salary_amount,
+        )
+
+    settings = await _get_settings_for_date(point, shift.shift_date, db)
+    exit_amount = round(float(settings.exit_amount or 0), 2)
+    bonus_amount = 0.0
+    category_earnings_total = 0.0
+    gross_sales_amount = 0.0
+    return_amount = 0.0
+    net_sales_amount = 0.0
+    gross_salary_amount = round(exit_amount + bonus_amount + category_earnings_total, 2)
+    closed_at = _datetime_to_str(shift.closed_at)
+
+    return _pack_lightweight(
+        is_closed=is_closed,
+        closed_at=closed_at,
+        gross_sales_amount=gross_sales_amount,
+        return_amount=return_amount,
+        net_sales_amount=net_sales_amount,
+        exit_amount=exit_amount,
+        bonus_amount=bonus_amount,
+        category_earnings_total=category_earnings_total,
+        gross_salary_amount=gross_salary_amount,
+    )
 
 
 async def list_work_shifts(location: str, date_from: date, date_to: date, db: AsyncSession, current_user: User, employee_user_id: int | None = None) -> dict[str, Any]:
@@ -3527,7 +3456,7 @@ async def get_employee_payroll_summary(location: str, date_from: date, date_to: 
         if not employee or employee.role != 'employee':
             raise HTTPException(status_code=404, detail='Сотрудник не найден.')
 
-    today = get_payroll_operational_today()
+    today = get_moscow_today()
     effective_date_to = min(date_to, today)
     query = select(WorkShift).where(
         WorkShift.location_point_id == point.id,
@@ -3612,7 +3541,6 @@ async def get_employee_payroll_summary(location: str, date_from: date, date_to: 
             [
                 {
                     **row,
-                    'category_name': _get_payroll_display_category_name(row),
                     'sales_amount': round(float(row['sales_amount']), 2),
                     'return_amount': round(float(row['return_amount']), 2),
                     'net_sales_amount': round(float(row['net_sales_amount']), 2),
@@ -3659,7 +3587,7 @@ async def _calculate_manager_salary_proration(
     date_to: date,
     db: AsyncSession,
 ) -> tuple[float, float, list[dict[str, Any]]]:
-    today = get_payroll_operational_today()
+    today = get_moscow_today()
     details: list[dict[str, Any]] = []
     total_salary = 0.0
     representative_rate = 0.0
@@ -3712,7 +3640,7 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
     await ensure_user_can_access_location(current_user, location, db)
     point = await _get_location_point_by_name(location, db)
     await _ensure_shift_snapshots_for_point(point, db)
-    today = get_payroll_operational_today()
+    today = get_moscow_today()
     effective_date_to = min(date_to, today)
     day_metrics = await _load_point_sales_metrics(point, date_from, effective_date_to, db) if effective_date_to >= date_from else {}
     gross_sales_amount = sum(day['gross_sales_amount'] for day in day_metrics.values())
@@ -3742,9 +3670,8 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
             rate_info = _get_rate_info_for_category(category_id, category_name, day_rate_map, day_rate_name_map)
             rate_percent, _used_other_rate = _resolve_category_rate_percent(rate_info, day_settings.other_rate_percent)
             net_amount = _sanitize_uncategorized_net(category_name, float(row.get('net_sales_amount') or 0))
-            is_uncategorized = _is_uncategorized_category(category_name, category_id)
-            is_return_adjustment = _is_uncategorized_return_adjustment_values(row.get('sales_amount'), row.get('return_amount'), net_amount)
-            effective_rate_percent = rate_percent if not is_uncategorized else 0.0
+            is_uncategorized = category_name == DEFAULT_CATEGORY_NAME or category_id == '__other__'
+            effective_rate_percent = 0.0 if is_uncategorized else rate_percent
             calculation_base_amount = _resolve_calculation_sales_base(row.get('sales_amount'), net_amount)
             earning_amount = _calculate_category_earning_amount(calculation_base_amount, effective_rate_percent)
             bucket = category_totals.setdefault(category_id, {
@@ -3800,7 +3727,6 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
             [
                 {
                     **row,
-                    'category_name': _get_payroll_display_category_name(row),
                     'sales_amount': round(float(row['sales_amount']), 2),
                     'return_amount': round(float(row['return_amount']), 2),
                     'net_sales_amount': round(float(row['net_sales_amount']), 2),
