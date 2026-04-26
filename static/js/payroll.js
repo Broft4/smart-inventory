@@ -368,8 +368,17 @@ async function api(url, options = {}) {
     return payload;
 }
 
+function formatLocalDateIso(value) {
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
 function todayIso() {
-    return new Date().toISOString().slice(0, 10);
+    return formatLocalDateIso(new Date());
 }
 
 function monthIso() {
@@ -1355,7 +1364,7 @@ async function loadShiftCalendar() {
     const month = selectedMonthStart('shift-month-input');
     const [year, mon] = month.split('-').map(Number);
     const dateFrom = `${year}-${String(mon).padStart(2, '0')}-01`;
-    const dateTo = new Date(year, mon, 0).toISOString().slice(0, 10);
+    const dateTo = formatLocalDateIso(new Date(year, mon, 0));
     const payload = await api(`/api/payroll/shifts?location=${encodeURIComponent(location)}&date_from=${dateFrom}&date_to=${dateTo}`);
     const daysByDate = new Map((payload.days || []).map(day => [day.date, day]));
     const rendered = [];

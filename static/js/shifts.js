@@ -48,8 +48,17 @@ function escapeHtml(value) {
         .replace(/'/g, '&#39;');
 }
 
+function formatLocalDateIso(value) {
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
 function todayIso() {
-    return new Date().toISOString().slice(0, 10);
+    return formatLocalDateIso(new Date());
 }
 
 function monthIso() {
@@ -245,7 +254,7 @@ function monthDateRange() {
     const mon = selectedMonthNumber();
     const month = `${year}-${String(mon).padStart(2, '0')}`;
     const dateFrom = `${month}-01`;
-    const dateTo = new Date(year, mon, 0).toISOString().slice(0, 10);
+    const dateTo = formatLocalDateIso(new Date(year, mon, 0));
     return { month, dateFrom, dateTo };
 }
 
