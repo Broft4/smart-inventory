@@ -62,6 +62,8 @@ from app.logic import (
 from app.models import Report, User
 from app.moysklad import ms_client
 from app.payroll import (
+    EmployeeBonusCreateRequest,
+    EmployeeBonusUpdateRequest,
     ExpenseTemplateCreateRequest,
     ExpenseTemplateUpdateRequest,
     ManualMonthlyExpenseCreateRequest,
@@ -70,9 +72,11 @@ from app.payroll import (
     WorkShiftUpsertRequest,
     close_shift,
     bootstrap_payroll_schema,
+    create_employee_bonus,
     create_expense_template,
     create_manual_monthly_expense,
     deactivate_expense_template,
+    delete_employee_bonus,
     delete_expense_template,
     delete_monthly_expense_entry,
     delete_work_shift,
@@ -84,11 +88,13 @@ from app.payroll import (
     get_payroll_category_catalog,
     get_payroll_recalc_status,
     get_user_accessible_locations as get_payroll_accessible_locations,
+    list_employee_bonuses,
     list_expense_templates,
     list_monthly_expenses,
     list_payroll_audit_logs,
     list_work_shift_day_summary,
     list_work_shifts,
+    update_employee_bonus,
     update_expense_template,
     update_location_payroll_settings,
     update_monthly_expense_entry,
@@ -187,7 +193,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260407-payroll-expenses-v9'
+templates.env.globals['asset_version'] = '20260501-payroll-bonuses-v1'
 
 
 @app.middleware('http')
@@ -842,6 +848,27 @@ async def api_payroll_expense_delete(entry_id: int, user: User = Depends(require
 @app.post('/api/payroll/expenses/manual')
 async def api_payroll_manual_expense_create(payload: ManualMonthlyExpenseCreateRequest, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
     return await create_manual_monthly_expense(payload, db, user)
+
+
+
+@app.get('/api/payroll/employee-bonuses')
+async def api_payroll_employee_bonuses(location: str, month: date, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await list_employee_bonuses(location, month, db, user)
+
+
+@app.post('/api/payroll/employee-bonuses')
+async def api_payroll_employee_bonus_create(payload: EmployeeBonusCreateRequest, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await create_employee_bonus(payload, db, user)
+
+
+@app.put('/api/payroll/employee-bonuses/{entry_id}')
+async def api_payroll_employee_bonus_update(entry_id: int, payload: EmployeeBonusUpdateRequest, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await update_employee_bonus(entry_id, payload, db, user)
+
+
+@app.delete('/api/payroll/employee-bonuses/{entry_id}')
+async def api_payroll_employee_bonus_delete(entry_id: int, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await delete_employee_bonus(entry_id, db, user)
 
 
 @app.get('/api/payroll/audit')

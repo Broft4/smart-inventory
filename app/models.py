@@ -447,6 +447,23 @@ class MonthlyExpenseEntry(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class EmployeeBonusEntry(Base):
+    __tablename__ = 'employee_bonus_entries'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    location_point_id: Mapped[int] = mapped_column(ForeignKey('location_points.id', ondelete='CASCADE'), nullable=False, index=True)
+    month_start: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    bonus_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    employee_user_id: Mapped[int] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    updated_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class PayrollAuditLog(Base):
     __tablename__ = 'payroll_audit_logs'
 
