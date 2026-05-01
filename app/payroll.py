@@ -2435,23 +2435,51 @@ async def _build_top_category_lookup(point: LocationPoint) -> dict[str, dict[str
         return dict(cached[1])
 
     lookup: dict[str, dict[str, str]] = {}
+
+    def _append_category_alias(alias: str, category_id: Any, category_name: Any) -> None:
+        normalized_alias = str(alias or '').strip()
+        normalized_id = str(category_id or '').strip()
+        normalized_name = str(category_name or '').strip()
+        if not normalized_alias or not normalized_id or not normalized_name or normalized_name == DEFAULT_CATEGORY_NAME:
+            return
+        lookup.setdefault(normalized_alias, {'category_id': normalized_id, 'category_name': normalized_name})
+
     try:
-        if _ms_client_enabled(location=normalized):
-            inventory = await ms_client.get_inventory(normalized, **_point_ms_kwargs(point))
+        if _ms_client_enabled(token=_point_ms_token(point), location=normalized):
+            token = _point_ms_token(point)
+            folder_map = await ms_client._get_folder_map(token=token, location=normalized)
+            for folder_id, folder in folder_map.items():
+                chain = ms_client._resolve_folder_chain(str(folder_id or '').strip(), folder_map)
+                if not chain:
+                    continue
+                top_category = chain[0]
+                top_id = str(top_category.get('id') or '').strip()
+                top_name = str(top_category.get('name') or '').strip()
+                if not top_id or not top_name:
+                    continue
+                payroll_category_id = f"cat-{normalized.lower()}-{top_id}"
+                _append_category_alias(f"folder:{folder_id}", payroll_category_id, top_name)
+                _append_category_alias(f"category:{top_id}", payroll_category_id, top_name)
+                _append_category_alias(f"category-name:{_normalize_category_name_key(top_name)}", payroll_category_id, top_name)
         else:
             from app.logic import MOCK_INVENTORY
             inventory = MOCK_INVENTORY.get(normalized, {'categories': []})
+            for category in inventory.get('categories', []):
+                category_name = category.get('name') or ''
+                if category_name == DEFAULT_CATEGORY_NAME:
+                    continue
+                category_id = str(category.get('id') or '').strip()
+                _append_category_alias(f"category:{category_id}", category_id, category_name)
+                _append_category_alias(f"category-name:{_normalize_category_name_key(category_name)}", category_id, category_name)
+                for subcategory in category.get('subcategories', []):
+                    for item in subcategory.get('items', []):
+                        _append_category_alias(str(item.get('id') or ''), category_id, category_name)
     except Exception:
-        logger.exception('Не удалось загрузить инвентарь для категоризации продаж точки %s. Используем fallback без категорий.', normalized)
-        inventory = {'categories': []}
+        logger.exception(
+            'Не удалось загрузить папки МоегоСклада для категоризации продаж точки %s. Используем fallback без категорий.',
+            normalized,
+        )
 
-    for category in inventory.get('categories', []):
-        category_name = category.get('name') or ''
-        if category_name == DEFAULT_CATEGORY_NAME:
-            continue
-        for subcategory in category.get('subcategories', []):
-            for item in subcategory.get('items', []):
-                lookup[str(item['id'])] = {'category_id': str(category['id']), 'category_name': category_name}
     _category_lookup_cache[cache_key] = (asyncio.get_running_loop().time(), dict(lookup))
     return lookup
 
@@ -2507,12 +2535,23 @@ def _extract_position_category_info(
             }
 
     folder = assortment.get('productFolder') or assortment.get('folder') or {}
-    folder_name = str(folder.get('name') or '').strip()
+    folder_id = _extract_id(folder if isinstance(folder, dict) else None)
+    if folder_id:
+        folder_alias = f"folder:{folder_id}"
+        if folder_alias in category_lookup:
+            return category_lookup[folder_alias]
+
+    folder_name = str(folder.get('name') or '').strip() if isinstance(folder, dict) else ''
     if folder_name and folder_name in category_ids_by_name:
         return {
             'category_id': category_ids_by_name[folder_name],
             'category_name': folder_name,
         }
+    folder_name_key = _normalize_category_name_key(folder_name)
+    if folder_name_key:
+        category_alias = f"category-name:{folder_name_key}"
+        if category_alias in category_lookup:
+            return category_lookup[category_alias]
     return None
 
 
@@ -2686,12 +2725,22 @@ def _extract_profit_report_category_info(
         folder = row.get(candidate_key)
         if not isinstance(folder, dict):
             continue
+        folder_id = _extract_id(folder)
+        if folder_id:
+            folder_alias = f"folder:{folder_id}"
+            if folder_alias in category_lookup:
+                return category_lookup[folder_alias]
         folder_name = str(folder.get('name') or '').strip()
         if folder_name and folder_name in category_ids_by_name:
             return {
                 'category_id': category_ids_by_name[folder_name],
                 'category_name': folder_name,
             }
+        folder_name_key = _normalize_category_name_key(folder_name)
+        if folder_name_key:
+            category_alias = f"category-name:{folder_name_key}"
+            if category_alias in category_lookup:
+                return category_lookup[category_alias]
 
     path_name = str(row.get('pathName') or row.get('path_name') or '').strip()
     if path_name:
@@ -4456,38 +4505,78 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
     }
 
 
-async def refresh_payroll_metrics_cache(date_from: date, date_to: date, db: AsyncSession, location: str | None = None, *, force_refresh: bool = False) -> dict[str, Any]:
+async def refresh_payroll_metrics_cache(
+    date_from: date,
+    date_to: date,
+    db: AsyncSession,
+    location: str | None = None,
+    *,
+    force_refresh: bool = False,
+    progress_callback: Any | None = None,
+) -> dict[str, Any]:
     query = select(LocationPoint).order_by(LocationPoint.name.asc())
     if location:
         query = query.where(LocationPoint.name == _normalize_location(location))
     points = (await db.scalars(query)).all()
 
+    async def _notify(event: str, **payload: Any) -> None:
+        if progress_callback is None:
+            return
+        callback_result = progress_callback(event, payload)
+        if asyncio.iscoroutine(callback_result):
+            await callback_result
+
+    await _notify(
+        'start',
+        date_from=date_from.isoformat(),
+        date_to=date_to.isoformat(),
+        location=_normalize_location(location) if location else None,
+        total_locations=len(points),
+        force_refresh=bool(force_refresh),
+    )
+
     results: list[dict[str, Any]] = []
     total_days = 0
-    for point in points:
+    for index, point in enumerate(points, start=1):
         token = _point_ms_token(point)
+        await _notify('location_start', index=index, total=len(points), location=point.name)
         if not _ms_client_enabled(token=token, location=point.name):
-            results.append({
+            result = {
                 'location': point.name,
                 'skipped': True,
                 'reason': 'moysklad_disabled',
-            })
+            }
+            results.append(result)
+            await _notify('location_skipped', index=index, total=len(points), location=point.name, reason='moysklad_disabled')
             continue
+        await _notify('location_loading', index=index, total=len(points), location=point.name)
         metrics = await _load_point_sales_metrics(point, date_from, date_to, db, force_refresh=force_refresh)
         day_count = len(metrics)
         total_days += day_count
         gross_sales_amount = round(sum(float(day.get('gross_sales_amount') or 0) for day in metrics.values()), 2)
         return_amount = round(sum(float(day.get('return_amount') or 0) for day in metrics.values()), 2)
         cost_amount = round(sum(float(day.get('cost_amount') or 0) for day in metrics.values()), 2)
-        results.append({
+        result = {
             'location': point.name,
             'days': day_count,
             'gross_sales_amount': gross_sales_amount,
             'return_amount': return_amount,
             'cost_amount': cost_amount,
             'refreshed': True,
-        })
+        }
+        results.append(result)
+        await _notify(
+            'location_done',
+            index=index,
+            total=len(points),
+            location=point.name,
+            days=day_count,
+            gross_sales_amount=gross_sales_amount,
+            return_amount=return_amount,
+            cost_amount=cost_amount,
+        )
 
+    await _notify('done', total_locations=len(points), total_days=total_days)
     return {
         'date_from': date_from.isoformat(),
         'date_to': date_to.isoformat(),
