@@ -2,6 +2,8 @@ const shiftsState = {
     user: window.currentUser || {},
     locations: [],
     employees: [],
+    admins: [],
+    shiftAssignees: [],
     shiftDays: [],
     payrollDays: [],
     filterMode: 'month',
@@ -237,9 +239,46 @@ function renderLocations() {
     }
 }
 
+function dedupeAssignees(items) {
+    const result = [];
+    const seen = new Set();
+    (items || []).forEach(item => {
+        const id = Number(item?.id || 0);
+        if (!id || seen.has(id)) return;
+        seen.add(id);
+        result.push(item);
+    });
+    return result;
+}
+
+function assigneeRoleLabel(item) {
+    if (item?.shift_role === 'admin' || ['admin', 'superadmin'].includes(item?.role)) return 'Управляющий';
+    return 'Сотрудник';
+}
+
+function renderAssigneeOptions(items) {
+    return (items || []).map(item => {
+        const label = `${escapeHtml(item.full_name)}${assigneeRoleLabel(item) === 'Управляющий' ? ' · управляющий' : ''}`;
+        return `<option value="${item.id}">${label}</option>`;
+    }).join('');
+}
+
 function renderEmployees() {
-    const options = shiftsState.employees.map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}</option>`).join('');
-    if (qs('shift-modal-employee-select')) qs('shift-modal-employee-select').innerHTML = options;
+    const select = qs('shift-modal-employee-select');
+    if (!select) return;
+    const assignees = shiftsState.shiftAssignees.length
+        ? shiftsState.shiftAssignees
+        : dedupeAssignees([...(shiftsState.employees || []), ...(shiftsState.admins || [])]);
+    const employees = assignees.filter(item => assigneeRoleLabel(item) !== 'Управляющий');
+    const admins = assignees.filter(item => assigneeRoleLabel(item) === 'Управляющий');
+    const groups = [];
+    if (employees.length) {
+        groups.push(`<optgroup label="Сотрудники">${renderAssigneeOptions(employees)}</optgroup>`);
+    }
+    if (admins.length) {
+        groups.push(`<optgroup label="Управляющие">${renderAssigneeOptions(admins)}</optgroup>`);
+    }
+    select.innerHTML = groups.join('') || '<option value="" disabled selected>Нет доступных пользователей</option>';
 }
 
 function syncCollapseToggleText(details) {
@@ -586,6 +625,11 @@ async function loadSetupForLocation() {
         setup = await api(`/api/payroll/settings?location=${encodeURIComponent(location)}`);
     }
     shiftsState.employees = setup.employees || [];
+    shiftsState.admins = setup.admins || [];
+    shiftsState.shiftAssignees = dedupeAssignees(setup.shift_assignees || [
+        ...(shiftsState.employees || []),
+        ...(shiftsState.admins || []),
+    ]);
     renderEmployees();
 }
 
