@@ -1548,21 +1548,23 @@ async def _get_or_create_selection_cycle(location: str, db: AsyncSession) -> Sel
 
 
 async def reset_selection_cycle(location: str, db: AsyncSession) -> ResetSelectionCycleResponse:
-    cycle = await _get_or_create_selection_cycle(location, db)
+    normalized = _normalize_location(location)
+    cycle = await _get_or_create_selection_cycle(normalized, db)
     old_version = cycle.cycle_version
     old_started_at = cycle.started_at
-    await _ensure_cycle_final_report(_normalize_location(location), old_version, old_started_at, db)
+    await _ensure_cycle_final_report(normalized, old_version, old_started_at, db)
+    expected_cycle_start, _ = _cycle_bounds_for_date(get_moscow_today())
     cycle.cycle_version += 1
-    cycle.started_at = date.today()
+    cycle.started_at = expected_cycle_start
     cycle.updated_at = datetime.utcnow()
-    await db.execute(delete(CategoryAssignment).where(CategoryAssignment.location == _normalize_location(location), CategoryAssignment.cycle_version == old_version))
+    await db.execute(delete(CategoryAssignment).where(CategoryAssignment.location == normalized, CategoryAssignment.cycle_version == old_version))
     await db.commit()
     await db.refresh(cycle)
     return ResetSelectionCycleResponse(
         success=True,
         message='Выбор категорий и подкатегорий обновлён. Начался новый цикл месяца.',
-        cycle_version=cycle_context.cycle_version,
-        cycle_started_at=cycle_context.started_at.strftime('%d.%m.%Y'),
+        cycle_version=cycle.cycle_version,
+        cycle_started_at=cycle.started_at.strftime('%d.%m.%Y'),
     )
 
 
@@ -2209,8 +2211,9 @@ async def get_cycle_targets(location: str, db: AsyncSession, target_date: date |
     )
     selected_category_ids, selected_subcategory_ids = _selection_target_maps(targets)
     previous_category_ids, previous_subcategory_ids = _selection_target_maps(previous_targets)
-    completed_subcategory_ids = await _load_completed_subcategory_ids_before_date(
+    completed_subcategory_ids = await _load_completed_subcategory_ids_for_cycle(
         normalized,
+        cycle_context.cycle_version,
         inventory,
         db,
         before_report_date=resolved_target_date,
@@ -2733,6 +2736,32 @@ async def _build_inventory_structure_for_report(
     for row in results:
         rows_by_category_target[row.category_id][row.target_id] = row
 
+    has_selected_scope = bool(selected_category_ids) or any(selected_subcategory_ids.values())
+    has_retained_scope = bool(retained_category_ids) or any(retained_subcategory_ids.values()) or any(
+        retained_item_ids.get(category_id, {}) for category_id in retained_item_ids
+    )
+    if not has_selected_scope and not has_retained_scope and not assignments and not results and not report_snapshots:
+        can_finish_report, _, _, finish_block_message = _evaluate_finish_readiness([])
+        resolved_cycle_started_at = cycle_started_at or report.report_date
+        resolved_cycle_days_left = cycle_days_left if cycle_days_left is not None else _cycle_days_left_for_date(report.report_date)
+        return InventoryStructureResponse(
+            report_id=report.id,
+            location=normalized,
+            report_date=report.report_date.strftime('%d.%m.%Y'),
+            categories=[],
+            cycle_version=cycle_version,
+            cycle_started_at=resolved_cycle_started_at.strftime('%d.%m.%Y'),
+            cycle_days_left=resolved_cycle_days_left,
+            report_status=report.status,
+            employee_started=employee_started,
+            employee_finished=employee_finished,
+            report_started=report_started,
+            report_completed=report_completed,
+            can_finish_report=can_finish_report,
+            finish_block_message=finish_block_message,
+            start_block_message=start_block_message,
+        )
+
     categories: list[CategoryModel] = []
     inventory = await _get_inventory_for(normalized, db=db)
     completed_subcategory_ids = await _load_completed_subcategory_ids_for_cycle(
@@ -3048,6 +3077,7 @@ async def _get_previous_unfinished_report_block_message(
         await db.scalars(
             select(Report)
             .where(Report.location == current_report.location)
+            .where(Report.cycle_version == current_report.cycle_version)
             .where(Report.report_type == DAILY_REPORT_TYPE)
             .where(Report.report_date < current_report.report_date)
             .order_by(Report.report_date.desc(), Report.id.desc())
