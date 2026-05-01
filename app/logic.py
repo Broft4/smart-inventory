@@ -3746,9 +3746,29 @@ async def reopen_employee_report_access(report_id: int, employee_user_id: int, d
     return ReopenEmployeeAccessResponse(success=True, message=f'Сотруднику {employee.full_name} снова открыт доступ к ревизии.')
 
 
-async def get_reports_history(location: str, db: AsyncSession) -> ReportHistoryResponse:
+async def get_reports_history(
+    location: str,
+    db: AsyncSession,
+    *,
+    year: int | None = None,
+    month: int | None = None,
+) -> ReportHistoryResponse:
     normalized = _normalize_location(location)
-    reports = (await db.scalars(select(Report).where(Report.location == normalized).order_by(Report.date_created.desc(), Report.id.desc()))).all()
+    query = select(Report).where(Report.location == normalized)
+
+    if month is not None and not 1 <= month <= 12:
+        raise HTTPException(status_code=400, detail='Некорректный месяц.')
+    if year is not None and not 2000 <= year <= 2100:
+        raise HTTPException(status_code=400, detail='Некорректный год.')
+
+    if year is not None and month is not None:
+        period_start = date(year, month, 1)
+        period_end = date(year, month, calendar.monthrange(year, month)[1])
+        query = query.where(Report.report_date >= period_start, Report.report_date <= period_end)
+    elif year is not None:
+        query = query.where(Report.report_date >= date(year, 1, 1), Report.report_date <= date(year, 12, 31))
+
+    reports = (await db.scalars(query.order_by(Report.date_created.desc(), Report.id.desc()))).all()
     for report in reports:
         await _sync_report_status(report, db)
     await db.commit()

@@ -1,3 +1,6 @@
+const PAYROLL_ALL_LOCATIONS_VALUE = '__all__';
+const PAYROLL_ALL_LOCATIONS_LABEL = 'Все точки';
+
 const payrollState = {
     user: window.currentUser || {},
     locations: [],
@@ -447,7 +450,16 @@ function selectedLocation() {
     return qs('payroll-location-select').value;
 }
 
+function isAllLocationsSelected(value = selectedLocation()) {
+    return String(value || '').trim() === PAYROLL_ALL_LOCATIONS_VALUE;
+}
+
+function canSelectAllLocations() {
+    return isAdminRole() && normalizeLocationList(payrollState.locations || []).length > 1;
+}
+
 function selectedEmployeeId() {
+    if (isAllLocationsSelected()) return null;
     const raw = qs('payroll-employee-select')?.value || '';
     return raw ? Number(raw) : null;
 }
@@ -496,14 +508,42 @@ function getRequestedPayrollView() {
 function renderLocations() {
     const select = qs('payroll-location-select');
     if (!select) return;
+    const previousValue = select.value;
     const locations = normalizeLocationList(payrollState.locations.length ? payrollState.locations : fallbackLocations());
     payrollState.locations = locations;
-    select.innerHTML = locations.map(location => `<option value="${location}">${location}</option>`).join('');
+    const options = [];
+    if (isAdminRole() && locations.length > 1) {
+        options.push(`<option value="${PAYROLL_ALL_LOCATIONS_VALUE}">${PAYROLL_ALL_LOCATIONS_LABEL}</option>`);
+    }
+    options.push(...locations.map(location => `<option value="${escapeHtml(location)}">${escapeHtml(location)}</option>`));
+    select.innerHTML = options.join('');
+    const validValues = new Set([...select.options].map((option) => option.value));
     const defaultLocation = payrollState.user.default_location || payrollState.user.location || locations[0] || '';
-    if (defaultLocation && locations.includes(defaultLocation)) {
+    if (previousValue && validValues.has(previousValue)) {
+        select.value = previousValue;
+    } else if (defaultLocation && validValues.has(defaultLocation)) {
         select.value = defaultLocation;
-    } else if (locations[0]) {
-        select.value = locations[0];
+    } else if (select.options.length) {
+        select.value = select.options[0].value;
+    }
+    syncAllLocationsModeControls();
+}
+
+function syncAllLocationsModeControls() {
+    const allLocations = isAllLocationsSelected();
+    const disabledCards = ['admin-settings-card', 'expenses-card', 'employee-bonuses-card'];
+    disabledCards.forEach((id) => {
+        const card = qs(id);
+        if (card && isAdminRole()) {
+            card.classList.toggle('hidden', allLocations);
+            card.setAttribute('aria-disabled', allLocations ? 'true' : 'false');
+        }
+    });
+    if (allLocations) {
+        setSettingsLoading(false);
+        payrollState.templates = [];
+        payrollState.expenses = [];
+        payrollState.employeeBonuses = [];
     }
 }
 
@@ -517,8 +557,13 @@ function renderUsersForLocation() {
     const employeeOptions = payrollState.employees.map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}</option>`).join('');
     if (!isAdminRole()) {
         employeeLabel.classList.add('hidden');
+    } else if (isAllLocationsSelected()) {
+        employeeLabel.classList.remove('hidden');
+        employeeSelect.innerHTML = '<option value="">Все сотрудники по всем точкам</option>';
+        employeeSelect.disabled = true;
     } else {
         employeeLabel.classList.remove('hidden');
+        employeeSelect.disabled = false;
         employeeSelect.innerHTML = ['<option value="">Все / я</option>', ...payrollState.employees.map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}</option>`)].join('');
     }
     if (shiftEmployeeSelect) shiftEmployeeSelect.innerHTML = employeeOptions;
@@ -684,7 +729,7 @@ function renderShiftDetailsInto(containerId, summary, { audience = 'admin' } = {
                 <summary class="payroll-day-toggle">
                     <div>
                         <strong>${escapeHtml(day.shift_date || '')}</strong>
-                        <div class="muted-text">${escapeHtml(day.employee_name || '')}</div>
+                        <div class="muted-text">${escapeHtml(day.employee_name || '')}${day.location ? ` · ${escapeHtml(day.location)}` : ''}</div>
                     </div>
                     <div class="payroll-day-toggle-side">
                         <span class="payroll-chip ${day.is_closed ? 'green' : 'orange'}">${day.is_closed ? 'Закрыта' : 'Открыта'}</span>
@@ -943,11 +988,15 @@ function renderManagerSummary(summary) {
     qs('manager-employee-salary').textContent = formatMoney(summary.employee_salary_total || 0);
     qs('manager-expenses').textContent = formatMoney(summary.expenses_total || 0);
     qs('manager-profit').textContent = formatMoney(summary.operating_profit_before_manager_salary || 0);
-    qs('manager-salary').textContent = `${formatMoney(summary.manager_salary_amount || 0)} (${Number(summary.manager_rate_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%)`;
+    qs('manager-salary').textContent = summary.is_all_locations
+        ? formatMoney(summary.manager_salary_amount || 0)
+        : `${formatMoney(summary.manager_salary_amount || 0)} (${Number(summary.manager_rate_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%)`;
     if (qs('manager-profit-after-manager')) qs('manager-profit-after-manager').textContent = formatMoney(summary.net_profit_after_manager_salary || 0);
-    qs('manager-responsible-line').textContent = summary.responsible_admin_name
-        ? `Ответственный управляющий точки: ${summary.responsible_admin_name}`
-        : 'Ответственный управляющий для точки пока не назначен.';
+    qs('manager-responsible-line').textContent = summary.is_all_locations
+        ? 'Выбран режим «Все точки»: прибыль и зарплата управляющих суммируются по доступным точкам.'
+        : (summary.responsible_admin_name
+            ? `Ответственный управляющий точки: ${summary.responsible_admin_name}`
+            : 'Ответственный управляющий для точки пока не назначен.');
 }
 
 function renderManagerBrackets() {
@@ -987,7 +1036,7 @@ window.removeManagerBracket = function removeManagerBracket(index) {
 
 function renderSettings() {
     const card = qs('admin-settings-card');
-    if (!isAdminRole()) {
+    if (!isAdminRole() || isAllLocationsSelected()) {
         card.classList.add('hidden');
         return;
     }
@@ -1099,7 +1148,7 @@ function renderShiftCalendar() {
 
 function renderTemplates() {
     const card = qs('expenses-card');
-    if (!isAdminRole()) {
+    if (!isAdminRole() || isAllLocationsSelected()) {
         card.classList.add('hidden');
         return;
     }
@@ -1251,7 +1300,7 @@ function bonusEmployeeName(entry) {
 function renderEmployeeBonuses() {
     const card = qs('employee-bonuses-card');
     const list = qs('employee-bonus-entry-tbody');
-    if (!isAdminRole()) {
+    if (!isAdminRole() || isAllLocationsSelected()) {
         card?.classList.add('hidden');
         return;
     }
@@ -1442,6 +1491,18 @@ async function loadSetupForLocation() {
     if (!location) return;
     stopRecalcPolling();
     payrollState.activeRecalcJob = null;
+    syncAllLocationsModeControls();
+    if (isAllLocationsSelected(location)) {
+        payrollState.settings = null;
+        payrollState.employees = [];
+        payrollState.admins = [];
+        renderUsersForLocation();
+        renderSettings();
+        renderTemplates();
+        renderEmployeeBonuses();
+        await loadAudit();
+        return;
+    }
     const requestedEffectiveFrom = selectedSettingsEffectiveFrom() || getStoredSettingsEffectiveFrom(location);
     const effectiveFromQuery = requestedEffectiveFrom ? `&effective_from=${encodeURIComponent(requestedEffectiveFrom)}` : '';
     setSettingsLoading(true, 'Загружаем настройки точки...');
@@ -1476,6 +1537,7 @@ async function loadSummary() {
     const dateFrom = qs('payroll-date-from').value;
     const dateTo = qs('payroll-date-to').value;
     if (!location || !dateFrom || !dateTo) return;
+    syncAllLocationsModeControls();
     showStatus('Загружаем расчёт зарплаты...', 'loading');
     try {
         const employeeId = selectedEmployeeId();
@@ -1515,7 +1577,13 @@ async function loadShiftCalendar() {
 }
 
 async function loadExpenseTemplatesAndEntries() {
-    if (!isAdminRole()) return;
+    if (!isAdminRole() || isAllLocationsSelected()) {
+        payrollState.templates = [];
+        payrollState.expenses = [];
+        renderTemplates();
+        renderExpenses();
+        return;
+    }
     const location = selectedLocation();
     const month = selectedMonthStart('expenses-month-input');
     const templates = await api(`/api/payroll/expense-templates?location=${encodeURIComponent(location)}`);
@@ -1533,7 +1601,11 @@ async function loadExpenseTemplatesAndEntries() {
 
 
 async function loadEmployeeBonuses() {
-    if (!isAdminRole()) return;
+    if (!isAdminRole() || isAllLocationsSelected()) {
+        payrollState.employeeBonuses = [];
+        renderEmployeeBonuses();
+        return;
+    }
     const location = selectedLocation();
     const month = selectedMonthStart('employee-bonuses-month-input');
     const bonuses = await api(`/api/payroll/employee-bonuses?location=${encodeURIComponent(location)}&month=${month}`);
@@ -1549,7 +1621,10 @@ async function loadEmployeeBonuses() {
 async function loadAudit() {
     if (!isAdminRole()) return;
     const location = selectedLocation();
-    const payload = await api(`/api/payroll/audit?location=${encodeURIComponent(location)}&limit=100`);
+    const query = isAllLocationsSelected(location)
+        ? '/api/payroll/audit?limit=100'
+        : `/api/payroll/audit?location=${encodeURIComponent(location)}&limit=100`;
+    const payload = await api(query);
     payrollState.audit = payload.logs || [];
     renderAudit();
 }
@@ -1572,6 +1647,10 @@ window.addManagerBracket = function addManagerBracket() {
 };
 
 async function saveSettings() {
+    if (isAllLocationsSelected()) {
+        showStatus('В режиме «Все точки» настройки процентов недоступны. Выберите конкретную точку.', 'warning');
+        return;
+    }
     const button = qs('save-settings-btn');
     const categoryRates = [...document.querySelectorAll('[data-category-rate-id]')]
         .map(input => ({
@@ -1740,6 +1819,10 @@ window.closeOwnShift = async function closeOwnShift(id) {
 window.closeAdminShift = window.closeOwnShift;
 
 async function createExpenseTemplate() {
+    if (isAllLocationsSelected()) {
+        showStatus('В режиме «Все точки» расходы недоступны. Выберите конкретную точку.', 'warning');
+        return;
+    }
     const button = qs('create-expense-template-btn');
     const payload = {
         location: selectedLocation(),
@@ -1815,6 +1898,10 @@ window.saveExpenseEntry = async function saveExpenseEntry(id) {
 };
 
 async function createManualExpense() {
+    if (isAllLocationsSelected()) {
+        showStatus('В режиме «Все точки» расходы недоступны. Выберите конкретную точку.', 'warning');
+        return;
+    }
     const button = qs('create-manual-expense-btn');
     const payload = {
         location: selectedLocation(),
@@ -1872,6 +1959,10 @@ window.deleteExpenseEntry = async function deleteExpenseEntry(id) {
 };
 
 async function createEmployeeBonus() {
+    if (isAllLocationsSelected()) {
+        showStatus('В режиме «Все точки» премии недоступны. Выберите конкретную точку.', 'warning');
+        return;
+    }
     const button = qs('create-employee-bonus-btn');
     const payload = {
         location: selectedLocation(),
@@ -2004,6 +2095,7 @@ async function bootstrap() {
 qs('payroll-location-select').addEventListener('change', async () => {
     const location = selectedLocation();
     payrollState.requestedSettingsEffectiveFrom = getStoredSettingsEffectiveFrom(location) || '';
+    syncAllLocationsModeControls();
     await loadSetupForLocation();
     await loadSummary();
 });

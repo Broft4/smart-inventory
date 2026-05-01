@@ -1,17 +1,34 @@
 const ADMIN_UI_STATE_STORAGE_KEY = 'smart_inventory_admin_ui_state';
 
+const ADMIN_REPORT_MONTHS = [
+    { value: '01', label: 'Январь' },
+    { value: '02', label: 'Февраль' },
+    { value: '03', label: 'Март' },
+    { value: '04', label: 'Апрель' },
+    { value: '05', label: 'Май' },
+    { value: '06', label: 'Июнь' },
+    { value: '07', label: 'Июль' },
+    { value: '08', label: 'Август' },
+    { value: '09', label: 'Сентябрь' },
+    { value: '10', label: 'Октябрь' },
+    { value: '11', label: 'Ноябрь' },
+    { value: '12', label: 'Декабрь' },
+];
+
 function loadPersistedAdminUiState() {
     try {
         const raw = localStorage.getItem(ADMIN_UI_STATE_STORAGE_KEY);
-        if (!raw) return { selectedLocation: '', selectedReportId: null, selectedReportIdByLocation: {} };
+        if (!raw) return { selectedLocation: '', selectedReportYear: null, selectedReportMonth: '', selectedReportId: null, selectedReportIdByLocation: {} };
         const parsed = JSON.parse(raw);
         return {
             selectedLocation: typeof parsed?.selectedLocation === 'string' ? parsed.selectedLocation : '',
+            selectedReportYear: Number.isInteger(Number(parsed?.selectedReportYear)) ? Number(parsed.selectedReportYear) : null,
+            selectedReportMonth: typeof parsed?.selectedReportMonth === 'string' ? parsed.selectedReportMonth : '',
             selectedReportId: null,
             selectedReportIdByLocation: {},
         };
     } catch {
-        return { selectedLocation: '', selectedReportId: null, selectedReportIdByLocation: {} };
+        return { selectedLocation: '', selectedReportYear: null, selectedReportMonth: '', selectedReportId: null, selectedReportIdByLocation: {} };
     }
 }
 
@@ -19,6 +36,8 @@ function persistAdminUiState() {
     try {
         localStorage.setItem(ADMIN_UI_STATE_STORAGE_KEY, JSON.stringify({
             selectedLocation: adminState.selectedLocation || '',
+            selectedReportYear: adminState.selectedReportYear || null,
+            selectedReportMonth: adminState.selectedReportMonth || '',
             selectedReportId: null,
             selectedReportIdByLocation: {},
         }));
@@ -32,6 +51,8 @@ const persistedAdminUiState = loadPersistedAdminUiState();
 const adminState = {
     report: null,
     selectedLocation: persistedAdminUiState.selectedLocation || '',
+    selectedReportYear: persistedAdminUiState.selectedReportYear || null,
+    selectedReportMonth: persistedAdminUiState.selectedReportMonth || '',
     selectedReportId: null,
     selectedReportIdByLocation: {},
     isPeriodMode: false,
@@ -72,6 +93,60 @@ function getTodayIsoDate() {
     const month = String(now.getMonth() + 1).padStart(2, '0');
     const day = String(now.getDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
+}
+
+function getDefaultReportYearMonth() {
+    const today = getTodayIsoDate();
+    return {
+        year: Number(today.slice(0, 4)),
+        month: today.slice(5, 7),
+    };
+}
+
+function normalizeReportMonth(value) {
+    const number = Number(value);
+    if (!Number.isInteger(number) || number < 1 || number > 12) return '';
+    return String(number).padStart(2, '0');
+}
+
+function getReportMonthLabel(monthValue) {
+    const normalized = normalizeReportMonth(monthValue);
+    return ADMIN_REPORT_MONTHS.find(item => item.value === normalized)?.label || '';
+}
+
+function getSelectedReportYearMonth() {
+    const defaults = getDefaultReportYearMonth();
+    const yearSelect = document.getElementById('admin-report-year-select');
+    const monthSelect = document.getElementById('admin-report-month-select');
+    const selectedYear = Number(yearSelect?.value || adminState.selectedReportYear || defaults.year);
+    const selectedMonth = normalizeReportMonth(monthSelect?.value || adminState.selectedReportMonth || defaults.month) || defaults.month;
+    adminState.selectedReportYear = selectedYear;
+    adminState.selectedReportMonth = selectedMonth;
+    return { year: selectedYear, month: selectedMonth };
+}
+
+function renderReportMonthSelectors() {
+    const yearSelect = document.getElementById('admin-report-year-select');
+    const monthSelect = document.getElementById('admin-report-month-select');
+    if (!yearSelect || !monthSelect) return;
+
+    const defaults = getDefaultReportYearMonth();
+    const selectedYear = Number(adminState.selectedReportYear || defaults.year);
+    const selectedMonth = normalizeReportMonth(adminState.selectedReportMonth || defaults.month) || defaults.month;
+    const maxYear = Math.max(defaults.year + 1, selectedYear);
+    const minYear = Math.min(2024, selectedYear, defaults.year - 5);
+
+    yearSelect.innerHTML = Array.from({ length: maxYear - minYear + 1 }, (_, index) => maxYear - index)
+        .map(year => `<option value="${year}">${year}</option>`)
+        .join('');
+    monthSelect.innerHTML = ADMIN_REPORT_MONTHS
+        .map(month => `<option value="${month.value}">${month.label}</option>`)
+        .join('');
+
+    yearSelect.value = String(selectedYear);
+    monthSelect.value = selectedMonth;
+    adminState.selectedReportYear = selectedYear;
+    adminState.selectedReportMonth = selectedMonth;
 }
 
 function applyDefaultPeriodInputs() {
@@ -2576,11 +2651,14 @@ window.filterByEmployee = function (fullName) {
 
 async function loadReportsList(location, sectionRequestSeq = adminState.reportsSectionRequestSeq) {
     const select = document.getElementById('admin-report-select');
+    const { year, month } = getSelectedReportYearMonth();
+    const monthLabel = getReportMonthLabel(month);
     select.disabled = true;
     select.innerHTML = '<option>Загрузка...</option>';
-    setAdminReportLoading(`Загружаем список ревизий для точки «${location}»...`);
+    setAdminReportLoading(`Загружаем список ревизий для точки «${location}» за ${monthLabel.toLowerCase()} ${year}...`);
 
-    const response = await fetch(`/api/reports?location=${encodeURIComponent(location)}`);
+    const params = new URLSearchParams({ location, year: String(year), month: String(Number(month)) });
+    const response = await fetch(`/api/reports?${params.toString()}`);
     if (!response.ok) throw new Error('Ошибка загрузки списка ревизий');
     const data = await response.json();
 
@@ -2589,7 +2667,7 @@ async function loadReportsList(location, sectionRequestSeq = adminState.reportsS
     }
 
     if (!data.reports.length) {
-        select.innerHTML = '<option value="">Нет сохранённых ревизий</option>';
+        select.innerHTML = `<option value="">Нет ревизий за ${monthLabel.toLowerCase()} ${year}</option>`;
         adminState.selectedReportId = null;
         persistAdminUiState();
         updateAdminReportSelectAvailability();
@@ -3228,6 +3306,22 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
+    document.getElementById('admin-report-year-select')?.addEventListener('change', async (event) => {
+        adminState.selectedReportYear = Number(event.target.value) || getDefaultReportYearMonth().year;
+        adminState.selectedReportId = null;
+        persistAdminUiState();
+        const location = adminState.selectedLocation || locationSelect.value;
+        if (location) await reloadReportsSection(location);
+    });
+
+    document.getElementById('admin-report-month-select')?.addEventListener('change', async (event) => {
+        adminState.selectedReportMonth = normalizeReportMonth(event.target.value) || getDefaultReportYearMonth().month;
+        adminState.selectedReportId = null;
+        persistAdminUiState();
+        const location = adminState.selectedLocation || locationSelect.value;
+        if (location) await reloadReportsSection(location);
+    });
+
     locationSelect.addEventListener('change', async () => {
         const nextLocation = locationSelect.value;
         adminState.selectedLocation = nextLocation;
@@ -3261,6 +3355,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     setViewMode('categories');
     updateUserFormByRole();
     applyDefaultPeriodInputs();
+    renderReportMonthSelectors();
     await loadLocations();
     await reloadReportsSection(adminState.selectedLocation || document.getElementById('admin-location-select').value);
 });

@@ -65,6 +65,9 @@ TOBACCO_KEYWORDS = ('сигарет', 'сигарилл', 'стик')
 
 SALES_METRICS_TTL_SECONDS = 90
 PAYROLL_DAILY_CACHE_RECENT_TTL_SECONDS = 900
+PAYROLL_OPEN_SHIFT_CACHE_TTL_SECONDS = 300
+PAYROLL_ALL_LOCATIONS_VALUE = '__all__'
+PAYROLL_ALL_LOCATIONS_LABEL = 'Все точки'
 _sales_metrics_cache: dict[tuple[int, str, str], tuple[float, dict[date, dict[str, Any]]]] = {}
 _category_lookup_cache: dict[str, tuple[float, dict[str, dict[str, str]]]] = {}
 _payroll_recalc_tasks: dict[int, asyncio.Task[Any]] = {}
@@ -1243,7 +1246,44 @@ async def get_user_accessible_locations(user: User, db: AsyncSession) -> list[st
     return [fallback_location] if fallback_location else []
 
 
+def _is_all_locations_scope(location: str | None) -> bool:
+    normalized = str(location or '').strip().lower()
+    return normalized in {PAYROLL_ALL_LOCATIONS_VALUE, 'all', 'все', 'все точки'}
+
+
+async def _get_accessible_location_points(user: User, db: AsyncSession) -> list[LocationPoint]:
+    names = await get_user_accessible_locations(user, db)
+    if not names:
+        return []
+    rows = (
+        await db.scalars(
+            select(LocationPoint)
+            .where(LocationPoint.name.in_(names))
+            .order_by(LocationPoint.name.asc())
+        )
+    ).all()
+    by_name = {row.name: row for row in rows}
+    return [by_name[name] for name in names if name in by_name]
+
+
+async def _get_payroll_scope_points(user: User, location: str, db: AsyncSession) -> tuple[list[LocationPoint], bool]:
+    if _is_all_locations_scope(location):
+        if user.role not in {'admin', 'superadmin'}:
+            raise HTTPException(status_code=403, detail='Все точки доступны только управляющим.')
+        points = await _get_accessible_location_points(user, db)
+        if not points:
+            raise HTTPException(status_code=404, detail='Нет доступных точек.')
+        return points, True
+    await ensure_user_can_access_location(user, location, db)
+    point = await _get_location_point_by_name(location, db)
+    return [point], False
+
+
 async def ensure_user_can_access_location(user: User, location: str, db: AsyncSession) -> None:
+    if _is_all_locations_scope(location):
+        if user.role not in {'admin', 'superadmin'}:
+            raise HTTPException(status_code=403, detail='Все точки доступны только управляющим.')
+        return
     normalized = _normalize_location(location)
     accessible = set(await get_user_accessible_locations(user, db))
     if normalized not in accessible:
@@ -2999,7 +3039,12 @@ async def _store_point_sales_metrics_cache(point: LocationPoint, metrics_by_day:
     await db.flush()
 
 
-def _is_cached_day_fresh(day: date, metrics: dict[str, Any] | None) -> bool:
+def _is_cached_day_fresh(
+    day: date,
+    metrics: dict[str, Any] | None,
+    *,
+    open_shift_days: set[date] | None = None,
+) -> bool:
     if metrics is None:
         return False
 
@@ -3032,7 +3077,27 @@ def _is_cached_day_fresh(day: date, metrics: dict[str, Any] | None) -> bool:
     if not isinstance(refreshed_at, datetime):
         return False
     age_seconds = (datetime.utcnow() - refreshed_at).total_seconds()
-    return age_seconds <= PAYROLL_DAILY_CACHE_RECENT_TTL_SECONDS
+    ttl_seconds = PAYROLL_OPEN_SHIFT_CACHE_TTL_SECONDS if open_shift_days and day in open_shift_days else PAYROLL_DAILY_CACHE_RECENT_TTL_SECONDS
+    return age_seconds <= ttl_seconds
+
+
+async def _get_open_shift_dates(point: LocationPoint, date_from: date, date_to: date, db: AsyncSession) -> set[date]:
+    if date_to < date_from:
+        return set()
+    rows = (
+        await db.scalars(
+            select(WorkShift.shift_date)
+            .where(
+                WorkShift.location_point_id == point.id,
+                WorkShift.shift_date >= date_from,
+                WorkShift.shift_date <= date_to,
+                WorkShift.is_deleted.is_(False),
+                WorkShift.status != 'closed',
+            )
+            .distinct()
+        )
+    ).all()
+    return {row for row in rows if isinstance(row, date)}
 
 
 async def _load_point_sales_metrics(
@@ -3046,9 +3111,14 @@ async def _load_point_sales_metrics(
     cache_key = (point.id, date_from.isoformat(), date_to.isoformat())
     today = get_moscow_today()
     includes_today = date_from <= today <= date_to
+    open_shift_days_for_cache: set[date] = set()
+    if db is not None and not force_refresh and includes_today:
+        open_shift_days_for_cache = await _get_open_shift_dates(point, date_from, date_to, db)
+
     if not force_refresh:
         cached = _sales_metrics_cache.get(cache_key)
-        if cached and _cache_is_fresh(cached[0], SALES_METRICS_TTL_SECONDS):
+        memory_ttl_seconds = PAYROLL_OPEN_SHIFT_CACHE_TTL_SECONDS if today in open_shift_days_for_cache else SALES_METRICS_TTL_SECONDS
+        if cached and _cache_is_fresh(cached[0], memory_ttl_seconds):
             return cached[1]
 
     try:
@@ -3057,10 +3127,11 @@ async def _load_point_sales_metrics(
 
         if db is not None and not force_refresh:
             cached_days = await _get_cached_point_sales_metrics(point, date_from, date_to, db)
+            open_shift_days = open_shift_days_for_cache if includes_today else await _get_open_shift_dates(point, date_from, date_to, db)
             missing_days = []
             for day in _daterange(date_from, date_to):
                 metrics = cached_days.get(day)
-                if _is_cached_day_fresh(day, metrics):
+                if _is_cached_day_fresh(day, metrics, open_shift_days=open_shift_days):
                     result[day] = {key: value for key, value in metrics.items() if not key.startswith('_')}
                 else:
                     missing_days.append(day)
@@ -3708,8 +3779,29 @@ async def _serialize_shift_lightweight(
 
 
 async def list_work_shifts(location: str, date_from: date, date_to: date, db: AsyncSession, current_user: User, employee_user_id: int | None = None) -> dict[str, Any]:
-    await ensure_user_can_access_location(current_user, location, db)
-    point = await _get_location_point_by_name(location, db)
+    points, is_all_locations = await _get_payroll_scope_points(current_user, location, db)
+    if is_all_locations:
+        merged_by_day: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for point_item in points:
+            payload = await list_work_shifts(point_item.name, date_from, date_to, db, current_user, employee_user_id=employee_user_id)
+            for day in payload.get('days') or []:
+                merged_by_day[day.get('date')].extend(day.get('shifts') or [])
+        return {
+            'location': PAYROLL_ALL_LOCATIONS_LABEL,
+            'locations': [point_item.name for point_item in points],
+            'is_all_locations': True,
+            'date_from': date_from.isoformat(),
+            'date_to': date_to.isoformat(),
+            'days': [
+                {
+                    'date': day,
+                    'shifts': sorted(items, key=lambda item: (str(item.get('location') or ''), str(item.get('employee_name') or '').lower())),
+                }
+                for day, items in sorted(merged_by_day.items())
+            ],
+        }
+
+    point = points[0]
     query = select(WorkShift).where(
         WorkShift.location_point_id == point.id,
         WorkShift.shift_date >= date_from,
@@ -3750,8 +3842,22 @@ async def list_work_shifts(location: str, date_from: date, date_to: date, db: As
 
 
 async def list_work_shift_day_summary(location: str, date_from: date, date_to: date, db: AsyncSession, current_user: User, employee_user_id: int | None = None) -> dict[str, Any]:
-    await ensure_user_can_access_location(current_user, location, db)
-    point = await _get_location_point_by_name(location, db)
+    points, is_all_locations = await _get_payroll_scope_points(current_user, location, db)
+    if is_all_locations:
+        days: list[dict[str, Any]] = []
+        for point_item in points:
+            payload = await list_work_shift_day_summary(point_item.name, date_from, date_to, db, current_user, employee_user_id=employee_user_id)
+            days.extend(payload.get('days') or [])
+        return {
+            'location': PAYROLL_ALL_LOCATIONS_LABEL,
+            'locations': [point_item.name for point_item in points],
+            'is_all_locations': True,
+            'date_from': date_from.isoformat(),
+            'date_to': date_to.isoformat(),
+            'days': sorted(days, key=lambda item: (item['shift_date'], item.get('location') or '', item['employee_name'].lower()), reverse=False),
+        }
+
+    point = points[0]
     query = select(WorkShift).where(
         WorkShift.location_point_id == point.id,
         WorkShift.shift_date >= date_from,
@@ -3845,7 +3951,142 @@ async def _collect_period_company_expenses(point: LocationPoint, date_from: date
     return round(total, 2)
 
 
+
+def _merge_payroll_category_totals(category_totals: dict[str, dict[str, Any]], categories: list[dict[str, Any]]) -> None:
+    for category in categories or []:
+        category_id = str(category.get('category_id') or '').strip() or '__other__'
+        category_name = str(category.get('category_name') or '').strip() or DEFAULT_CATEGORY_NAME
+        key = f'{category_id}:{_normalize_category_name_key(category_name)}'
+        bucket = category_totals.setdefault(key, {
+            'category_id': category_id,
+            'category_name': category_name,
+            'rate_percent': float(category.get('rate_percent') or 0.0),
+            'sales_amount': 0.0,
+            'return_amount': 0.0,
+            'net_sales_amount': 0.0,
+            'cost_amount': 0.0,
+            'earning_amount': 0.0,
+            'is_other_category': bool(category.get('is_other_category') or category_id == '__other__' or category_name == DEFAULT_CATEGORY_NAME),
+        })
+        for amount_key in ('sales_amount', 'return_amount', 'net_sales_amount', 'cost_amount', 'earning_amount'):
+            bucket[amount_key] += float(category.get(amount_key) or 0.0)
+        # В режиме «Все точки» ставки могут отличаться между точками. Оставляем ненулевую ставку,
+        # если она одинаковая/единственная; при различиях поле всё равно служит справочным.
+        if float(category.get('rate_percent') or 0.0) > 0:
+            bucket['rate_percent'] = float(category.get('rate_percent') or 0.0)
+        bucket['is_other_category'] = bool(bucket.get('is_other_category') or category.get('is_other_category'))
+
+
+def _finalize_payroll_categories(category_totals: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        [
+            {
+                **row,
+                'rate_percent': round(float(row.get('rate_percent') or 0.0), 2),
+                'sales_amount': round(float(row.get('sales_amount') or 0.0), 2),
+                'return_amount': round(float(row.get('return_amount') or 0.0), 2),
+                'net_sales_amount': round(float(row.get('net_sales_amount') or 0.0), 2),
+                'cost_amount': round(float(row.get('cost_amount') or 0.0), 2),
+                'earning_amount': round(float(row.get('earning_amount') or 0.0), 2),
+            }
+            for row in category_totals.values()
+        ],
+        key=lambda item: item['category_name'].lower(),
+    )
+
+
+async def _aggregate_employee_payroll_summary(
+    location: str,
+    date_from: date,
+    date_to: date,
+    db: AsyncSession,
+    current_user: User,
+    *,
+    employee_user_id: int | None = None,
+) -> dict[str, Any] | None:
+    points, is_all_locations = await _get_payroll_scope_points(current_user, location, db)
+    if not is_all_locations:
+        return None
+    if current_user.role == 'employee':
+        raise HTTPException(status_code=403, detail='Все точки доступны только управляющим.')
+
+    summaries: list[dict[str, Any]] = []
+    for point in points:
+        summaries.append(
+            await get_employee_payroll_summary(
+                point.name,
+                date_from,
+                date_to,
+                db,
+                current_user,
+                employee_user_id=employee_user_id,
+            )
+        )
+
+    totals: dict[str, float] = defaultdict(float)
+    days: list[dict[str, Any]] = []
+    category_totals: dict[str, dict[str, Any]] = {}
+    employee_ids: set[int] = set()
+    employee_expenses_total = 0.0
+    employee_bonuses_total = 0.0
+
+    for summary in summaries:
+        for day in summary.get('days') or []:
+            days.append(day)
+            if day.get('employee_user_id') is not None:
+                employee_ids.add(int(day['employee_user_id']))
+        for key, value in (summary.get('totals') or {}).items():
+            totals[key] += float(value or 0.0)
+        _merge_payroll_category_totals(category_totals, summary.get('categories') or [])
+        employee_expenses_total += float(summary.get('employee_expenses_total') or 0.0)
+        employee_bonuses_total += float(summary.get('employee_bonuses_total') or 0.0)
+
+    employee_name = 'Все сотрудники по всем точкам'
+    employee_user_id_value = None
+    employee_scope = 'all'
+    employee_count = len(employee_ids)
+    if employee_user_id is not None:
+        employee = await db.get(User, employee_user_id)
+        employee_name = employee.full_name if employee else 'Сотрудник'
+        employee_user_id_value = employee_user_id
+        employee_scope = 'single'
+        employee_count = 1 if employee else 0
+
+    rounded_totals = {key: round(value, 2) for key, value in totals.items()}
+    gross_salary_total = round(float(rounded_totals.get('gross_salary_amount') or 0.0), 2)
+    employee_expenses_total = round(employee_expenses_total, 2)
+    days.sort(key=lambda item: (str(item.get('shift_date') or ''), str(item.get('location') or ''), str(item.get('employee_name') or '').lower()))
+
+    return {
+        'location': PAYROLL_ALL_LOCATIONS_LABEL,
+        'locations': [point.name for point in points],
+        'is_all_locations': True,
+        'employee_user_id': employee_user_id_value,
+        'employee_name': employee_name,
+        'employee_scope': employee_scope,
+        'employee_count': employee_count,
+        'date_from': date_from.isoformat(),
+        'date_to': date_to.isoformat(),
+        'days': days,
+        'categories': _finalize_payroll_categories(category_totals),
+        'totals': rounded_totals,
+        'employee_expenses_total': employee_expenses_total,
+        'employee_bonuses_total': round(employee_bonuses_total, 2),
+        'net_payout_amount': round(gross_salary_total - employee_expenses_total, 2),
+    }
+
 async def get_employee_payroll_summary(location: str, date_from: date, date_to: date, db: AsyncSession, current_user: User, employee_user_id: int | None = None) -> dict[str, Any]:
+    all_locations_summary = await _aggregate_employee_payroll_summary(
+        location,
+        date_from,
+        date_to,
+        db,
+        current_user,
+        employee_user_id=employee_user_id,
+    )
+    if all_locations_summary is not None:
+        return all_locations_summary
+
     await ensure_user_can_access_location(current_user, location, db)
     point = await _get_location_point_by_name(location, db)
     await _ensure_shift_snapshots_for_point(point, db)
@@ -4042,7 +4283,75 @@ async def _calculate_manager_salary_proration(
     return round(total_salary, 2), round(representative_rate, 2), details
 
 
+
+async def _aggregate_manager_payroll_summary(
+    location: str,
+    date_from: date,
+    date_to: date,
+    db: AsyncSession,
+    current_user: User,
+) -> dict[str, Any] | None:
+    points, is_all_locations = await _get_payroll_scope_points(current_user, location, db)
+    if not is_all_locations:
+        return None
+
+    summaries: list[dict[str, Any]] = []
+    for point in points:
+        summaries.append(await get_manager_payroll_summary(point.name, date_from, date_to, db, current_user))
+
+    category_totals: dict[str, dict[str, Any]] = {}
+    numeric_keys = [
+        'gross_sales_amount',
+        'revenue_amount',
+        'return_amount',
+        'net_sales_amount',
+        'cost_amount',
+        'employee_salary_total',
+        'expenses_total',
+        'operating_profit_before_manager_salary',
+        'manager_salary_amount',
+        'net_profit_after_manager_salary',
+        'profit_after_manager_salary',
+    ]
+    totals = {key: 0.0 for key in numeric_keys}
+    proration: list[dict[str, Any]] = []
+    for summary in summaries:
+        for key in numeric_keys:
+            totals[key] += float(summary.get(key) or 0.0)
+        _merge_payroll_category_totals(category_totals, summary.get('categories') or [])
+        for row in summary.get('manager_salary_proration') or []:
+            proration.append({**row, 'location': summary.get('location')})
+
+    return {
+        'location': PAYROLL_ALL_LOCATIONS_LABEL,
+        'locations': [point.name for point in points],
+        'is_all_locations': True,
+        'date_from': date_from.isoformat(),
+        'date_to': date_to.isoformat(),
+        'gross_sales_amount': round(totals['gross_sales_amount'], 2),
+        'revenue_amount': round(totals['revenue_amount'], 2),
+        'return_amount': round(totals['return_amount'], 2),
+        'net_sales_amount': round(totals['net_sales_amount'], 2),
+        'cost_amount': round(totals['cost_amount'], 2),
+        'employee_salary_total': round(totals['employee_salary_total'], 2),
+        'expenses_total': round(totals['expenses_total'], 2),
+        'operating_profit_before_manager_salary': round(totals['operating_profit_before_manager_salary'], 2),
+        'manager_rate_percent': 0.0,
+        'manager_salary_amount': round(totals['manager_salary_amount'], 2),
+        'net_profit_after_manager_salary': round(totals['net_profit_after_manager_salary'], 2),
+        'profit_after_manager_salary': round(totals['profit_after_manager_salary'], 2),
+        'responsible_admin_user_id': None,
+        'responsible_admin_name': None,
+        'manager_salary_brackets': [],
+        'manager_salary_proration': proration,
+        'categories': _finalize_payroll_categories(category_totals),
+    }
+
 async def get_manager_payroll_summary(location: str, date_from: date, date_to: date, db: AsyncSession, current_user: User) -> dict[str, Any]:
+    all_locations_summary = await _aggregate_manager_payroll_summary(location, date_from, date_to, db, current_user)
+    if all_locations_summary is not None:
+        return all_locations_summary
+
     await ensure_user_can_access_location(current_user, location, db)
     point = await _get_location_point_by_name(location, db)
     await _ensure_shift_snapshots_for_point(point, db)
@@ -4305,10 +4614,13 @@ async def rebuild_closed_shift_snapshots(
 
 async def list_payroll_audit_logs(location: str | None, db: AsyncSession, current_user: User, limit: int = 200) -> dict[str, Any]:
     query = select(PayrollAuditLog).order_by(PayrollAuditLog.created_at.desc()).limit(max(1, min(limit, 500)))
-    if location:
+    if location and not _is_all_locations_scope(location):
         await ensure_user_can_access_location(current_user, location, db)
         point = await _get_location_point_by_name(location, db)
         query = query.where(PayrollAuditLog.location_point_id == point.id)
+    elif location and _is_all_locations_scope(location):
+        points = await _get_accessible_location_points(current_user, db)
+        query = query.where(PayrollAuditLog.location_point_id.in_([point.id for point in points] or [-1]))
     elif current_user.role == 'admin':
         accessible_locations = set(await get_user_accessible_locations(current_user, db))
         point_ids = (

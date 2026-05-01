@@ -193,7 +193,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260501-payroll-bonuses-v1'
+templates.env.globals['asset_version'] = '20260501-multilocation-reports-v1'
 
 
 @app.middleware('http')
@@ -547,10 +547,21 @@ async def begin_report(req: StartReportRequest, user: User = Depends(require_use
 
 
 @app.get('/api/reports', response_model=ReportHistoryResponse)
-async def api_get_reports(location: str | None = None, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
+async def api_get_reports(
+    location: str | None = None,
+    year: int | None = None,
+    month: int | None = None,
+    user: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
     target_location = location or user.location
     if not target_location:
         raise HTTPException(status_code=400, detail='Точка не указана.')
+
+    if month is not None and not 1 <= month <= 12:
+        raise HTTPException(status_code=400, detail='Некорректный месяц.')
+    if year is not None and not 2000 <= year <= 2100:
+        raise HTTPException(status_code=400, detail='Некорректный год.')
 
     if user.role == 'employee':
         if target_location != user.location:
@@ -558,7 +569,7 @@ async def api_get_reports(location: str | None = None, user: User = Depends(requ
     else:
         await ensure_user_can_access_location(user, target_location, db)
 
-    return await get_reports_history(target_location, db)
+    return await get_reports_history(target_location, db, year=year, month=month)
 
 
 @app.get('/api/report-period', response_model=AdminReport)
