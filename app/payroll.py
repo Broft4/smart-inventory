@@ -3730,7 +3730,8 @@ async def _serialize_shift_lightweight(
             gross_salary_amount=gross_salary_amount,
         )
 
-    should_show_realized_amounts = shift.status == 'closed' or shift.shift_date < get_moscow_today()
+    today = get_moscow_today()
+    should_show_realized_amounts = shift.status == 'closed' or shift.shift_date <= today
     if should_show_realized_amounts:
         computed = await _build_computed_shift(shift, db)
         return _pack_lightweight(
