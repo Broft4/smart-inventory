@@ -6,7 +6,7 @@ import io
 import logging
 from datetime import date
 
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from urllib.parse import quote
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
@@ -100,7 +100,6 @@ from app.payroll import (
     update_monthly_expense_entry,
     upsert_work_shift,
     resume_pending_payroll_recalc_jobs,
-    run_open_shift_metrics_background_refresh_loop,
 )
 from app.schemas import (
     AdminCycleTargetsResponse,
@@ -175,21 +174,9 @@ async def lifespan(app: FastAPI):
     async with AsyncSession(bind=engine, expire_on_commit=False) as session:
         await ensure_default_admin(session)
     await resume_pending_payroll_recalc_jobs()
-    open_shift_refresh_task: asyncio.Task | None = None
-    if settings.payroll_open_shift_auto_refresh_enabled:
-        open_shift_refresh_task = asyncio.create_task(
-            run_open_shift_metrics_background_refresh_loop(
-                interval_seconds=settings.payroll_open_shift_auto_refresh_interval_seconds,
-                startup_delay_seconds=settings.payroll_open_shift_auto_refresh_startup_delay_seconds,
-            )
-        )
     try:
         yield
     finally:
-        if open_shift_refresh_task is not None:
-            open_shift_refresh_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await open_shift_refresh_task
         await ms_client.aclose()
 
 

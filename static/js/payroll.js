@@ -1,6 +1,8 @@
 const PAYROLL_ALL_LOCATIONS_VALUE = '__all__';
 const PAYROLL_ALL_LOCATIONS_LABEL = 'Все точки';
 const PAYROLL_CURRENT_SHIFT_AUTO_REFRESH_MS = 5 * 60 * 1000;
+const PAYROLL_CURRENT_SHIFT_AUTO_REFRESH_LOCK_TTL_MS = 8 * 60 * 1000;
+const PAYROLL_CURRENT_SHIFT_AUTO_REFRESH_CLIENT_ID = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
 const payrollState = {
     user: window.currentUser || {},
@@ -419,10 +421,50 @@ function selectedShiftCalendarIncludesToday() {
     return Boolean(shiftMonth) && shiftMonth === todayIso().slice(0, 7);
 }
 
+function currentShiftAutoRefreshLockKey() {
+    const location = selectedLocation();
+    const employee = selectedEmployeeId() || 'all';
+    return `payroll-current-shift-refresh-lock:${todayIso()}:${location}:${employee}`;
+}
+
+function acquireCurrentShiftAutoRefreshLock() {
+    const location = selectedLocation();
+    if (!location || isAllLocationsSelected(location)) return null;
+    const key = currentShiftAutoRefreshLockKey();
+    const now = Date.now();
+    try {
+        const current = JSON.parse(window.localStorage.getItem(key) || 'null');
+        if (current?.expiresAt && current.expiresAt > now && current.owner !== PAYROLL_CURRENT_SHIFT_AUTO_REFRESH_CLIENT_ID) {
+            return null;
+        }
+        const next = {
+            owner: PAYROLL_CURRENT_SHIFT_AUTO_REFRESH_CLIENT_ID,
+            expiresAt: now + PAYROLL_CURRENT_SHIFT_AUTO_REFRESH_LOCK_TTL_MS,
+        };
+        window.localStorage.setItem(key, JSON.stringify(next));
+        const saved = JSON.parse(window.localStorage.getItem(key) || 'null');
+        return saved?.owner === PAYROLL_CURRENT_SHIFT_AUTO_REFRESH_CLIENT_ID ? key : null;
+    } catch {
+        return key;
+    }
+}
+
+function releaseCurrentShiftAutoRefreshLock(key) {
+    if (!key) return;
+    try {
+        const current = JSON.parse(window.localStorage.getItem(key) || 'null');
+        if (current?.owner === PAYROLL_CURRENT_SHIFT_AUTO_REFRESH_CLIENT_ID) {
+            window.localStorage.removeItem(key);
+        }
+    } catch {
+        // ignore localStorage errors
+    }
+}
+
 function shouldAutoRefreshCurrentShift() {
-    // Данные текущих открытых смен теперь обновляет серверный фон каждые 5 минут.
-    // Эта проверка оставляет только лёгкое перечитывание экрана из БД для выбранной одной точки.
-    return Boolean(selectedLocation()) && !isAllLocationsSelected() && selectedPayrollPeriodIncludesToday();
+    // Автообновление по таймеру отключено.
+    // Актуальная выгрузка текущей открытой смены выполняется только при нажатии «Показать».
+    return false;
 }
 
 function monthIso() {
@@ -1634,6 +1676,9 @@ async function refreshCurrentShiftAutomatically() {
     if (payrollState.currentShiftAutoRefreshInProgress) return;
     if (!shouldAutoRefreshCurrentShift()) return;
 
+    const lockKey = acquireCurrentShiftAutoRefreshLock();
+    if (!lockKey) return;
+
     payrollState.currentShiftAutoRefreshInProgress = true;
     try {
         await loadSummary({ silent: true });
@@ -1644,71 +1689,15 @@ async function refreshCurrentShiftAutomatically() {
         console.error(error);
     } finally {
         payrollState.currentShiftAutoRefreshInProgress = false;
+        releaseCurrentShiftAutoRefreshLock(lockKey);
     }
 }
 
 function startCurrentShiftAutoRefresh() {
     if (payrollState.currentShiftAutoRefreshTimer) {
         clearInterval(payrollState.currentShiftAutoRefreshTimer);
+        payrollState.currentShiftAutoRefreshTimer = null;
     }
-    payrollState.currentShiftAutoRefreshTimer = window.setInterval(
-        refreshCurrentShiftAutomatically,
-        PAYROLL_CURRENT_SHIFT_AUTO_REFRESH_MS,
-    );
-}
-
-
-async function loadExpenseTemplatesAndEntries() {
-    if (!isAdminRole() || isAllLocationsSelected()) {
-        payrollState.templates = [];
-        payrollState.expenses = [];
-        renderTemplates();
-        renderExpenses();
-        return;
-    }
-    const location = selectedLocation();
-    const month = selectedMonthStart('expenses-month-input');
-    const templates = await api(`/api/payroll/expense-templates?location=${encodeURIComponent(location)}`);
-    payrollState.templates = templates.templates || [];
-    renderTemplates();
-    const expenses = await api(`/api/payroll/expenses?location=${encodeURIComponent(location)}&month=${month}`);
-    payrollState.expenses = expenses.entries || [];
-    renderExpenses();
-    const manualExpenseEmployee = qs('manual-expense-employee');
-    if (manualExpenseEmployee) {
-        manualExpenseEmployee.innerHTML = ['<option value="">Без привязки</option>', ...payrollState.employees.map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}</option>`)].join('');
-    }
-    syncManualExpenseDefaults();
-}
-
-
-async function loadEmployeeBonuses() {
-    if (!isAdminRole() || isAllLocationsSelected()) {
-        payrollState.employeeBonuses = [];
-        renderEmployeeBonuses();
-        return;
-    }
-    const location = selectedLocation();
-    const month = selectedMonthStart('employee-bonuses-month-input');
-    const bonuses = await api(`/api/payroll/employee-bonuses?location=${encodeURIComponent(location)}&month=${month}`);
-    payrollState.employeeBonuses = bonuses.entries || [];
-    renderEmployeeBonuses();
-    const employeeSelect = qs('employee-bonus-employee');
-    if (employeeSelect) {
-        employeeSelect.innerHTML = ['<option value="">Выберите сотрудника</option>', ...payrollState.employees.map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}</option>`)].join('');
-    }
-    syncEmployeeBonusDefaults();
-}
-
-async function loadAudit() {
-    if (!isAdminRole()) return;
-    const location = selectedLocation();
-    const query = isAllLocationsSelected(location)
-        ? '/api/payroll/audit?limit=100'
-        : `/api/payroll/audit?location=${encodeURIComponent(location)}&limit=100`;
-    const payload = await api(query);
-    payrollState.audit = payload.logs || [];
-    renderAudit();
 }
 
 function collectManagerBracketsFromUi() {

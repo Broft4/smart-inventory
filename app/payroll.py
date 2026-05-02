@@ -65,30 +65,13 @@ TOBACCO_KEYWORDS = ('сигарет', 'сигарилл', 'стик')
 
 SALES_METRICS_TTL_SECONDS = 90
 PAYROLL_DAILY_CACHE_RECENT_TTL_SECONDS = 900
-PAYROLL_OPEN_SHIFT_CACHE_TTL_SECONDS = 420
+PAYROLL_OPEN_SHIFT_CACHE_TTL_SECONDS = 300
 PAYROLL_ALL_LOCATIONS_VALUE = '__all__'
 PAYROLL_ALL_LOCATIONS_LABEL = 'Все точки'
 _sales_metrics_cache: dict[tuple[int, str, str], tuple[float, dict[date, dict[str, Any]]]] = {}
+_sales_metrics_refresh_locks: dict[tuple[int, str, str, bool], asyncio.Lock] = {}
 _category_lookup_cache: dict[str, tuple[float, dict[str, dict[str, str]]]] = {}
 _payroll_recalc_tasks: dict[int, asyncio.Task[Any]] = {}
-_sales_metrics_refresh_locks: dict[tuple[int, str, str], asyncio.Lock] = {}
-_open_shift_metrics_refresh_lock: asyncio.Lock | None = None
-
-
-def _get_sales_metrics_refresh_lock(point_id: int, date_from: date, date_to: date) -> asyncio.Lock:
-    key = (int(point_id), date_from.isoformat(), date_to.isoformat())
-    lock = _sales_metrics_refresh_locks.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _sales_metrics_refresh_locks[key] = lock
-    return lock
-
-
-def _get_open_shift_metrics_refresh_lock() -> asyncio.Lock:
-    global _open_shift_metrics_refresh_lock
-    if _open_shift_metrics_refresh_lock is None:
-        _open_shift_metrics_refresh_lock = asyncio.Lock()
-    return _open_shift_metrics_refresh_lock
 
 
 def _is_locked_database_error(exc: Exception) -> bool:
@@ -3167,7 +3150,7 @@ async def _get_open_shift_dates(point: LocationPoint, date_from: date, date_to: 
     return {row for row in rows if isinstance(row, date)}
 
 
-async def _load_point_sales_metrics(
+async def _load_point_sales_metrics_unlocked(
     point: LocationPoint,
     date_from: date,
     date_to: date,
@@ -3217,46 +3200,11 @@ async def _load_point_sales_metrics(
 
             refreshed_by_day: dict[date, dict[str, Any]] = {}
             for range_from, range_to in live_ranges:
-                refresh_lock = _get_sales_metrics_refresh_lock(point.id, range_from, range_to)
-                async with refresh_lock:
-                    ranges_to_refresh: list[tuple[date, date]] = [(range_from, range_to)]
-
-                    # Если второй запрос пришёл, пока первый уже обновлял этот же период,
-                    # повторно в МойСклад не идём: перечитываем БД и используем свежий кеш.
-                    if db is not None and not force_refresh:
-                        cached_after_wait = await _get_cached_point_sales_metrics(point, range_from, range_to, db)
-                        open_shift_days_after_wait = await _get_open_shift_dates(point, range_from, range_to, db)
-                        still_missing: list[date] = []
-                        for day in _daterange(range_from, range_to):
-                            metrics = cached_after_wait.get(day)
-                            if _is_cached_day_fresh(day, metrics, open_shift_days=open_shift_days_after_wait):
-                                result[day] = {key: value for key, value in metrics.items() if not key.startswith('_')}
-                            else:
-                                still_missing.append(day)
-
-                        if not still_missing:
-                            continue
-
-                        ranges_to_refresh = []
-                        nested_start = still_missing[0]
-                        nested_previous = still_missing[0]
-                        for day in still_missing[1:]:
-                            if day == nested_previous + timedelta(days=1):
-                                nested_previous = day
-                                continue
-                            ranges_to_refresh.append((nested_start, nested_previous))
-                            nested_start = nested_previous = day
-                        ranges_to_refresh.append((nested_start, nested_previous))
-
-                    for nested_from, nested_to in ranges_to_refresh:
-                        refreshed_by_day.update(await _load_point_sales_metrics_live(point, nested_from, nested_to))
-
+                refreshed_by_day.update(await _load_point_sales_metrics_live(point, range_from, range_to))
             for day in missing_days:
-                if day in result:
-                    continue
                 refreshed_by_day.setdefault(day, _empty_day_metrics())
                 result[day] = refreshed_by_day[day]
-            if db is not None and refreshed_by_day:
+            if db is not None:
                 await _store_point_sales_metrics_cache(point, refreshed_by_day, db)
                 await db.commit()
 
@@ -3272,6 +3220,33 @@ async def _load_point_sales_metrics(
         )
         return {day: _empty_day_metrics() for day in _daterange(date_from, date_to)}
 
+
+
+async def _load_point_sales_metrics(
+    point: LocationPoint,
+    date_from: date,
+    date_to: date,
+    db: AsyncSession | None = None,
+    *,
+    force_refresh: bool = False,
+) -> dict[date, dict[str, Any]]:
+    lock_key = (int(point.id or 0), date_from.isoformat(), date_to.isoformat(), bool(force_refresh))
+    lock = _sales_metrics_refresh_locks.setdefault(lock_key, asyncio.Lock())
+    if lock.locked():
+        logger.info(
+            'Payroll-метрики уже обновляются для точки %s за период %s..%s. Ожидаем текущую выгрузку.',
+            point.name,
+            date_from.isoformat(),
+            date_to.isoformat(),
+        )
+    async with lock:
+        return await _load_point_sales_metrics_unlocked(
+            point,
+            date_from,
+            date_to,
+            db,
+            force_refresh=force_refresh,
+        )
 
 
 async def _get_active_shift_count(point: LocationPoint, shift_date: date, db: AsyncSession) -> int:
@@ -4556,138 +4531,6 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
             key=lambda item: item['category_name'].lower(),
         ),
     }
-
-
-
-async def refresh_current_open_shift_metrics_once(db: AsyncSession, *, reason: str = 'manual') -> dict[str, Any]:
-    today = get_moscow_today()
-    open_shifts = (
-        await db.scalars(
-            select(WorkShift)
-            .where(
-                WorkShift.shift_date == today,
-                WorkShift.is_deleted.is_(False),
-                WorkShift.status != 'closed',
-            )
-            .order_by(WorkShift.location_point_id.asc(), WorkShift.id.asc())
-        )
-    ).all()
-
-    point_ids = sorted({int(shift.location_point_id) for shift in open_shifts if shift.location_point_id})
-    if not point_ids:
-        logger.info('Автообновление текущих смен: открытых смен за %s нет.', today.isoformat())
-        return {
-            'date': today.isoformat(),
-            'reason': reason,
-            'open_shifts': 0,
-            'locations': [],
-            'refreshed_locations': 0,
-            'skipped_locations': 0,
-        }
-
-    points = (
-        await db.scalars(
-            select(LocationPoint)
-            .where(LocationPoint.id.in_(point_ids))
-            .order_by(LocationPoint.name.asc())
-        )
-    ).all()
-
-    results: list[dict[str, Any]] = []
-    refreshed_locations = 0
-    skipped_locations = 0
-    logger.info(
-        'Автообновление текущих смен: дата=%s, открытых смен=%s, точек=%s, reason=%s.',
-        today.isoformat(),
-        len(open_shifts),
-        len(points),
-        reason,
-    )
-
-    for point in points:
-        if not _ms_client_enabled(token=_point_ms_token(point), location=point.name):
-            skipped_locations += 1
-            results.append({
-                'location': point.name,
-                'skipped': True,
-                'reason': 'moysklad_disabled',
-            })
-            continue
-
-        try:
-            metrics_by_day = await _load_point_sales_metrics(point, today, today, db, force_refresh=True)
-            metrics = metrics_by_day.get(today, _empty_day_metrics())
-            refreshed_locations += 1
-            results.append({
-                'location': point.name,
-                'skipped': False,
-                'gross_sales_amount': round(float(metrics.get('gross_sales_amount') or 0.0), 2),
-                'return_amount': round(float(metrics.get('return_amount') or 0.0), 2),
-                'net_sales_amount': round(float(metrics.get('net_sales_amount') or 0.0), 2),
-                'cost_amount': round(float(metrics.get('cost_amount') or 0.0), 2),
-                'categories': len(metrics.get('categories') or []),
-            })
-            logger.info(
-                'Автообновление текущей смены: точка=%s, продажи=%.2f, возвраты=%.2f, чистая=%.2f.',
-                point.name,
-                float(metrics.get('gross_sales_amount') or 0.0),
-                float(metrics.get('return_amount') or 0.0),
-                float(metrics.get('net_sales_amount') or 0.0),
-            )
-        except Exception as exc:
-            skipped_locations += 1
-            logger.exception('Автообновление текущей смены для точки %s не удалось.', point.name)
-            results.append({
-                'location': point.name,
-                'skipped': True,
-                'reason': str(exc),
-            })
-
-    return {
-        'date': today.isoformat(),
-        'reason': reason,
-        'open_shifts': len(open_shifts),
-        'locations': results,
-        'refreshed_locations': refreshed_locations,
-        'skipped_locations': skipped_locations,
-    }
-
-
-async def refresh_current_open_shift_metrics(*, reason: str = 'manual') -> dict[str, Any]:
-    lock = _get_open_shift_metrics_refresh_lock()
-    if lock.locked():
-        logger.info('Автообновление текущих смен уже выполняется, новый запуск пропущен. reason=%s', reason)
-        return {
-            'skipped': True,
-            'reason': 'already_running',
-        }
-
-    async with lock:
-        async with AsyncSessionLocal() as db:
-            return await refresh_current_open_shift_metrics_once(db, reason=reason)
-
-
-async def run_open_shift_metrics_background_refresh_loop(
-    *,
-    interval_seconds: int = 300,
-    startup_delay_seconds: int = 20,
-) -> None:
-    interval = max(int(interval_seconds or 300), 60)
-    startup_delay = max(int(startup_delay_seconds or 0), 0)
-    if startup_delay:
-        await asyncio.sleep(startup_delay)
-
-    logger.info('Фоновое автообновление текущих смен запущено. Интервал: %s сек.', interval)
-    while True:
-        try:
-            result = await refresh_current_open_shift_metrics(reason='background')
-            logger.info('Фоновое автообновление текущих смен завершено: %s', result)
-        except asyncio.CancelledError:
-            logger.info('Фоновое автообновление текущих смен остановлено.')
-            raise
-        except Exception:
-            logger.exception('Ошибка фонового автообновления текущих смен.')
-        await asyncio.sleep(interval)
 
 
 async def refresh_payroll_metrics_cache(
