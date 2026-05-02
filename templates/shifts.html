@@ -3,13 +3,21 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Смены — Умная ревизия</title>
+    <title>Смены — UCHETKA</title>
     <link rel="stylesheet" href="/static/css/style.css?v={{ asset_version }}">
+    <link rel="icon" type="image/png" href="/static/img/uchetka-mark.png?v={{ asset_version }}">
 </head>
 <body>
 <div class="container admin-container payroll-page">
     <header class="page-header admin-header-v2">
-        <div>
+        <div class="app-heading-block">
+            <div class="app-brand-line" aria-label="UCHETKA — эффективный учет и контроль">
+                <img src="/static/img/uchetka-mark.png?v={{ asset_version }}" alt="" class="app-brand-mark">
+                <div>
+                    <div class="app-brand-name">UCHETKA</div>
+                    <p class="app-brand-tagline">Эффективный учет и контроль</p>
+                </div>
+            </div>
             <h1>Смены</h1>
             <p class="muted-text">{{ user.full_name }}{% if default_location %} · базовая точка {{ default_location }}{% endif %}</p>
         </div>

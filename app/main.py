@@ -180,7 +180,7 @@ async def lifespan(app: FastAPI):
         await ms_client.aclose()
 
 
-app = FastAPI(title='Умная ревизия', lifespan=lifespan)
+app = FastAPI(title='UCHETKA', lifespan=lifespan)
 app.add_middleware(SessionMiddleware, secret_key=settings.session_secret_key)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.add_middleware(
