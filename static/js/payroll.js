@@ -1700,6 +1700,30 @@ function startCurrentShiftAutoRefresh() {
     }
 }
 
+async function loadExpenseTemplatesAndEntries() {
+    if (!isAdminRole() || isAllLocationsSelected()) {
+        payrollState.templates = [];
+        payrollState.expenses = [];
+        renderTemplates();
+        renderExpenses();
+        return;
+    }
+    const location = selectedLocation();
+    const month = selectedMonthStart('expenses-month-input');
+    const templates = await api(`/api/payroll/expense-templates?location=${encodeURIComponent(location)}`);
+    payrollState.templates = templates.templates || [];
+    renderTemplates();
+    const expenses = await api(`/api/payroll/expenses?location=${encodeURIComponent(location)}&month=${month}`);
+    payrollState.expenses = expenses.entries || [];
+    renderExpenses();
+    const manualExpenseEmployee = qs('manual-expense-employee');
+    if (manualExpenseEmployee) {
+        manualExpenseEmployee.innerHTML = ['<option value="">Без привязки</option>', ...payrollState.employees.map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}</option>`)].join('');
+    }
+    syncManualExpenseDefaults();
+}
+
+
 function collectManagerBracketsFromUi() {
     return [...document.querySelectorAll('.settings-threshold-row')]
         .map(row => ({
