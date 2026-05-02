@@ -1724,6 +1724,26 @@ async function loadExpenseTemplatesAndEntries() {
 }
 
 
+async function loadEmployeeBonuses() {
+    if (!isAdminRole() || isAllLocationsSelected()) {
+        payrollState.employeeBonuses = [];
+        renderEmployeeBonuses();
+        return;
+    }
+    const location = selectedLocation();
+    const month = selectedMonthStart('employee-bonuses-month-input');
+    const bonuses = await api(`/api/payroll/employee-bonuses?location=${encodeURIComponent(location)}&month=${month}`);
+    payrollState.employeeBonuses = bonuses.entries || [];
+    renderEmployeeBonuses();
+    const employeeSelect = qs('employee-bonus-employee');
+    if (employeeSelect) {
+        employeeSelect.innerHTML = ['<option value="">Выберите сотрудника</option>', ...payrollState.employees.map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}</option>`)].join('');
+    }
+    syncEmployeeBonusDefaults();
+}
+
+
+
 function collectManagerBracketsFromUi() {
     return [...document.querySelectorAll('.settings-threshold-row')]
         .map(row => ({
