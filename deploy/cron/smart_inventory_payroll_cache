@@ -1,0 +1,8 @@
+# /etc/cron.d/smart_inventory_payroll_cache
+# Ежедневно в 23:55 по московскому времени:
+# выгружаем payroll-метрики из МойСклад в БД и пересобираем закрытые смены.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+CRON_TZ=Europe/Moscow
+
+55 23 * * * root cd /opt/smart-inventory && source .venv/bin/activate && python -m app.refresh_payroll_metrics_cache --days 35 --force-refresh --rebuild-closed-shifts --heartbeat-seconds 15 >> /var/log/smart_inventory_payroll_refresh.log 2>&1
