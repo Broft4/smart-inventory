@@ -1,5 +1,6 @@
 const PAYROLL_ALL_LOCATIONS_VALUE = '__all__';
 const PAYROLL_ALL_LOCATIONS_LABEL = 'Все точки';
+const PAYROLL_CURRENT_SHIFT_AUTO_REFRESH_MS = 5 * 60 * 1000;
 
 const payrollState = {
     user: window.currentUser || {},
@@ -24,6 +25,10 @@ const payrollState = {
     employeeView: 'salary',
     activeRecalcJob: null,
     recalcPollTimer: null,
+    summaryLoadingPromise: null,
+    currentShiftAutoRefreshTimer: null,
+    currentShiftAutoRefreshInProgress: false,
+    lastCurrentShiftAutoRefreshAt: null,
     lastViewportWidth: window.innerWidth || 0,
     expensesCollapsed: true,
 };
@@ -395,6 +400,27 @@ function formatLocalDateIso(value) {
 
 function todayIso() {
     return formatLocalDateIso(new Date());
+}
+
+function dateRangeIncludesIso(dateFrom, dateTo, isoDate) {
+    const start = String(dateFrom || '').trim();
+    const end = String(dateTo || '').trim();
+    const target = String(isoDate || '').trim();
+    if (!start || !end || !target) return false;
+    return start <= target && target <= end;
+}
+
+function selectedPayrollPeriodIncludesToday() {
+    return dateRangeIncludesIso(qs('payroll-date-from')?.value, qs('payroll-date-to')?.value, todayIso());
+}
+
+function selectedShiftCalendarIncludesToday() {
+    const shiftMonth = String(qs('shift-month-input')?.value || '').trim();
+    return Boolean(shiftMonth) && shiftMonth === todayIso().slice(0, 7);
+}
+
+function shouldAutoRefreshCurrentShift() {
+    return Boolean(selectedLocation()) && selectedPayrollPeriodIncludesToday();
 }
 
 function monthIso() {
@@ -1532,27 +1558,53 @@ async function loadSetupForLocation() {
     }
 }
 
-async function loadSummary() {
-    const location = selectedLocation();
-    const dateFrom = qs('payroll-date-from').value;
-    const dateTo = qs('payroll-date-to').value;
-    if (!location || !dateFrom || !dateTo) return;
-    syncAllLocationsModeControls();
-    showStatus('Загружаем расчёт зарплаты...', 'loading');
-    try {
-        const employeeId = selectedEmployeeId();
-        const employeeQuery = employeeId ? `&employee_user_id=${employeeId}` : '';
-        const summary = await api(`/api/payroll/employee-summary?location=${encodeURIComponent(location)}&date_from=${dateFrom}&date_to=${dateTo}${employeeQuery}`);
-        renderSummary(summary);
-        if (isAdminRole()) {
-            const managerSummary = await api(`/api/payroll/manager-summary?location=${encodeURIComponent(location)}&date_from=${dateFrom}&date_to=${dateTo}`);
-            renderManagerSummary(managerSummary);
+async function loadSummary(options = {}) {
+    const silent = Boolean(options?.silent);
+    if (payrollState.summaryLoadingPromise) {
+        return payrollState.summaryLoadingPromise;
+    }
+
+    const run = (async () => {
+        const location = selectedLocation();
+        const dateFrom = qs('payroll-date-from').value;
+        const dateTo = qs('payroll-date-to').value;
+        if (!location || !dateFrom || !dateTo) return null;
+        syncAllLocationsModeControls();
+        if (!silent) {
+            showStatus('Загружаем расчёт зарплаты...', 'loading');
         }
-        showStatus('Данные обновлены.', 'success');
-        setTimeout(hideStatus, 1500);
-    } catch (error) {
-        console.error(error);
-        showStatus(error.message || 'Не удалось загрузить зарплату.', 'error');
+        try {
+            const employeeId = selectedEmployeeId();
+            const employeeQuery = employeeId ? `&employee_user_id=${employeeId}` : '';
+            const summary = await api(`/api/payroll/employee-summary?location=${encodeURIComponent(location)}&date_from=${dateFrom}&date_to=${dateTo}${employeeQuery}`);
+            renderSummary(summary);
+            if (isAdminRole()) {
+                const managerSummary = await api(`/api/payroll/manager-summary?location=${encodeURIComponent(location)}&date_from=${dateFrom}&date_to=${dateTo}`);
+                renderManagerSummary(managerSummary);
+            }
+            if (silent) {
+                payrollState.lastCurrentShiftAutoRefreshAt = new Date();
+            } else {
+                showStatus('Данные обновлены.', 'success');
+                setTimeout(hideStatus, 1500);
+            }
+            return summary;
+        } catch (error) {
+            console.error(error);
+            if (!silent) {
+                showStatus(error.message || 'Не удалось загрузить зарплату.', 'error');
+            }
+            return null;
+        }
+    })();
+
+    payrollState.summaryLoadingPromise = run;
+    try {
+        return await run;
+    } finally {
+        if (payrollState.summaryLoadingPromise === run) {
+            payrollState.summaryLoadingPromise = null;
+        }
     }
 }
 
@@ -1575,6 +1627,34 @@ async function loadShiftCalendar() {
     payrollState.shiftDays = rendered;
     renderShiftCalendar();
 }
+
+async function refreshCurrentShiftAutomatically() {
+    if (payrollState.currentShiftAutoRefreshInProgress) return;
+    if (!shouldAutoRefreshCurrentShift()) return;
+
+    payrollState.currentShiftAutoRefreshInProgress = true;
+    try {
+        await loadSummary({ silent: true });
+        if (isAdminRole() && selectedShiftCalendarIncludesToday()) {
+            await loadShiftCalendar();
+        }
+    } catch (error) {
+        console.error(error);
+    } finally {
+        payrollState.currentShiftAutoRefreshInProgress = false;
+    }
+}
+
+function startCurrentShiftAutoRefresh() {
+    if (payrollState.currentShiftAutoRefreshTimer) {
+        clearInterval(payrollState.currentShiftAutoRefreshTimer);
+    }
+    payrollState.currentShiftAutoRefreshTimer = window.setInterval(
+        refreshCurrentShiftAutomatically,
+        PAYROLL_CURRENT_SHIFT_AUTO_REFRESH_MS,
+    );
+}
+
 
 async function loadExpenseTemplatesAndEntries() {
     if (!isAdminRole() || isAllLocationsSelected()) {
@@ -2074,6 +2154,7 @@ async function bootstrap() {
         renderLocations();
         await loadSetupForLocation();
         await loadSummary();
+        startCurrentShiftAutoRefresh();
     } catch (error) {
         console.error(error);
         payrollState.locations = fallbackLocations();
@@ -2082,6 +2163,7 @@ async function bootstrap() {
             try {
                 await loadSetupForLocation();
                 await loadSummary();
+                startCurrentShiftAutoRefresh();
                 showStatus('Список точек из API не загрузился, показана базовая точка.', 'warning');
                 return;
             } catch (fallbackError) {
@@ -2111,6 +2193,16 @@ qs('settings-effective-from')?.addEventListener('change', async (event) => {
     }
 });
 qs('payroll-employee-select')?.addEventListener('change', loadSummary);
+qs('payroll-date-from')?.addEventListener('change', () => {
+    if (shouldAutoRefreshCurrentShift()) {
+        refreshCurrentShiftAutomatically().catch((error) => console.error(error));
+    }
+});
+qs('payroll-date-to')?.addEventListener('change', () => {
+    if (shouldAutoRefreshCurrentShift()) {
+        refreshCurrentShiftAutomatically().catch((error) => console.error(error));
+    }
+});
 qs('settings-add-manager-bracket-btn')?.addEventListener('click', () => window.addManagerBracket());
 qs('add-shift-btn')?.addEventListener('click', addShift);
 qs('shift-month-input')?.addEventListener('change', loadShiftCalendar);
@@ -2151,6 +2243,7 @@ document.querySelectorAll('[data-payroll-view]')?.forEach((button) => {
 document.querySelectorAll('.payroll-collapse').forEach((details) => {
     details.addEventListener('toggle', () => syncCollapseToggleText(details));
 });
+
 
 document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && !qs('shift-modal')?.classList.contains('hidden')) {
