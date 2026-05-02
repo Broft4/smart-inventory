@@ -29,8 +29,8 @@ body {
     margin-bottom: 10px;
 }
 .app-brand-mark {
-    width: 52px;
-    height: 42px;
+    width: 56px;
+    height: 50px;
     object-fit: contain;
     flex: 0 0 auto;
 }
@@ -59,8 +59,8 @@ body {
 }
 .auth-brand-logo {
     display: block;
-    width: min(340px, 100%);
-    max-height: 220px;
+    width: min(280px, 82%);
+    max-height: 150px;
     object-fit: contain;
     margin: 0 auto;
 }
@@ -3214,8 +3214,8 @@ body.modal-open {
 
 @media (max-width: 640px) {
     .app-brand-mark {
-        width: 44px;
-        height: 36px;
+        width: 48px;
+        height: 44px;
     }
     .app-brand-name {
         font-size: 24px;
@@ -3224,6 +3224,7 @@ body.modal-open {
         font-size: 9px;
     }
     .auth-brand-logo {
-        max-height: 190px;
+        width: min(240px, 78%);
+        max-height: 130px;
     }
 }

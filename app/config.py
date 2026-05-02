@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     ms_rate_limit_window_seconds: float = 5.0
     ms_rate_limit_remaining_threshold: int = 3
     ms_financial_cache_ttl_seconds: int = 900
+
+    payroll_open_shift_auto_refresh_enabled: bool = True
+    payroll_open_shift_auto_refresh_interval_seconds: int = 300
+    payroll_open_shift_auto_refresh_startup_delay_seconds: int = 20
+
     app_log_level: str = "INFO"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")

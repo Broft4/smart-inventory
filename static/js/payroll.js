@@ -420,7 +420,9 @@ function selectedShiftCalendarIncludesToday() {
 }
 
 function shouldAutoRefreshCurrentShift() {
-    return Boolean(selectedLocation()) && selectedPayrollPeriodIncludesToday();
+    // Данные текущих открытых смен теперь обновляет серверный фон каждые 5 минут.
+    // Эта проверка оставляет только лёгкое перечитывание экрана из БД для выбранной одной точки.
+    return Boolean(selectedLocation()) && !isAllLocationsSelected() && selectedPayrollPeriodIncludesToday();
 }
 
 function monthIso() {

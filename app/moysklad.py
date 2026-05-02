@@ -382,6 +382,18 @@ class MoySkladClient:
             except httpx.HTTPStatusError as exc:
                 last_error = exc
                 status_code = exc.response.status_code if exc.response is not None else 'unknown'
+                if isinstance(status_code, int) and status_code in {408, 425, 500, 502, 503, 504} and attempt < self.retry_attempts:
+                    delay = self._get_retry_delay(exc.response, attempt) if exc.response is not None else self._get_exception_retry_delay(attempt)
+                    logger.warning(
+                        'Временная HTTP-ошибка МойСклад %s для %s. Попытка %s/%s. Повтор через %.2f сек.',
+                        status_code,
+                        url,
+                        attempt,
+                        self.retry_attempts,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
                 if status_code == 404:
                     logger.warning(
                         'HTTP-ошибка МойСклад %s для %s на попытке %s/%s.',
@@ -1283,7 +1295,18 @@ class MoySkladClient:
 
             started = monotonic()
             logger.info('Inventory cache miss. Начинаем полную сборку. location=%s ttl_seconds=%s', normalized, self.inventory_cache_ttl)
-            inventory = await self._build_inventory(normalized, token=token, store_id=normalized_store_id)
+            try:
+                inventory = await self._build_inventory(normalized, token=token, store_id=normalized_store_id)
+            except Exception:
+                stale_cached = self._inventory_cache.get(cache_key)
+                if stale_cached and stale_cached.value:
+                    logger.warning(
+                        'Не удалось обновить inventory из МойСклад для точки %s. Возвращаем устаревший кеш.',
+                        normalized,
+                        exc_info=True,
+                    )
+                    return stale_cached.value
+                raise
             self._inventory_cache[cache_key] = CacheEntry(
                 value=inventory,
                 expires_at=monotonic() + self.inventory_cache_ttl,
