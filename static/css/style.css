@@ -35,7 +35,7 @@ body {
     flex: 0 0 auto;
 }
 .app-brand-name {
-    color: #08365f;
+    color: #000;
     font-size: 28px;
     line-height: 1;
     font-weight: 900;
@@ -43,7 +43,7 @@ body {
 }
 .app-brand-tagline {
     margin: 3px 0 0;
-    color: #0a3f66;
+    color: #000;
     font-size: 10px;
     line-height: 1.2;
     font-weight: 800;
