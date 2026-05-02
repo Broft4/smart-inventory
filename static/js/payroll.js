@@ -1,9 +1,5 @@
 const PAYROLL_ALL_LOCATIONS_VALUE = '__all__';
 const PAYROLL_ALL_LOCATIONS_LABEL = 'Все точки';
-const PAYROLL_CURRENT_SHIFT_AUTO_REFRESH_MS = 5 * 60 * 1000;
-const PAYROLL_CURRENT_SHIFT_AUTO_REFRESH_LOCK_TTL_MS = 8 * 60 * 1000;
-const PAYROLL_CURRENT_SHIFT_AUTO_REFRESH_CLIENT_ID = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-
 const payrollState = {
     user: window.currentUser || {},
     locations: [],
@@ -28,9 +24,6 @@ const payrollState = {
     activeRecalcJob: null,
     recalcPollTimer: null,
     summaryLoadingPromise: null,
-    currentShiftAutoRefreshTimer: null,
-    currentShiftAutoRefreshInProgress: false,
-    lastCurrentShiftAutoRefreshAt: null,
     lastViewportWidth: window.innerWidth || 0,
     expensesCollapsed: true,
 };
@@ -421,50 +414,8 @@ function selectedShiftCalendarIncludesToday() {
     return Boolean(shiftMonth) && shiftMonth === todayIso().slice(0, 7);
 }
 
-function currentShiftAutoRefreshLockKey() {
-    const location = selectedLocation();
-    const employee = selectedEmployeeId() || 'all';
-    return `payroll-current-shift-refresh-lock:${todayIso()}:${location}:${employee}`;
-}
-
-function acquireCurrentShiftAutoRefreshLock() {
-    const location = selectedLocation();
-    if (!location || isAllLocationsSelected(location)) return null;
-    const key = currentShiftAutoRefreshLockKey();
-    const now = Date.now();
-    try {
-        const current = JSON.parse(window.localStorage.getItem(key) || 'null');
-        if (current?.expiresAt && current.expiresAt > now && current.owner !== PAYROLL_CURRENT_SHIFT_AUTO_REFRESH_CLIENT_ID) {
-            return null;
-        }
-        const next = {
-            owner: PAYROLL_CURRENT_SHIFT_AUTO_REFRESH_CLIENT_ID,
-            expiresAt: now + PAYROLL_CURRENT_SHIFT_AUTO_REFRESH_LOCK_TTL_MS,
-        };
-        window.localStorage.setItem(key, JSON.stringify(next));
-        const saved = JSON.parse(window.localStorage.getItem(key) || 'null');
-        return saved?.owner === PAYROLL_CURRENT_SHIFT_AUTO_REFRESH_CLIENT_ID ? key : null;
-    } catch {
-        return key;
-    }
-}
-
-function releaseCurrentShiftAutoRefreshLock(key) {
-    if (!key) return;
-    try {
-        const current = JSON.parse(window.localStorage.getItem(key) || 'null');
-        if (current?.owner === PAYROLL_CURRENT_SHIFT_AUTO_REFRESH_CLIENT_ID) {
-            window.localStorage.removeItem(key);
-        }
-    } catch {
-        // ignore localStorage errors
-    }
-}
-
 function shouldAutoRefreshCurrentShift() {
-    // Автообновление по таймеру отключено.
-    // Актуальная выгрузка текущей открытой смены выполняется только при нажатии «Показать».
-    return false;
+    return Boolean(selectedLocation()) && selectedPayrollPeriodIncludesToday();
 }
 
 function monthIso() {
@@ -1626,9 +1577,7 @@ async function loadSummary(options = {}) {
                 const managerSummary = await api(`/api/payroll/manager-summary?location=${encodeURIComponent(location)}&date_from=${dateFrom}&date_to=${dateTo}`);
                 renderManagerSummary(managerSummary);
             }
-            if (silent) {
-                payrollState.lastCurrentShiftAutoRefreshAt = new Date();
-            } else {
+            if (!silent) {
                 showStatus('Данные обновлены.', 'success');
                 setTimeout(hideStatus, 1500);
             }
@@ -1671,35 +1620,6 @@ async function loadShiftCalendar() {
     payrollState.shiftDays = rendered;
     renderShiftCalendar();
 }
-
-async function refreshCurrentShiftAutomatically() {
-    if (payrollState.currentShiftAutoRefreshInProgress) return;
-    if (!shouldAutoRefreshCurrentShift()) return;
-
-    const lockKey = acquireCurrentShiftAutoRefreshLock();
-    if (!lockKey) return;
-
-    payrollState.currentShiftAutoRefreshInProgress = true;
-    try {
-        await loadSummary({ silent: true });
-        if (isAdminRole() && selectedShiftCalendarIncludesToday()) {
-            await loadShiftCalendar();
-        }
-    } catch (error) {
-        console.error(error);
-    } finally {
-        payrollState.currentShiftAutoRefreshInProgress = false;
-        releaseCurrentShiftAutoRefreshLock(lockKey);
-    }
-}
-
-function startCurrentShiftAutoRefresh() {
-    if (payrollState.currentShiftAutoRefreshTimer) {
-        clearInterval(payrollState.currentShiftAutoRefreshTimer);
-        payrollState.currentShiftAutoRefreshTimer = null;
-    }
-}
-
 async function loadExpenseTemplatesAndEntries() {
     if (!isAdminRole() || isAllLocationsSelected()) {
         payrollState.templates = [];
@@ -1742,7 +1662,16 @@ async function loadEmployeeBonuses() {
     syncEmployeeBonusDefaults();
 }
 
-
+async function loadAudit() {
+    if (!isAdminRole()) return;
+    const location = selectedLocation();
+    const query = isAllLocationsSelected(location)
+        ? '/api/payroll/audit?limit=100'
+        : `/api/payroll/audit?location=${encodeURIComponent(location)}&limit=100`;
+    const payload = await api(query);
+    payrollState.audit = payload.logs || [];
+    renderAudit();
+}
 
 function collectManagerBracketsFromUi() {
     return [...document.querySelectorAll('.settings-threshold-row')]
@@ -2189,7 +2118,6 @@ async function bootstrap() {
         renderLocations();
         await loadSetupForLocation();
         await loadSummary();
-        startCurrentShiftAutoRefresh();
     } catch (error) {
         console.error(error);
         payrollState.locations = fallbackLocations();
@@ -2198,8 +2126,7 @@ async function bootstrap() {
             try {
                 await loadSetupForLocation();
                 await loadSummary();
-                startCurrentShiftAutoRefresh();
-                showStatus('Список точек из API не загрузился, показана базовая точка.', 'warning');
+                        showStatus('Список точек из API не загрузился, показана базовая точка.', 'warning');
                 return;
             } catch (fallbackError) {
                 console.error(fallbackError);
@@ -2228,16 +2155,6 @@ qs('settings-effective-from')?.addEventListener('change', async (event) => {
     }
 });
 qs('payroll-employee-select')?.addEventListener('change', loadSummary);
-qs('payroll-date-from')?.addEventListener('change', () => {
-    if (shouldAutoRefreshCurrentShift()) {
-        refreshCurrentShiftAutomatically().catch((error) => console.error(error));
-    }
-});
-qs('payroll-date-to')?.addEventListener('change', () => {
-    if (shouldAutoRefreshCurrentShift()) {
-        refreshCurrentShiftAutomatically().catch((error) => console.error(error));
-    }
-});
 qs('settings-add-manager-bracket-btn')?.addEventListener('click', () => window.addManagerBracket());
 qs('add-shift-btn')?.addEventListener('click', addShift);
 qs('shift-month-input')?.addEventListener('change', loadShiftCalendar);
