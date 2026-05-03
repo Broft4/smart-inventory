@@ -400,7 +400,10 @@ class ShiftComputedPayroll:
     category_earnings_total: float
     employee_bonus_amount: float
     employee_bonuses: list[dict[str, Any]]
+    employee_penalty_amount: float
+    employee_penalties: list[dict[str, Any]]
     gross_salary_amount: float
+    net_salary_amount: float
     base_gross_salary_amount: float
     snapshot_id: int | None = None
     is_closed: bool = False
@@ -763,6 +766,81 @@ async def _get_shift_employee_bonus_distribution(
             'shift_count': shift_count,
         })
     return round(total, 2), bonuses
+
+
+
+def _is_employee_salary_expense(entry: MonthlyExpenseEntry) -> bool:
+    return bool(getattr(entry, 'apply_to_employee_salary', False))
+
+
+async def _get_shift_employee_penalty_distribution(
+    point: LocationPoint,
+    employee_user_id: int,
+    shift_date: date,
+    db: AsyncSession,
+) -> tuple[float, list[dict[str, Any]]]:
+    month_key = _month_start(shift_date)
+    entries = (
+        await db.scalars(
+            select(MonthlyExpenseEntry)
+            .where(
+                MonthlyExpenseEntry.location_point_id == point.id,
+                MonthlyExpenseEntry.assigned_employee_user_id == employee_user_id,
+                MonthlyExpenseEntry.month_start == month_key,
+                MonthlyExpenseEntry.is_paid.is_(True),
+                MonthlyExpenseEntry.apply_to_employee_salary.is_(True),
+            )
+            .order_by(MonthlyExpenseEntry.expense_date.asc(), MonthlyExpenseEntry.id.asc())
+        )
+    ).all()
+    if not entries:
+        return 0.0, []
+
+    templates = {
+        row.id: row
+        for row in (
+            await db.scalars(select(ExpenseTemplate).where(ExpenseTemplate.location_point_id == point.id))
+        ).all()
+    }
+    shift_count: int | None = None
+    penalties: list[dict[str, Any]] = []
+    total = 0.0
+
+    for entry in entries:
+        amount = round(float(entry.amount or 0.0), 2)
+        if amount <= 0:
+            continue
+        template = templates.get(entry.template_id) if entry.template_id is not None else None
+        expense_date = _resolve_entry_expense_date(entry, template)
+        mode = _expense_entry_mode(entry)
+        if mode == EXPENSE_MODE_SINGLE_DAY:
+            if expense_date != shift_date:
+                continue
+            share_amount = amount
+            entry_shift_count = 1
+        else:
+            if shift_count is None:
+                shift_count = await _employee_shift_count_in_month(point, employee_user_id, month_key, db)
+            if shift_count <= 0:
+                continue
+            share_amount = round(amount / shift_count, 2)
+            entry_shift_count = shift_count
+
+        total += share_amount
+        penalties.append({
+            'id': entry.id,
+            'name': _expense_entry_display_name(entry, templates),
+            'month_start': entry.month_start.isoformat(),
+            'expense_date': expense_date.isoformat(),
+            'distribution_mode': mode,
+            'employee_user_id': employee_user_id,
+            'amount': amount,
+            'share_amount': share_amount,
+            'comment': entry.comment or '',
+            'shift_count': entry_shift_count,
+        })
+
+    return round(total, 2), penalties
 
 
 
@@ -2043,6 +2121,8 @@ async def create_manual_monthly_expense(payload: ManualMonthlyExpenseCreateReque
     normalized_name = payload.name.strip()
     if not normalized_name:
         raise HTTPException(status_code=400, detail='Введите название.')
+    if payload.apply_to_employee_salary and not payload.assigned_employee_user_id:
+        raise HTTPException(status_code=400, detail='Выберите сотрудника, чтобы вычитать расход из зарплаты.')
     if payload.assigned_employee_user_id:
         employee = await db.get(User, payload.assigned_employee_user_id)
         if not employee or employee.role != 'employee' or employee.location != point.name:
@@ -2242,6 +2322,8 @@ async def update_monthly_expense_entry(entry_id: int, payload: MonthlyExpenseEnt
         'expense_date': entry.expense_date.isoformat() if entry.expense_date else None,
         'comment': entry.comment,
     }
+    if payload.apply_to_employee_salary and not payload.assigned_employee_user_id:
+        raise HTTPException(status_code=400, detail='Выберите сотрудника, чтобы вычитать расход из зарплаты.')
     if payload.assigned_employee_user_id:
         employee = await db.get(User, payload.assigned_employee_user_id)
         if not employee or employee.role != 'employee' or employee.location != point.name:
@@ -3368,8 +3450,15 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
                 shift.shift_date,
                 db,
             )
+            snapshot_employee_penalty_amount, snapshot_employee_penalties = await _get_shift_employee_penalty_distribution(
+                point,
+                shift.employee_user_id,
+                shift.shift_date,
+                db,
+            )
             snapshot_base_gross_salary = round(snapshot_exit + snapshot_bonus + snapshot_category_earnings_total, 2)
             snapshot_gross_salary = round(snapshot_base_gross_salary + snapshot_employee_bonus_amount, 2)
+            snapshot_net_salary = round(snapshot_gross_salary - snapshot_employee_penalty_amount, 2)
             return ShiftComputedPayroll(
                 shift=shift,
                 location_point=point,
@@ -3393,7 +3482,10 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
                 category_earnings_total=snapshot_category_earnings_total,
                 employee_bonus_amount=snapshot_employee_bonus_amount,
                 employee_bonuses=snapshot_employee_bonuses,
+                employee_penalty_amount=snapshot_employee_penalty_amount,
+                employee_penalties=snapshot_employee_penalties,
                 gross_salary_amount=snapshot_gross_salary,
+                net_salary_amount=snapshot_net_salary,
                 base_gross_salary_amount=snapshot_base_gross_salary,
                 snapshot_id=snapshot.id,
                 is_closed=True,
@@ -3477,8 +3569,15 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
         shift.shift_date,
         db,
     )
+    employee_penalty_amount, employee_penalties = await _get_shift_employee_penalty_distribution(
+        point,
+        shift.employee_user_id,
+        shift.shift_date,
+        db,
+    )
     base_gross_salary_amount = round(float(settings.exit_amount or 0) + bonus + category_earnings_total, 2)
     gross_salary_amount = round(base_gross_salary_amount + employee_bonus_amount, 2)
+    net_salary_amount = round(gross_salary_amount - employee_penalty_amount, 2)
 
     return ShiftComputedPayroll(
         shift=shift,
@@ -3503,7 +3602,10 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
         category_earnings_total=round(category_earnings_total, 2),
         employee_bonus_amount=employee_bonus_amount,
         employee_bonuses=employee_bonuses,
+        employee_penalty_amount=employee_penalty_amount,
+        employee_penalties=employee_penalties,
         gross_salary_amount=gross_salary_amount,
+        net_salary_amount=net_salary_amount,
         base_gross_salary_amount=base_gross_salary_amount,
         is_closed=bool(shift.status == 'closed' or snapshot),
         closed_at=_datetime_to_str(shift.closed_at) if shift.closed_at else None,
@@ -3697,8 +3799,11 @@ def _serialize_computed_shift(computed: ShiftComputedPayroll) -> dict[str, Any]:
         'category_earnings_total': computed.category_earnings_total,
         'employee_bonus_amount': computed.employee_bonus_amount,
         'employee_bonuses': computed.employee_bonuses,
+        'employee_penalty_amount': computed.employee_penalty_amount,
+        'employee_penalties': computed.employee_penalties,
         'base_gross_salary_amount': computed.base_gross_salary_amount,
         'gross_salary_amount': computed.gross_salary_amount,
+        'net_salary_amount': computed.net_salary_amount,
         'categories': computed.categories,
     }
 
@@ -3728,7 +3833,10 @@ async def _serialize_shift_lightweight(
         category_earnings_total: float,
         employee_bonus_amount: float,
         employee_bonuses: list[dict[str, Any]] | None,
+        employee_penalty_amount: float,
+        employee_penalties: list[dict[str, Any]] | None,
         gross_salary_amount: float,
+        net_salary_amount: float,
     ) -> dict[str, Any]:
         return {
             'id': shift.id,
@@ -3747,7 +3855,10 @@ async def _serialize_shift_lightweight(
             'category_earnings_total': category_earnings_total,
             'employee_bonus_amount': employee_bonus_amount,
             'employee_bonuses': employee_bonuses or [],
+            'employee_penalty_amount': employee_penalty_amount,
+            'employee_penalties': employee_penalties or [],
             'gross_salary_amount': gross_salary_amount,
+            'net_salary_amount': net_salary_amount,
         }
 
     snapshot = await db.scalar(
@@ -3777,7 +3888,10 @@ async def _serialize_shift_lightweight(
                 category_earnings_total=computed.category_earnings_total,
                 employee_bonus_amount=computed.employee_bonus_amount,
                 employee_bonuses=computed.employee_bonuses,
+                employee_penalty_amount=computed.employee_penalty_amount,
+                employee_penalties=computed.employee_penalties,
                 gross_salary_amount=computed.gross_salary_amount,
+                net_salary_amount=computed.net_salary_amount,
             )
         exit_amount = round(float(snapshot.exit_amount or 0), 2)
         bonus_amount = round(float(snapshot.bonus_amount or 0), 2)
@@ -3791,7 +3905,14 @@ async def _serialize_shift_lightweight(
             shift.shift_date,
             db,
         )
+        employee_penalty_amount, employee_penalties = await _get_shift_employee_penalty_distribution(
+            point,
+            shift.employee_user_id,
+            shift.shift_date,
+            db,
+        )
         gross_salary_amount = round(float(snapshot.gross_salary_amount or 0) + employee_bonus_amount, 2)
+        net_salary_amount = round(gross_salary_amount - employee_penalty_amount, 2)
         closed_at = _datetime_to_str(snapshot.closed_at)
         return _pack_lightweight(
             is_closed=is_closed,
@@ -3804,7 +3925,10 @@ async def _serialize_shift_lightweight(
             category_earnings_total=category_earnings_total,
             employee_bonus_amount=employee_bonus_amount,
             employee_bonuses=employee_bonuses,
+            employee_penalty_amount=employee_penalty_amount,
+            employee_penalties=employee_penalties,
             gross_salary_amount=gross_salary_amount,
+            net_salary_amount=net_salary_amount,
         )
 
     today = get_moscow_today()
@@ -3822,7 +3946,10 @@ async def _serialize_shift_lightweight(
             category_earnings_total=computed.category_earnings_total,
             employee_bonus_amount=computed.employee_bonus_amount,
             employee_bonuses=computed.employee_bonuses,
+            employee_penalty_amount=computed.employee_penalty_amount,
+            employee_penalties=computed.employee_penalties,
             gross_salary_amount=computed.gross_salary_amount,
+            net_salary_amount=computed.net_salary_amount,
         )
 
     settings = await _get_settings_for_date(point, shift.shift_date, db)
@@ -3838,7 +3965,14 @@ async def _serialize_shift_lightweight(
         shift.shift_date,
         db,
     )
+    employee_penalty_amount, employee_penalties = await _get_shift_employee_penalty_distribution(
+        point,
+        shift.employee_user_id,
+        shift.shift_date,
+        db,
+    )
     gross_salary_amount = round(exit_amount + bonus_amount + category_earnings_total + employee_bonus_amount, 2)
+    net_salary_amount = round(gross_salary_amount - employee_penalty_amount, 2)
     closed_at = _datetime_to_str(shift.closed_at)
 
     return _pack_lightweight(
@@ -3852,7 +3986,10 @@ async def _serialize_shift_lightweight(
         category_earnings_total=category_earnings_total,
         employee_bonus_amount=employee_bonus_amount,
         employee_bonuses=employee_bonuses,
+        employee_penalty_amount=employee_penalty_amount,
+        employee_penalties=employee_penalties,
         gross_salary_amount=gross_salary_amount,
+        net_salary_amount=net_salary_amount,
     )
 
 
@@ -3983,26 +4120,25 @@ async def _months_between(date_from: date, date_to: date) -> list[date]:
 
 
 async def _collect_employee_expenses(point: LocationPoint, employee_user_id: int, date_from: date, date_to: date, db: AsyncSession) -> float:
-    months = await _months_between(date_from, date_to)
-    templates = {
-        row.id: row
-        for row in (
-            await db.scalars(select(ExpenseTemplate).where(ExpenseTemplate.location_point_id == point.id))
-        ).all()
-    }
-    total = 0.0
-    for month in months:
-        entries = await _ensure_month_expense_entries(point, month, db)
-        total += sum(
-            _expense_entry_amount_for_period(
-                entry,
-                date_from=date_from,
-                date_to=date_to,
-                template=templates.get(entry.template_id) if entry.template_id is not None else None,
+    if date_to < date_from:
+        return 0.0
+    shifts = (
+        await db.scalars(
+            select(WorkShift)
+            .where(
+                WorkShift.location_point_id == point.id,
+                WorkShift.employee_user_id == employee_user_id,
+                WorkShift.shift_date >= date_from,
+                WorkShift.shift_date <= date_to,
+                WorkShift.is_deleted.is_(False),
             )
-            for entry in entries
-            if entry.assigned_employee_user_id == employee_user_id and entry.apply_to_employee_salary
+            .order_by(WorkShift.shift_date.asc(), WorkShift.id.asc())
         )
+    ).all()
+    total = 0.0
+    for shift in shifts:
+        penalty_amount, _ = await _get_shift_employee_penalty_distribution(point, employee_user_id, shift.shift_date, db)
+        total += penalty_amount
     return round(total, 2)
 
 
@@ -4025,6 +4161,7 @@ async def _collect_period_company_expenses(point: LocationPoint, date_from: date
                 template=templates.get(entry.template_id) if entry.template_id is not None else None,
             )
             for entry in entries
+            if not _is_employee_salary_expense(entry)
         )
     return round(total, 2)
 
@@ -4302,7 +4439,7 @@ async def _sum_shift_salaries(point: LocationPoint, date_from: date, date_to: da
     total = 0.0
     for shift in shifts:
         computed = await _build_computed_shift(shift, db)
-        total += computed.gross_salary_amount
+        total += computed.net_salary_amount
     return round(total, 2)
 
 
@@ -4682,8 +4819,8 @@ async def rebuild_closed_shift_snapshots(
             gross_profit_amount=computed.gross_profit_amount,
             category_earnings_total=computed.category_earnings_total,
             employee_expense_amount=0.0,
-            gross_salary_amount=computed.gross_salary_amount,
-            net_salary_amount=computed.gross_salary_amount,
+            gross_salary_amount=computed.base_gross_salary_amount,
+            net_salary_amount=computed.base_gross_salary_amount,
             is_auto_closed=is_auto_closed,
             closed_at=closed_at,
         )
@@ -4775,7 +4912,7 @@ async def export_employee_payroll_xlsx(location: str, date_from: date, date_to: 
     ws.append(['Точка', summary['location']])
     ws.append(['Период', f"{summary['date_from']} — {summary['date_to']}"])
     ws.append([])
-    ws.append(['Дата', 'Выручка', 'Возвраты', 'Выручка после возвратов', 'Выход', 'Бонус', 'Категории', 'Премия', 'Итого'])
+    ws.append(['Дата', 'Выручка', 'Возвраты', 'Выручка после возвратов', 'Выход', 'Бонус', 'Категории', 'Премия', 'Штраф', 'Итого'])
     for cell in ws[5]:
         cell.font = Font(bold=True)
     for day in summary['days']:
@@ -4788,7 +4925,8 @@ async def export_employee_payroll_xlsx(location: str, date_from: date, date_to: 
             day['bonus_amount'],
             day['category_earnings_total'],
             day.get('employee_bonus_amount', 0),
-            day['gross_salary_amount'],
+            day.get('employee_penalty_amount', 0),
+            day.get('net_salary_amount', round(float(day.get('gross_salary_amount') or 0) - float(day.get('employee_penalty_amount') or 0), 2)),
         ])
     ws.append([])
     ws.append(['Категория', 'Процент', 'Продажи', 'Возвраты', 'Чистая сумма', 'Начислено'])
@@ -4806,7 +4944,7 @@ async def export_employee_payroll_xlsx(location: str, date_from: date, date_to: 
     ws.append([])
     ws.append(['Общий итог', summary['totals']['gross_salary_amount']])
     ws.append(['Премии', summary.get('employee_bonuses_total', 0)])
-    ws.append(['Расходы на сотрудника', summary['employee_expenses_total']])
+    ws.append(['Штрафы', summary['employee_expenses_total']])
     ws.append(['К выплате', summary['net_payout_amount']])
     payload = BytesIO()
     workbook.save(payload)

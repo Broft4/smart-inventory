@@ -712,6 +712,36 @@ function renderShiftCategoryBreakdown(categories = []) {
     `;
 }
 
+function shiftNetSalaryAmount(day) {
+    const explicitNet = Number(day?.net_salary_amount);
+    if (Number.isFinite(explicitNet)) return explicitNet;
+    return Number(day?.gross_salary_amount || 0) - Number(day?.employee_penalty_amount || 0);
+}
+
+function renderShiftPenaltyComments(day) {
+    const penalties = Array.isArray(day?.employee_penalties) ? day.employee_penalties : [];
+    if (!penalties.length) return '';
+    return `
+        <div class="payroll-shift-section-head">
+            <h3>Штрафы и комментарии</h3>
+            <p class="muted-text">Эти суммы вычитаются из зарплаты сотрудника и не попадают в расходы точки.</p>
+        </div>
+        <div class="expense-entry-grid payroll-shift-bonus-list">
+            ${penalties.map((penalty) => `
+                <article class="expense-entry-card manual">
+                    <div class="expense-entry-card-head">
+                        <div>
+                            <strong>${formatMoney(penalty.share_amount || 0)} за эту смену</strong>
+                            <div class="muted-text">${escapeHtml(penalty.name || 'Штраф')} · всего: ${formatMoney(penalty.amount || 0)}${penalty.distribution_mode === 'spread' ? ` · смен в месяце: ${Number(penalty.shift_count || 0)}` : ''}</div>
+                        </div>
+                    </div>
+                    ${penalty.comment ? `<div class="muted-text">${escapeHtml(penalty.comment)}</div>` : '<div class="muted-text">Комментарий не указан.</div>'}
+                </article>
+            `).join('')}
+        </div>
+    `;
+}
+
 function renderShiftBonusComments(day) {
     const bonuses = Array.isArray(day?.employee_bonuses) ? day.employee_bonuses : [];
     if (!bonuses.length) return '';
@@ -754,7 +784,7 @@ function renderShiftDetailsInto(containerId, summary, { audience = 'admin' } = {
                     </div>
                     <div class="payroll-day-toggle-side">
                         <span class="payroll-chip ${day.is_closed ? 'green' : 'orange'}">${day.is_closed ? 'Закрыта' : 'Открыта'}</span>
-                        <span class="payroll-day-total-badge">${formatMoney(day.gross_salary_amount || 0)}</span>
+                        <span class="payroll-day-total-badge">${formatMoney(shiftNetSalaryAmount(day))}</span>
                     </div>
                 </summary>
                 <div class="payroll-day-accordion-body">
@@ -766,7 +796,8 @@ function renderShiftDetailsInto(containerId, summary, { audience = 'admin' } = {
                         <div><span class="summary-label">Бонус к выходу</span><strong>${formatMoney(day.bonus_amount || 0)}</strong></div>
                         <div><span class="summary-label">Бонус по категориям</span><strong>${formatMoney(day.category_earnings_total || 0)}</strong></div>
                         <div><span class="summary-label">Премия</span><strong>${formatMoney(day.employee_bonus_amount || 0)}</strong></div>
-                        <div><span class="summary-label">Итог за смену</span><strong>${formatMoney(day.gross_salary_amount || 0)}</strong></div>
+                        <div><span class="summary-label">Штраф</span><strong>${formatMoney(day.employee_penalty_amount || 0)}</strong></div>
+                        <div><span class="summary-label">Итог за смену</span><strong>${formatMoney(shiftNetSalaryAmount(day))}</strong></div>
                     </div>
                     <div class="payroll-shift-section-head">
                         <h3>Начисления по категориям</h3>
@@ -774,6 +805,7 @@ function renderShiftDetailsInto(containerId, summary, { audience = 'admin' } = {
                     </div>
                     ${renderShiftCategoryBreakdown(day.categories || [])}
                     ${renderShiftBonusComments(day)}
+                    ${renderShiftPenaltyComments(day)}
                 </div>
             </details>
         `;
@@ -960,7 +992,7 @@ function renderEmployeeShiftCalendar(summary) {
             if (compactMode) {
                 body = `
                     <div class="employee-shift-status employee-shift-status--compact ${statusClass}">${statusLabel}</div>
-                    ${isToday || day.is_closed ? `<div class="employee-shift-compact-total">${compactCurrency(day.gross_salary_amount || 0)} ₽</div>` : ''}
+                    ${isToday || day.is_closed ? `<div class="employee-shift-compact-total">${compactCurrency(shiftNetSalaryAmount(day))} ₽</div>` : ''}
                 `;
             } else {
                 const lines = [
@@ -969,8 +1001,11 @@ function renderEmployeeShiftCalendar(summary) {
                     `<div class="employee-shift-line"><span>Категории</span><strong>${formatMoney(categoryAmount)}</strong></div>`,
                     `<div class="employee-shift-line"><span>Премия</span><strong>${formatMoney(day.employee_bonus_amount || 0)}</strong></div>`,
                 ];
+                if (Number(day.employee_penalty_amount || 0) > 0) {
+                    lines.push(`<div class="employee-shift-line"><span>Штраф</span><strong>${formatMoney(day.employee_penalty_amount || 0)}</strong></div>`);
+                }
                 if (isToday || day.is_closed) {
-                    lines.push(`<div class="employee-shift-line total"><span>${day.is_closed ? 'Итог' : 'Промежуточно'}</span><strong>${formatMoney(day.gross_salary_amount || 0)}</strong></div>`);
+                    lines.push(`<div class="employee-shift-line total"><span>${day.is_closed ? 'Итог' : 'Промежуточно'}</span><strong>${formatMoney(shiftNetSalaryAmount(day))}</strong></div>`);
                 }
                 body = `
                     <div class="employee-shift-status ${statusClass}">${statusLabel}</div>
