@@ -70,6 +70,7 @@ PAYROLL_ALL_LOCATIONS_VALUE = '__all__'
 PAYROLL_ALL_LOCATIONS_LABEL = 'Все точки'
 _sales_metrics_cache: dict[tuple[int, str, str], tuple[float, dict[date, dict[str, Any]]]] = {}
 _sales_metrics_refresh_locks: dict[tuple[int, str, str, bool], asyncio.Lock] = {}
+_shift_close_locks: dict[int, asyncio.Lock] = {}
 _category_lookup_cache: dict[str, tuple[float, dict[str, dict[str, str]]]] = {}
 _payroll_recalc_tasks: dict[int, asyncio.Task[Any]] = {}
 
@@ -3614,6 +3615,13 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
 
 
 async def close_shift(shift_id: int, db: AsyncSession, actor_user: User | None, auto: bool = False) -> dict[str, Any]:
+    lock_key = int(shift_id or 0)
+    lock = _shift_close_locks.setdefault(lock_key, asyncio.Lock())
+    async with lock:
+        return await _close_shift_unlocked(shift_id, db, actor_user=actor_user, auto=auto)
+
+
+async def _close_shift_unlocked(shift_id: int, db: AsyncSession, actor_user: User | None, auto: bool = False) -> dict[str, Any]:
     shift = await db.get(WorkShift, shift_id)
     if not shift or shift.is_deleted:
         raise HTTPException(status_code=404, detail='Смена не найдена.')
@@ -3626,6 +3634,20 @@ async def close_shift(shift_id: int, db: AsyncSession, actor_user: User | None, 
         if actor_user.role in {'admin', 'superadmin'}:
             await ensure_user_can_access_location(actor_user, point.name, db)
     if shift.status == 'closed':
+        computed = await _build_computed_shift(shift, db)
+        return {'success': True, 'message': 'Смена уже закрыта.', 'shift': _serialize_computed_shift(computed)}
+
+    existing_snapshot = await db.scalar(
+        select(ShiftPayrollSnapshot)
+        .where(ShiftPayrollSnapshot.shift_id == shift.id)
+        .limit(1)
+    )
+    if existing_snapshot:
+        shift.status = 'closed'
+        shift.closed_at = shift.closed_at or existing_snapshot.closed_at
+        shift.closed_by_user_id = shift.closed_by_user_id if not auto else None
+        shift.updated_at = datetime.utcnow()
+        await db.commit()
         computed = await _build_computed_shift(shift, db)
         return {'success': True, 'message': 'Смена уже закрыта.', 'shift': _serialize_computed_shift(computed)}
 
@@ -4017,6 +4039,7 @@ async def list_work_shifts(location: str, date_from: date, date_to: date, db: As
         }
 
     point = points[0]
+    await _ensure_shift_snapshots_for_point(point, db)
     query = select(WorkShift).where(
         WorkShift.location_point_id == point.id,
         WorkShift.shift_date >= date_from,
@@ -4073,6 +4096,7 @@ async def list_work_shift_day_summary(location: str, date_from: date, date_to: d
         }
 
     point = points[0]
+    await _ensure_shift_snapshots_for_point(point, db)
     query = select(WorkShift).where(
         WorkShift.location_point_id == point.id,
         WorkShift.shift_date >= date_from,

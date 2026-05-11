@@ -24,6 +24,7 @@ const payrollState = {
     activeRecalcJob: null,
     recalcPollTimer: null,
     summaryLoadingPromise: null,
+    setupRequestSeq: 0,
     lastViewportWidth: window.innerWidth || 0,
     expensesCollapsed: true,
 };
@@ -1545,6 +1546,8 @@ function renderAudit() {
 async function loadSetupForLocation() {
     const location = selectedLocation();
     if (!location) return;
+    const requestSeq = ++payrollState.setupRequestSeq;
+    const isCurrentRequest = () => requestSeq === payrollState.setupRequestSeq && selectedLocation() === location;
     stopRecalcPolling();
     payrollState.activeRecalcJob = null;
     syncAllLocationsModeControls();
@@ -1564,6 +1567,7 @@ async function loadSetupForLocation() {
     setSettingsLoading(true, 'Загружаем настройки точки...');
     try {
         const setup = await api(`/api/payroll/settings?location=${encodeURIComponent(location)}${effectiveFromQuery}`);
+        if (!isCurrentRequest()) return;
         payrollState.requestedSettingsEffectiveFrom = setup.requested_effective_from || requestedEffectiveFrom || setup.settings?.effective_from || '';
         storeSettingsEffectiveFrom(location, payrollState.requestedSettingsEffectiveFrom);
         payrollState.settings = setup.settings;
@@ -1574,17 +1578,19 @@ async function loadSetupForLocation() {
         renderSettings();
 
         await Promise.all([
-            loadShiftCalendar(),
-            loadExpenseTemplatesAndEntries(),
-            loadEmployeeBonuses(),
-            loadAudit(),
+            loadShiftCalendar(location),
+            loadExpenseTemplatesAndEntries(location),
+            loadEmployeeBonuses(location),
+            loadAudit(location),
         ]);
 
-        if (setup?.recalc_job?.job_id) {
+        if (isCurrentRequest() && setup?.recalc_job?.job_id) {
             pollRecalcStatus(setup.recalc_job.job_id).catch((error) => console.error(error));
         }
     } finally {
-        setSettingsLoading(false);
+        if (isCurrentRequest()) {
+            setSettingsLoading(false);
+        }
     }
 }
 
@@ -1638,14 +1644,15 @@ async function loadSummary(options = {}) {
 
 window.payrollLoadSummary = loadSummary;
 
-async function loadShiftCalendar() {
+async function loadShiftCalendar(expectedLocation = selectedLocation()) {
     if (!isAdminRole() || !qs('shift-month-input') || !qs('shift-calendar-grid')) return;
-    const location = selectedLocation();
+    const location = expectedLocation || selectedLocation();
     const month = selectedMonthStart('shift-month-input');
     const [year, mon] = month.split('-').map(Number);
     const dateFrom = `${year}-${String(mon).padStart(2, '0')}-01`;
     const dateTo = formatLocalDateIso(new Date(year, mon, 0));
     const payload = await api(`/api/payroll/shifts?location=${encodeURIComponent(location)}&date_from=${dateFrom}&date_to=${dateTo}`);
+    if (selectedLocation() !== location || isAllLocationsSelected() || selectedMonthStart('shift-month-input') !== month) return;
     const daysByDate = new Map((payload.days || []).map(day => [day.date, day]));
     const rendered = [];
     for (let d = 1; d <= Number(dateTo.slice(8, 10)); d += 1) {
@@ -1655,7 +1662,7 @@ async function loadShiftCalendar() {
     payrollState.shiftDays = rendered;
     renderShiftCalendar();
 }
-async function loadExpenseTemplatesAndEntries() {
+async function loadExpenseTemplatesAndEntries(expectedLocation = selectedLocation()) {
     if (!isAdminRole() || isAllLocationsSelected()) {
         payrollState.templates = [];
         payrollState.expenses = [];
@@ -1663,12 +1670,14 @@ async function loadExpenseTemplatesAndEntries() {
         renderExpenses();
         return;
     }
-    const location = selectedLocation();
+    const location = expectedLocation || selectedLocation();
     const month = selectedMonthStart('expenses-month-input');
     const templates = await api(`/api/payroll/expense-templates?location=${encodeURIComponent(location)}`);
+    if (selectedLocation() !== location || isAllLocationsSelected() || selectedMonthStart('expenses-month-input') !== month) return;
     payrollState.templates = templates.templates || [];
     renderTemplates();
     const expenses = await api(`/api/payroll/expenses?location=${encodeURIComponent(location)}&month=${month}`);
+    if (selectedLocation() !== location || isAllLocationsSelected() || selectedMonthStart('expenses-month-input') !== month) return;
     payrollState.expenses = expenses.entries || [];
     renderExpenses();
     const manualExpenseEmployee = qs('manual-expense-employee');
@@ -1679,15 +1688,16 @@ async function loadExpenseTemplatesAndEntries() {
 }
 
 
-async function loadEmployeeBonuses() {
+async function loadEmployeeBonuses(expectedLocation = selectedLocation()) {
     if (!isAdminRole() || isAllLocationsSelected()) {
         payrollState.employeeBonuses = [];
         renderEmployeeBonuses();
         return;
     }
-    const location = selectedLocation();
+    const location = expectedLocation || selectedLocation();
     const month = selectedMonthStart('employee-bonuses-month-input');
     const bonuses = await api(`/api/payroll/employee-bonuses?location=${encodeURIComponent(location)}&month=${month}`);
+    if (selectedLocation() !== location || isAllLocationsSelected() || selectedMonthStart('employee-bonuses-month-input') !== month) return;
     payrollState.employeeBonuses = bonuses.entries || [];
     renderEmployeeBonuses();
     const employeeSelect = qs('employee-bonus-employee');
@@ -1697,13 +1707,14 @@ async function loadEmployeeBonuses() {
     syncEmployeeBonusDefaults();
 }
 
-async function loadAudit() {
+async function loadAudit(expectedLocation = selectedLocation()) {
     if (!isAdminRole()) return;
-    const location = selectedLocation();
+    const location = expectedLocation || selectedLocation();
     const query = isAllLocationsSelected(location)
         ? '/api/payroll/audit?limit=100'
         : `/api/payroll/audit?location=${encodeURIComponent(location)}&limit=100`;
     const payload = await api(query);
+    if (selectedLocation() !== location && !isAllLocationsSelected(location)) return;
     payrollState.audit = payload.logs || [];
     renderAudit();
 }
