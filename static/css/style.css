@@ -102,6 +102,19 @@ input, select {
 .btn.check { background: #28a745; color: white; }
 .message { margin-top: 10px; color: #dc3545; font-size: 14px; font-weight: 600; }
 .auth-message { min-height: 20px; }
+.auth-actions {
+    display: flex;
+    align-items: stretch;
+    gap: 12px;
+    margin-top: 16px;
+}
+.auth-actions .btn { min-height: 52px; }
+.auth-submit-btn { min-width: 132px; }
+.auth-secondary-action {
+    flex: 1 1 auto;
+    width: auto;
+    margin-top: 0;
+}
 .hint-box {
     margin-top: 18px;
     padding: 12px 14px;
@@ -3209,6 +3222,20 @@ body.modal-open {
         bottom: max(6px, env(safe-area-inset-bottom));
         width: 50px;
         height: 50px;
+    }
+}
+
+@media (max-width: 520px) {
+    .auth-actions {
+        flex-direction: column;
+        gap: 10px;
+    }
+    .auth-actions .btn,
+    .auth-secondary-action {
+        width: 100%;
+    }
+    .auth-submit-btn {
+        min-width: 0;
     }
 }
 

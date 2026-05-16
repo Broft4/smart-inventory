@@ -356,6 +356,11 @@ function encodeUser(user) {
     return encodeURIComponent(JSON.stringify(user));
 }
 
+function getUserEmail(user) {
+    const value = user?.email ?? user?.recovery_email ?? user?.mail ?? '';
+    return String(value || '').trim();
+}
+
 
 function isSuperadmin() {
     return Boolean(window.currentAdmin?.is_superadmin || window.currentAdmin?.role === 'superadmin');
@@ -1178,12 +1183,15 @@ function renderUsers(users) {
         const locationInfo = user.role === 'admin'
             ? (Array.isArray(user.admin_locations) && user.admin_locations.length ? `точки: ${escapeHtml(user.admin_locations.join(', '))}` : 'точки не назначены')
             : escapeHtml(user.location || 'без точки');
+        const email = getUserEmail(user);
+        const emailText = email ? escapeHtml(email) : '<span class="muted-text-warning">не указана</span>';
         return `
             <div class="user-row">
                 <div>
                     <strong>${escapeHtml(user.full_name)}</strong>
                     <div class="muted-text">${escapeHtml(user.username)} · ${escapeHtml(roleDisplayName(user.role))} · ${locationInfo}</div>
                     <div class="muted-text">Дата рождения: ${escapeHtml(user.birth_date)} · ${user.is_active ? 'активен' : 'выключен'}</div>
+                    <div class="muted-text">Почта для восстановления: ${emailText}</div>
                 </div>
                 <div class="user-row-actions">
                     <button class="btn secondary btn-inline" data-user="${encodeUser(user)}" onclick="editUserFromEncoded(this.dataset.user)">Редактировать</button>
@@ -1201,6 +1209,7 @@ window.editUserFromEncoded = function (encodedUser) {
     document.getElementById('user-full-name').value = user.full_name;
     document.getElementById('user-birth-date').value = user.birth_date;
     document.getElementById('user-username').value = user.username;
+    document.getElementById('user-email').value = getUserEmail(user);
     document.getElementById('user-password').value = '';
     document.getElementById('user-role').value = user.role;
     document.getElementById('user-location').value = user.location || '';
@@ -1217,6 +1226,7 @@ function resetUserForm() {
     document.getElementById('user-form-title').textContent = 'Создать пользователя';
     document.getElementById('user-id').value = '';
     document.getElementById('user-form').reset();
+    document.getElementById('user-email').value = '';
     document.getElementById('user-active').checked = true;
     document.getElementById('user-form-message').textContent = '';
     document.getElementById('user-form-message').style.color = '#dc3545';
@@ -1269,6 +1279,7 @@ async function submitUserForm(event) {
         full_name: document.getElementById('user-full-name').value.trim(),
         birth_date: document.getElementById('user-birth-date').value,
         username: document.getElementById('user-username').value.trim(),
+        email: document.getElementById('user-email').value.trim() || null,
         role: selectedRole,
         location: selectedRole === 'employee' ? (document.getElementById('user-location').value || null) : null,
         admin_location_ids: selectedRole === 'admin' ? getSelectedMultiSelectValues(document.getElementById('user-admin-locations')) : [],

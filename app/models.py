@@ -28,6 +28,7 @@ class User(Base):
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     birth_date: Mapped[date] = mapped_column(Date, nullable=False)
     username: Mapped[str] = mapped_column(String(100), unique=True, index=True, nullable=False)
+    email: Mapped[str | None] = mapped_column(String(255), index=True, nullable=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(20), default='employee', nullable=False)
     location: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -45,6 +46,25 @@ class User(Base):
         back_populates='granted_by_user',
         foreign_keys='AdminLocationAccess.granted_by_user_id',
     )
+    password_reset_requests: Mapped[list['PasswordResetRequest']] = relationship(back_populates='user', cascade='all, delete-orphan')
+
+
+class PasswordResetRequest(Base):
+    __tablename__ = 'password_reset_requests'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    request_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    code_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    reset_token_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    last_sent_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    user: Mapped[User] = relationship(back_populates='password_reset_requests')
 
 
 class AdminLocationAccess(Base):

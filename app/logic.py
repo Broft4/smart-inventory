@@ -7,6 +7,7 @@ import httpx
 import hmac
 import os
 import logging
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from time import monotonic
@@ -24,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.moysklad import DEFAULT_CATEGORY_NAME, DEFAULT_SUBCATEGORY_NAME, ms_client
-from app.models import AdminLocationAccess, CategoryAssignment, CheckResult, LocationPoint, ProductCostOverride, ProductFinancialCache, Report, ReportEmployeeCompletion, ReportEmployeeStart, ReportTargetSnapshot, SelectionCycle, SelectionTarget, SelectionTargetDay, User, VerifyAttemptProgress
+from app.models import AdminLocationAccess, CategoryAssignment, CheckResult, LocationPoint, PasswordResetRequest, ProductCostOverride, ProductFinancialCache, Report, ReportEmployeeCompletion, ReportEmployeeStart, ReportTargetSnapshot, SelectionCycle, SelectionTarget, SelectionTargetDay, User, VerifyAttemptProgress
 logger = logging.getLogger(__name__)
 
 
@@ -435,6 +436,32 @@ def verify_password(password: str, stored_hash: str) -> bool:
     return hmac.compare_digest(digest.hex(), digest_hex)
 
 
+_EMAIL_RE = re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
+
+
+def _normalize_email(value: str | None) -> str | None:
+    raw = str(value or '').strip().lower()
+    return raw or None
+
+
+def _validate_email(value: str | None) -> str | None:
+    email = _normalize_email(value)
+    if email and not _EMAIL_RE.match(email):
+        raise HTTPException(status_code=400, detail='Укажите корректный email.')
+    return email
+
+
+async def _ensure_email_is_unique(email: str | None, db: AsyncSession, *, exclude_user_id: int | None = None) -> None:
+    if not email:
+        return
+    query = select(User.id).where(func.lower(User.email) == email.lower())
+    if exclude_user_id is not None:
+        query = query.where(User.id != exclude_user_id)
+    duplicate_id = await db.scalar(query.limit(1))
+    if duplicate_id:
+        raise HTTPException(status_code=400, detail='Пользователь с таким email уже существует.')
+
+
 def _normalize_location(location: str) -> str:
     return location.strip().title()
 
@@ -617,6 +644,15 @@ def bootstrap_schema_and_admin(sync_conn) -> None:
         required = {'id', 'full_name', 'birth_date', 'username', 'password_hash', 'role', 'location', 'is_active', 'created_at'}
         if not required.issubset(columns):
             sync_conn.execute(text('DROP TABLE IF EXISTS users'))
+        elif 'email' not in columns:
+            sync_conn.execute(text('ALTER TABLE users ADD COLUMN email VARCHAR(255)'))
+            sync_conn.execute(text('CREATE INDEX IF NOT EXISTS ix_users_email ON users (email)'))
+
+    if 'password_reset_requests' in tables:
+        cols = {c['name'] for c in inspector.get_columns('password_reset_requests')}
+        required = {'id', 'user_id', 'request_id', 'code_hash', 'reset_token_hash', 'attempts', 'expires_at', 'created_at', 'last_sent_at', 'verified_at', 'used_at'}
+        if not required.issubset(cols):
+            sync_conn.execute(text('DROP TABLE IF EXISTS password_reset_requests'))
 
     reset_reports = False
     if 'reports' in tables:
@@ -818,6 +854,7 @@ async def _build_user_response(user: User, db: AsyncSession) -> UserResponse:
         full_name=user.full_name,
         birth_date=user.birth_date,
         username=user.username,
+        email=user.email,
         role=RoleEnum(user.role),
         location=user.location,
         is_active=user.is_active,
@@ -884,6 +921,7 @@ def user_to_schema(user: User) -> UserInfo:
         full_name=user.full_name,
         birth_date=user.birth_date,
         username=user.username,
+        email=user.email,
         role=RoleEnum(user.role),
         location=user.location,
         is_active=user.is_active,
@@ -934,9 +972,12 @@ async def list_users(db: AsyncSession, current_user: User) -> UserListResponse:
 
 
 async def create_user(payload: UserCreateRequest, db: AsyncSession, current_user: User) -> UserActionResponse:
-    existing = await db.scalar(select(User).where(User.username == payload.username).limit(1))
+    normalized_username = payload.username.strip()
+    normalized_email = _validate_email(payload.email)
+    existing = await db.scalar(select(User).where(User.username == normalized_username).limit(1))
     if existing:
         raise HTTPException(status_code=400, detail='Пользователь с таким логином уже существует.')
+    await _ensure_email_is_unique(normalized_email, db)
 
     requested_role = payload.role.value
     normalized_location = _normalize_location(payload.location) if payload.location else None
@@ -969,7 +1010,8 @@ async def create_user(payload: UserCreateRequest, db: AsyncSession, current_user
     user = User(
         full_name=payload.full_name.strip(),
         birth_date=payload.birth_date,
-        username=payload.username.strip(),
+        username=normalized_username,
+        email=normalized_email,
         password_hash=hash_password(payload.password),
         role=requested_role,
         location=normalized_location,
@@ -991,9 +1033,12 @@ async def update_user(user_id: int, payload: UserUpdateRequest, db: AsyncSession
     if not user:
         raise HTTPException(status_code=404, detail='Пользователь не найден.')
 
-    duplicate = await db.scalar(select(User).where(User.username == payload.username, User.id != user_id).limit(1))
+    normalized_username = payload.username.strip()
+    normalized_email = _validate_email(payload.email)
+    duplicate = await db.scalar(select(User).where(User.username == normalized_username, User.id != user_id).limit(1))
     if duplicate:
         raise HTTPException(status_code=400, detail='Пользователь с таким логином уже существует.')
+    await _ensure_email_is_unique(normalized_email, db, exclude_user_id=user_id)
 
     requested_role = payload.role.value
     normalized_location = _normalize_location(payload.location) if payload.location else None
@@ -1045,7 +1090,8 @@ async def update_user(user_id: int, payload: UserUpdateRequest, db: AsyncSession
     old_name = user.full_name
     user.full_name = payload.full_name.strip()
     user.birth_date = payload.birth_date
-    user.username = payload.username.strip()
+    user.username = normalized_username
+    user.email = normalized_email
     user.role = requested_role
     user.location = normalized_location
     user.is_active = payload.is_active
@@ -1099,6 +1145,7 @@ async def delete_user(user_id: int, db: AsyncSession, current_user: User) -> Del
     await db.execute(delete(CategoryAssignment).where(CategoryAssignment.user_id == user.id))
     await db.execute(update(CheckResult).where(CheckResult.checked_by_user_id == user.id).values(checked_by_user_id=None))
     await db.execute(delete(AdminLocationAccess).where(AdminLocationAccess.admin_user_id == user.id))
+    await db.execute(delete(PasswordResetRequest).where(PasswordResetRequest.user_id == user.id))
     await db.delete(user)
     await db.commit()
     return DeleteResponse(success=True, message='Пользователь удалён.')

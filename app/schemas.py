@@ -25,6 +25,7 @@ class UserInfo(BaseModel):
     full_name: str
     birth_date: date
     username: str
+    email: Optional[str] = None
     role: RoleEnum
     location: Optional[str] = None
     is_active: bool
@@ -49,6 +50,38 @@ class LogoutResponse(BaseModel):
     message: str = 'Вы вышли из системы.'
 
 
+class PasswordResetRequestRequest(BaseModel):
+    email: str = Field(..., min_length=5, max_length=255)
+
+
+class PasswordResetRequestResponse(BaseModel):
+    success: bool = True
+    message: str
+    request_id: Optional[str] = None
+
+
+class PasswordResetVerifyRequest(BaseModel):
+    request_id: str = Field(..., min_length=8, max_length=128)
+    code: str = Field(..., min_length=4, max_length=12)
+
+
+class PasswordResetVerifyResponse(BaseModel):
+    success: bool = True
+    message: str
+    reset_token: Optional[str] = None
+
+
+class PasswordResetCompleteRequest(BaseModel):
+    reset_token: str = Field(..., min_length=16, max_length=255)
+    password: str = Field(..., min_length=1, max_length=255)
+    password_confirm: str = Field(..., min_length=1, max_length=255)
+
+
+class PasswordResetCompleteResponse(BaseModel):
+    success: bool = True
+    message: str
+
+
 class MeResponse(BaseModel):
     authenticated: bool
     user: Optional[UserInfo] = None
@@ -58,6 +91,7 @@ class UserCreateRequest(BaseModel):
     full_name: str = Field(..., min_length=3, max_length=255)
     birth_date: date
     username: str = Field(..., min_length=3, max_length=100)
+    email: Optional[str] = Field(default=None, max_length=255)
     password: str
     role: RoleEnum = RoleEnum.EMPLOYEE
     location: Optional[str] = None
@@ -69,6 +103,7 @@ class UserUpdateRequest(BaseModel):
     full_name: str = Field(..., min_length=3, max_length=255)
     birth_date: date
     username: str = Field(..., min_length=3, max_length=100)
+    email: Optional[str] = Field(default=None, max_length=255)
     password: Optional[str] = None
     role: RoleEnum = RoleEnum.EMPLOYEE
     location: Optional[str] = None
@@ -81,6 +116,7 @@ class UserResponse(BaseModel):
     full_name: str
     birth_date: date
     username: str
+    email: Optional[str] = None
     role: RoleEnum
     location: Optional[str] = None
     is_active: bool

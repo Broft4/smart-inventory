@@ -30,6 +30,17 @@ class Settings(BaseSettings):
     ms_financial_cache_ttl_seconds: int = 900
     app_log_level: str = "INFO"
 
+    smtp_host: Optional[str] = None
+    smtp_port: int = 587
+    smtp_username: Optional[str] = None
+    smtp_password: Optional[str] = None
+    smtp_from_email: Optional[str] = None
+    smtp_from_name: str = "UCHETKA"
+    smtp_starttls: bool = True
+    password_reset_code_ttl_minutes: int = 10
+    password_reset_max_attempts: int = 5
+    password_reset_resend_cooldown_seconds: int = 60
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

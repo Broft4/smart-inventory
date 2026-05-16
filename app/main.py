@@ -61,6 +61,11 @@ from app.logic import (
 )
 from app.models import Report, User
 from app.moysklad import ms_client
+from app.password_reset import (
+    complete_password_reset,
+    request_password_reset,
+    verify_password_reset_code,
+)
 from app.payroll import (
     EmployeeBonusCreateRequest,
     EmployeeBonusUpdateRequest,
@@ -123,6 +128,12 @@ from app.schemas import (
     LoginResponse,
     LogoutResponse,
     MeResponse,
+    PasswordResetCompleteRequest,
+    PasswordResetCompleteResponse,
+    PasswordResetRequestRequest,
+    PasswordResetRequestResponse,
+    PasswordResetVerifyRequest,
+    PasswordResetVerifyResponse,
     ReopenEmployeeAccessRequest,
     ReopenEmployeeAccessResponse,
     ReportHistoryResponse,
@@ -199,7 +210,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260501-multilocation-reports-v1'
+templates.env.globals['asset_version'] = '20260517-password-reset-email-not-found-v1'
 
 
 @app.middleware('http')
@@ -356,6 +367,23 @@ async def api_login(payload: LoginRequest, request: Request, db: AsyncSession = 
         user=user_to_schema(user),
         redirect_to='/admin' if user.role in {'admin', 'superadmin'} else '/',
     )
+
+
+@app.post('/api/auth/password-reset/request', response_model=PasswordResetRequestResponse)
+async def api_password_reset_request(payload: PasswordResetRequestRequest, db: AsyncSession = Depends(get_db)):
+    return await request_password_reset(payload, db)
+
+
+@app.post('/api/auth/password-reset/verify', response_model=PasswordResetVerifyResponse)
+async def api_password_reset_verify(payload: PasswordResetVerifyRequest, db: AsyncSession = Depends(get_db)):
+    return await verify_password_reset_code(payload, db)
+
+
+@app.post('/api/auth/password-reset/complete', response_model=PasswordResetCompleteResponse)
+async def api_password_reset_complete(payload: PasswordResetCompleteRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    response = await complete_password_reset(payload, db)
+    request.session.clear()
+    return response
 
 
 @app.post('/api/logout', response_model=LogoutResponse)
