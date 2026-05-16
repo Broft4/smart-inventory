@@ -105,7 +105,7 @@
                     <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Бонус</span><strong id="kpi-bonus">0 ₽</strong></div>
                     <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Категории</span><strong id="kpi-category">0 ₽</strong></div>
                     <div class="summary-kpi-card plus"><span class="summary-kpi-label">Премия</span><strong id="kpi-employee-bonus">0 ₽</strong></div>
-                    <div class="summary-kpi-card warning"><span class="summary-kpi-label">Расходы на сотрудника</span><strong id="kpi-employee-expenses">0 ₽</strong></div>
+                    <div class="summary-kpi-card warning"><span class="summary-kpi-label">Штрафы</span><strong id="kpi-employee-expenses">0 ₽</strong></div>
                     <div class="summary-kpi-card plus"><span class="summary-kpi-label">К выплате</span><strong id="kpi-payout">0 ₽</strong></div>
                 </div>
 
@@ -293,7 +293,7 @@
                         <div class="expense-section-head">
                             <div>
                                 <h3>Свободный расход</h3>
-                                <p class="muted-text">Разовый расход без шаблона: уборка, штраф, курьер, ремонт и другие траты.</p>
+                                <p class="muted-text">Разовый расход без шаблона: уборка, курьер, ремонт и другие траты. Штрафы сотрудникам ведутся отдельно в блоке ниже.</p>
                             </div>
                         </div>
                         <div class="payroll-filter-grid expense-manual-grid">
@@ -324,7 +324,7 @@
             <summary class="report-summary-header payroll-collapse-summary">
                 <div>
                     <h2>Премии</h2>
-                    <p class="muted-text">Премия назначается конкретному сотруднику и делится поровну на все его смены в выбранном месяце.</p>
+                    <p class="muted-text">Премия назначается конкретному сотруднику и применяется только к выбранной дате.</p>
                 </div>
                 <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
             </summary>
@@ -358,10 +358,59 @@
                         <div class="expense-section-head expense-section-head--stacked">
                             <div>
                                 <h3>Премии за месяц</h3>
-                                <p class="muted-text">Редактируйте сумму, сотрудника и комментарий. Неактивная премия не попадает в расчёт.</p>
+                                <p class="muted-text">Редактируйте дату, сумму, сотрудника и комментарий. Неактивная премия не попадает в расчёт.</p>
                             </div>
                         </div>
                         <div id="employee-bonus-entry-tbody" class="expense-entry-grid"></div>
+                    </div>
+                </div>
+            </div>
+        </details>
+    </section>
+
+    <section class="category-card{% if user.role not in ['admin', 'superadmin'] %} hidden{% endif %}" id="employee-penalties-card">
+        <details class="payroll-collapse">
+            <summary class="report-summary-header payroll-collapse-summary">
+                <div>
+                    <h2>Штрафы</h2>
+                    <p class="muted-text">Штраф назначается конкретному сотруднику и применяется только к выбранной дате.</p>
+                </div>
+                <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
+            </summary>
+            <div class="payroll-collapse-body">
+                <div class="expense-layout">
+                    <div id="employee-penalties-status" class="inventory-status hidden"></div>
+                    <div class="expense-create-card">
+                        <div class="expense-section-head">
+                            <div>
+                                <h3>Добавить штраф</h3>
+                                <p class="muted-text">Сумма будет вычтена из зарплаты сотрудника за выбранную дату.</p>
+                            </div>
+                        </div>
+                        <div class="payroll-filter-grid expense-manual-grid">
+                            <label>Месяц<input type="month" id="employee-penalties-month-input"></label>
+                            <label>Сотрудник<select id="employee-penalty-employee"><option value="">Выберите сотрудника</option></select></label>
+                            <label>Сумма<input type="number" id="employee-penalty-amount" min="0" step="0.01"></label>
+                            <label>Дата штрафа<input type="date" id="employee-penalty-date"></label>
+                            <label class="expense-comment-field expense-comment-field--full">Комментарий<textarea id="employee-penalty-comment" rows="3" placeholder="Комментарий к штрафу"></textarea></label>
+                        </div>
+                        <div class="admin-toolbar-actions">
+                            <button id="create-employee-penalty-btn" type="button" class="btn primary btn-inline btn-with-loader">
+                                <span class="btn-loader hidden" aria-hidden="true"></span>
+                                <span class="btn-label">Добавить штраф</span>
+                            </button>
+                        </div>
+                        <div id="create-employee-penalty-status" class="inventory-status hidden save-action-status"></div>
+                    </div>
+
+                    <div class="expense-section">
+                        <div class="expense-section-head expense-section-head--stacked">
+                            <div>
+                                <h3>Штрафы за месяц</h3>
+                                <p class="muted-text">Редактируйте дату, сумму, сотрудника и комментарий. Неактивный штраф не попадает в расчёт.</p>
+                            </div>
+                        </div>
+                        <div id="employee-penalty-entry-tbody" class="expense-entry-grid"></div>
                     </div>
                 </div>
             </div>

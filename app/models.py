@@ -454,6 +454,7 @@ class EmployeeBonusEntry(Base):
     location_point_id: Mapped[int] = mapped_column(ForeignKey('location_points.id', ondelete='CASCADE'), nullable=False, index=True)
     month_start: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     bonus_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    entry_type: Mapped[str] = mapped_column(String(20), default='bonus', nullable=False, index=True)
     employee_user_id: Mapped[int] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
     amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)

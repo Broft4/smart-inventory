@@ -10,6 +10,7 @@ from typing import Any
 
 from app.database import AsyncSessionLocal
 from app.payroll import (
+    auto_close_due_shifts,
     get_moscow_today,
     rebuild_closed_shift_snapshots,
     refresh_payroll_metrics_cache,
@@ -53,6 +54,11 @@ def _build_parser() -> argparse.ArgumentParser:
         '--rebuild-closed-shifts',
         action='store_true',
         help='После обновления кеша пересобрать snapshots закрытых смен за период.',
+    )
+    parser.add_argument(
+        '--auto-close-due-shifts',
+        action='store_true',
+        help='После обновления кеша автоматически закрыть незакрытые смены в периоде, включая текущий день.',
     )
     parser.add_argument(
         '--heartbeat-seconds',
@@ -127,7 +133,8 @@ async def _run() -> None:
             f'{date_from.isoformat()} — {date_to.isoformat()}, '
             f'точка: {normalized_location or "все точки"}, '
             f'force_refresh={bool(args.force_refresh)}, '
-            f'rebuild_closed_shifts={bool(args.rebuild_closed_shifts)}.'
+            f'rebuild_closed_shifts={bool(args.rebuild_closed_shifts)}, '
+            f'auto_close_due_shifts={bool(args.auto_close_due_shifts)}.'
         )
 
         async with AsyncSessionLocal() as db:
@@ -166,6 +173,24 @@ async def _run() -> None:
                 force_refresh=bool(args.force_refresh),
                 progress_callback=cache_progress,
             )
+
+            if args.auto_close_due_shifts:
+                _log('Начинаю автоматическое закрытие незакрытых смен за период...')
+                stage['message'] = 'автоматическое закрытие смен'
+
+                async def close_progress(current: int, total: int, shift: Any) -> None:
+                    shift_date = getattr(shift, 'shift_date', None)
+                    stage['message'] = f'автозакрытие смен {current}/{total}'
+                    _log(f'Автозакрытие смены {current}/{total}: {shift_date}.')
+
+                payload['auto_close_due_shifts'] = await auto_close_due_shifts(
+                    date_from,
+                    date_to,
+                    db,
+                    location=args.location,
+                    progress_callback=close_progress,
+                )
+                _log(f'Автозакрытие завершено. Закрыто смен: {payload["auto_close_due_shifts"].get("closed", 0)}.')
 
             if args.rebuild_closed_shifts:
                 _log('Начинаю пересборку закрытых смен...')

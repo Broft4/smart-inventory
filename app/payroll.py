@@ -54,6 +54,9 @@ DEFAULT_OTHER_RATE_PERCENT = 3.0
 CATEGORY_SALES_ALLOCATION_VERSION = 2
 EXPENSE_MODE_SPREAD = 'spread'
 EXPENSE_MODE_SINGLE_DAY = 'single_day'
+EMPLOYEE_ADJUSTMENT_BONUS = 'bonus'
+EMPLOYEE_ADJUSTMENT_PENALTY = 'penalty'
+EMPLOYEE_ADJUSTMENT_TYPES = {EMPLOYEE_ADJUSTMENT_BONUS, EMPLOYEE_ADJUSTMENT_PENALTY}
 DEFAULT_MANAGER_SALARY_BRACKETS = [
     {'threshold': 200000.0, 'rate_percent': 25.0},
     {'threshold': 125000.0, 'rate_percent': 20.0},
@@ -273,10 +276,18 @@ def bootstrap_payroll_schema(connection) -> None:
         }
         if 'bonus_date' not in bonus_columns:
             connection.exec_driver_sql("ALTER TABLE employee_bonus_entries ADD COLUMN bonus_date DATE")
+        if 'entry_type' not in bonus_columns:
+            connection.exec_driver_sql(
+                f"ALTER TABLE employee_bonus_entries ADD COLUMN entry_type VARCHAR(20) NOT NULL DEFAULT '{EMPLOYEE_ADJUSTMENT_BONUS}'"
+            )
         if 'is_active' not in bonus_columns:
             connection.exec_driver_sql("ALTER TABLE employee_bonus_entries ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT 1")
         if 'updated_by_user_id' not in bonus_columns:
             connection.exec_driver_sql("ALTER TABLE employee_bonus_entries ADD COLUMN updated_by_user_id INTEGER")
+        connection.exec_driver_sql(
+            f"UPDATE employee_bonus_entries SET entry_type = '{EMPLOYEE_ADJUSTMENT_BONUS}' WHERE entry_type IS NULL OR entry_type = ''"
+        )
+        connection.exec_driver_sql("UPDATE employee_bonus_entries SET bonus_date = month_start WHERE bonus_date IS NULL")
 
 
 class PayrollSettingsUpdateRequest(BaseModel):
@@ -346,14 +357,31 @@ class EmployeeBonusCreateRequest(BaseModel):
     month_start: date
     employee_user_id: int = Field(..., ge=1)
     amount: float = Field(..., ge=0)
-    bonus_date: date | None = None
+    bonus_date: date
     comment: str | None = Field(default=None, max_length=2000)
 
 
 class EmployeeBonusUpdateRequest(BaseModel):
     employee_user_id: int = Field(..., ge=1)
     amount: float = Field(..., ge=0)
-    bonus_date: date | None = None
+    bonus_date: date
+    comment: str | None = Field(default=None, max_length=2000)
+    is_active: bool = True
+
+
+class EmployeePenaltyCreateRequest(BaseModel):
+    location: str
+    month_start: date
+    employee_user_id: int = Field(..., ge=1)
+    amount: float = Field(..., ge=0)
+    penalty_date: date
+    comment: str | None = Field(default=None, max_length=2000)
+
+
+class EmployeePenaltyUpdateRequest(BaseModel):
+    employee_user_id: int = Field(..., ge=1)
+    amount: float = Field(..., ge=0)
+    penalty_date: date
     comment: str | None = Field(default=None, max_length=2000)
     is_active: bool = True
 
@@ -420,6 +448,9 @@ def _now_msk() -> datetime:
 def get_moscow_today() -> date:
     return _now_msk().date()
 
+
+def get_payroll_operational_today() -> date:
+    return get_moscow_today()
 
 
 
@@ -684,12 +715,34 @@ def _resolve_bonus_date(entry: EmployeeBonusEntry) -> date:
     return month_key
 
 
+def _normalize_employee_adjustment_type(value: Any, *, default: str = EMPLOYEE_ADJUSTMENT_BONUS) -> str:
+    normalized = str(value or '').strip().lower()
+    return normalized if normalized in EMPLOYEE_ADJUSTMENT_TYPES else default
+
+
+def _employee_adjustment_label(entry_type: str) -> str:
+    return 'Штраф' if entry_type == EMPLOYEE_ADJUSTMENT_PENALTY else 'Премия'
+
+
+def _employee_adjustment_action_label(entry_type: str) -> str:
+    return 'штраф' if entry_type == EMPLOYEE_ADJUSTMENT_PENALTY else 'премию'
+
+
+def _employee_adjustment_plural_label(entry_type: str) -> str:
+    return 'штрафы' if entry_type == EMPLOYEE_ADJUSTMENT_PENALTY else 'премии'
+
+
 def _serialize_employee_bonus_entry(entry: EmployeeBonusEntry, employee_names: dict[int, str]) -> dict[str, Any]:
+    entry_type = _normalize_employee_adjustment_type(getattr(entry, 'entry_type', None))
+    adjustment_date = _resolve_bonus_date(entry).isoformat()
     return {
         'id': entry.id,
         'location_point_id': entry.location_point_id,
         'month_start': entry.month_start.isoformat(),
-        'bonus_date': _resolve_bonus_date(entry).isoformat(),
+        'entry_type': entry_type,
+        'adjustment_date': adjustment_date,
+        'bonus_date': adjustment_date,
+        'penalty_date': adjustment_date,
         'employee_user_id': entry.employee_user_id,
         'employee_name': employee_names.get(entry.employee_user_id, 'Сотрудник'),
         'amount': round(float(entry.amount or 0), 2),
@@ -700,10 +753,16 @@ def _serialize_employee_bonus_entry(entry: EmployeeBonusEntry, employee_names: d
     }
 
 
-async def _ensure_bonus_employee(point: LocationPoint, employee_user_id: int, db: AsyncSession) -> User:
+async def _ensure_bonus_employee(
+    point: LocationPoint,
+    employee_user_id: int,
+    db: AsyncSession,
+    *,
+    action_label: str = 'премию',
+) -> User:
     employee = await db.get(User, employee_user_id)
     if not employee or employee.role != 'employee' or employee.location != point.name or not employee.is_active:
-        raise HTTPException(status_code=400, detail='Нельзя назначить премию этому сотруднику.')
+        raise HTTPException(status_code=400, detail=f'Нельзя назначить {action_label} этому сотруднику.')
     return employee
 
 
@@ -731,10 +790,6 @@ async def _get_shift_employee_bonus_distribution(
     db: AsyncSession,
 ) -> tuple[float, list[dict[str, Any]]]:
     month_key = _month_start(shift_date)
-    shift_count = await _employee_shift_count_in_month(point, employee_user_id, month_key, db)
-    if shift_count <= 0:
-        return 0.0, []
-
     entries = (
         await db.scalars(
             select(EmployeeBonusEntry)
@@ -742,6 +797,7 @@ async def _get_shift_employee_bonus_distribution(
                 EmployeeBonusEntry.location_point_id == point.id,
                 EmployeeBonusEntry.employee_user_id == employee_user_id,
                 EmployeeBonusEntry.month_start == month_key,
+                EmployeeBonusEntry.entry_type == EMPLOYEE_ADJUSTMENT_BONUS,
                 EmployeeBonusEntry.is_active.is_(True),
             )
             .order_by(EmployeeBonusEntry.bonus_date.asc(), EmployeeBonusEntry.id.asc())
@@ -751,22 +807,25 @@ async def _get_shift_employee_bonus_distribution(
     bonuses: list[dict[str, Any]] = []
     total = 0.0
     for entry in entries:
+        entry_date = _resolve_bonus_date(entry)
+        if entry_date != shift_date:
+            continue
         amount = round(float(entry.amount or 0.0), 2)
         if amount <= 0:
             continue
-        share_amount = round(amount / shift_count, 2)
-        total += share_amount
+        total += amount
         bonuses.append({
             'id': entry.id,
             'month_start': entry.month_start.isoformat(),
-            'bonus_date': _resolve_bonus_date(entry).isoformat(),
+            'bonus_date': entry_date.isoformat(),
             'employee_user_id': entry.employee_user_id,
             'amount': amount,
-            'share_amount': share_amount,
+            'share_amount': amount,
             'comment': entry.comment or '',
-            'shift_count': shift_count,
+            'shift_count': 1,
         })
     return round(total, 2), bonuses
+
 
 
 
@@ -781,7 +840,48 @@ async def _get_shift_employee_penalty_distribution(
     db: AsyncSession,
 ) -> tuple[float, list[dict[str, Any]]]:
     month_key = _month_start(shift_date)
-    entries = (
+    penalties: list[dict[str, Any]] = []
+    total = 0.0
+
+    penalty_entries = (
+        await db.scalars(
+            select(EmployeeBonusEntry)
+            .where(
+                EmployeeBonusEntry.location_point_id == point.id,
+                EmployeeBonusEntry.employee_user_id == employee_user_id,
+                EmployeeBonusEntry.month_start == month_key,
+                EmployeeBonusEntry.entry_type == EMPLOYEE_ADJUSTMENT_PENALTY,
+                EmployeeBonusEntry.is_active.is_(True),
+            )
+            .order_by(EmployeeBonusEntry.bonus_date.asc(), EmployeeBonusEntry.id.asc())
+        )
+    ).all()
+    for entry in penalty_entries:
+        entry_date = _resolve_bonus_date(entry)
+        if entry_date != shift_date:
+            continue
+        amount = round(float(entry.amount or 0.0), 2)
+        if amount <= 0:
+            continue
+        total += amount
+        penalties.append({
+            'id': entry.id,
+            'name': 'Штраф',
+            'month_start': entry.month_start.isoformat(),
+            'expense_date': entry_date.isoformat(),
+            'penalty_date': entry_date.isoformat(),
+            'distribution_mode': EXPENSE_MODE_SINGLE_DAY,
+            'employee_user_id': employee_user_id,
+            'amount': amount,
+            'share_amount': amount,
+            'comment': entry.comment or '',
+            'shift_count': 1,
+            'source': 'employee_penalty',
+        })
+
+    # Legacy: старые расходы, отмеченные как вычет из зарплаты, продолжают учитываться,
+    # но больше не растягиваются на месяц — как штраф, они применяются только к выбранной дате расхода.
+    legacy_entries = (
         await db.scalars(
             select(MonthlyExpenseEntry)
             .where(
@@ -794,52 +894,36 @@ async def _get_shift_employee_penalty_distribution(
             .order_by(MonthlyExpenseEntry.expense_date.asc(), MonthlyExpenseEntry.id.asc())
         )
     ).all()
-    if not entries:
-        return 0.0, []
-
-    templates = {
-        row.id: row
-        for row in (
-            await db.scalars(select(ExpenseTemplate).where(ExpenseTemplate.location_point_id == point.id))
-        ).all()
-    }
-    shift_count: int | None = None
-    penalties: list[dict[str, Any]] = []
-    total = 0.0
-
-    for entry in entries:
-        amount = round(float(entry.amount or 0.0), 2)
-        if amount <= 0:
-            continue
-        template = templates.get(entry.template_id) if entry.template_id is not None else None
-        expense_date = _resolve_entry_expense_date(entry, template)
-        mode = _expense_entry_mode(entry)
-        if mode == EXPENSE_MODE_SINGLE_DAY:
+    if legacy_entries:
+        templates = {
+            row.id: row
+            for row in (
+                await db.scalars(select(ExpenseTemplate).where(ExpenseTemplate.location_point_id == point.id))
+            ).all()
+        }
+        for entry in legacy_entries:
+            amount = round(float(entry.amount or 0.0), 2)
+            if amount <= 0:
+                continue
+            template = templates.get(entry.template_id) if entry.template_id is not None else None
+            expense_date = _resolve_entry_expense_date(entry, template)
             if expense_date != shift_date:
                 continue
-            share_amount = amount
-            entry_shift_count = 1
-        else:
-            if shift_count is None:
-                shift_count = await _employee_shift_count_in_month(point, employee_user_id, month_key, db)
-            if shift_count <= 0:
-                continue
-            share_amount = round(amount / shift_count, 2)
-            entry_shift_count = shift_count
-
-        total += share_amount
-        penalties.append({
-            'id': entry.id,
-            'name': _expense_entry_display_name(entry, templates),
-            'month_start': entry.month_start.isoformat(),
-            'expense_date': expense_date.isoformat(),
-            'distribution_mode': mode,
-            'employee_user_id': employee_user_id,
-            'amount': amount,
-            'share_amount': share_amount,
-            'comment': entry.comment or '',
-            'shift_count': entry_shift_count,
-        })
+            total += amount
+            penalties.append({
+                'id': entry.id,
+                'name': _expense_entry_display_name(entry, templates),
+                'month_start': entry.month_start.isoformat(),
+                'expense_date': expense_date.isoformat(),
+                'penalty_date': expense_date.isoformat(),
+                'distribution_mode': EXPENSE_MODE_SINGLE_DAY,
+                'employee_user_id': employee_user_id,
+                'amount': amount,
+                'share_amount': amount,
+                'comment': entry.comment or '',
+                'shift_count': 1,
+                'source': 'legacy_employee_expense',
+            })
 
     return round(total, 2), penalties
 
@@ -2366,12 +2450,20 @@ async def update_monthly_expense_entry(entry_id: int, payload: MonthlyExpenseEnt
 
 
 
-async def list_employee_bonuses(location: str, month: date, db: AsyncSession, current_user: User) -> dict[str, Any]:
+async def _list_employee_adjustments(
+    location: str,
+    month: date,
+    db: AsyncSession,
+    current_user: User,
+    *,
+    entry_type: str,
+) -> dict[str, Any]:
     if current_user.role not in {'admin', 'superadmin'}:
-        raise HTTPException(status_code=403, detail='Просматривать премии может только управляющий.')
+        raise HTTPException(status_code=403, detail='Просматривать начисления и штрафы может только управляющий.')
     await ensure_user_can_access_location(current_user, location, db)
     point = await _get_location_point_by_name(location, db)
     month_key = _month_start(month)
+    normalized_type = _normalize_employee_adjustment_type(entry_type)
     employees = {user.id: user.full_name for user in await _list_location_employees(point, db)}
     rows = (
         await db.scalars(
@@ -2379,6 +2471,7 @@ async def list_employee_bonuses(location: str, month: date, db: AsyncSession, cu
             .where(
                 EmployeeBonusEntry.location_point_id == point.id,
                 EmployeeBonusEntry.month_start == month_key,
+                EmployeeBonusEntry.entry_type == normalized_type,
             )
             .order_by(EmployeeBonusEntry.updated_at.desc(), EmployeeBonusEntry.id.desc())
         )
@@ -2386,6 +2479,7 @@ async def list_employee_bonuses(location: str, month: date, db: AsyncSession, cu
     return {
         'location': point.name,
         'month_start': month_key.isoformat(),
+        'entry_type': normalized_type,
         'entries': [
             _serialize_employee_bonus_entry(entry, employees)
             for entry in rows
@@ -2393,20 +2487,54 @@ async def list_employee_bonuses(location: str, month: date, db: AsyncSession, cu
     }
 
 
-async def create_employee_bonus(payload: EmployeeBonusCreateRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
+async def list_employee_bonuses(location: str, month: date, db: AsyncSession, current_user: User) -> dict[str, Any]:
+    return await _list_employee_adjustments(
+        location,
+        month,
+        db,
+        current_user,
+        entry_type=EMPLOYEE_ADJUSTMENT_BONUS,
+    )
+
+
+async def list_employee_penalties(location: str, month: date, db: AsyncSession, current_user: User) -> dict[str, Any]:
+    return await _list_employee_adjustments(
+        location,
+        month,
+        db,
+        current_user,
+        entry_type=EMPLOYEE_ADJUSTMENT_PENALTY,
+    )
+
+
+async def _create_employee_adjustment(
+    *,
+    location: str,
+    month_start: date,
+    employee_user_id: int,
+    amount: float,
+    adjustment_date: date | None,
+    comment: str | None,
+    entry_type: str,
+    db: AsyncSession,
+    current_user: User,
+) -> dict[str, Any]:
+    normalized_type = _normalize_employee_adjustment_type(entry_type)
+    label = _employee_adjustment_label(normalized_type)
     if current_user.role not in {'admin', 'superadmin'}:
-        raise HTTPException(status_code=403, detail='Создавать премии может только управляющий.')
-    await ensure_user_can_access_location(current_user, payload.location, db)
-    point = await _get_location_point_by_name(payload.location, db)
-    employee = await _ensure_bonus_employee(point, payload.employee_user_id, db)
-    month_key = _month_start(payload.month_start)
+        raise HTTPException(status_code=403, detail=f'Создавать {_employee_adjustment_plural_label(normalized_type)} может только управляющий.')
+    await ensure_user_can_access_location(current_user, location, db)
+    point = await _get_location_point_by_name(location, db)
+    employee = await _ensure_bonus_employee(point, employee_user_id, db, action_label=_employee_adjustment_action_label(normalized_type))
+    month_key = _month_start(month_start)
     entry = EmployeeBonusEntry(
         location_point_id=point.id,
         month_start=month_key,
-        bonus_date=_clip_expense_date_to_month(payload.bonus_date or month_key, month_key),
+        bonus_date=_clip_expense_date_to_month(adjustment_date, month_key),
+        entry_type=normalized_type,
         employee_user_id=employee.id,
-        amount=payload.amount,
-        comment=(payload.comment or '').strip() or None,
+        amount=amount,
+        comment=(comment or '').strip() or None,
         is_active=True,
         created_by_user_id=current_user.id,
         updated_by_user_id=current_user.id,
@@ -2418,12 +2546,13 @@ async def create_employee_bonus(payload: EmployeeBonusCreateRequest, db: AsyncSe
         db,
         actor_user_id=current_user.id,
         location_point_id=point.id,
-        entity_type='employee_bonus',
+        entity_type='employee_bonus' if normalized_type == EMPLOYEE_ADJUSTMENT_BONUS else 'employee_penalty',
         entity_id=str(entry.id),
         action_type='create',
         details={
             'month_start': month_key.isoformat(),
-            'bonus_date': entry.bonus_date.isoformat() if entry.bonus_date else None,
+            'adjustment_date': entry.bonus_date.isoformat() if entry.bonus_date else None,
+            'entry_type': normalized_type,
             'employee_user_id': employee.id,
             'employee_name': employee.full_name,
             'amount': entry.amount,
@@ -2431,68 +2560,147 @@ async def create_employee_bonus(payload: EmployeeBonusCreateRequest, db: AsyncSe
         },
     )
     await db.commit()
+    if normalized_type == EMPLOYEE_ADJUSTMENT_PENALTY:
+        return await list_employee_penalties(point.name, month_key, db, current_user)
     return await list_employee_bonuses(point.name, month_key, db, current_user)
 
 
-async def update_employee_bonus(entry_id: int, payload: EmployeeBonusUpdateRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
+async def create_employee_bonus(payload: EmployeeBonusCreateRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
+    return await _create_employee_adjustment(
+        location=payload.location,
+        month_start=payload.month_start,
+        employee_user_id=payload.employee_user_id,
+        amount=payload.amount,
+        adjustment_date=payload.bonus_date,
+        comment=payload.comment,
+        entry_type=EMPLOYEE_ADJUSTMENT_BONUS,
+        db=db,
+        current_user=current_user,
+    )
+
+
+async def create_employee_penalty(payload: EmployeePenaltyCreateRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
+    return await _create_employee_adjustment(
+        location=payload.location,
+        month_start=payload.month_start,
+        employee_user_id=payload.employee_user_id,
+        amount=payload.amount,
+        adjustment_date=payload.penalty_date,
+        comment=payload.comment,
+        entry_type=EMPLOYEE_ADJUSTMENT_PENALTY,
+        db=db,
+        current_user=current_user,
+    )
+
+
+async def _update_employee_adjustment(
+    entry_id: int,
+    *,
+    employee_user_id: int,
+    amount: float,
+    adjustment_date: date | None,
+    comment: str | None,
+    is_active: bool,
+    entry_type: str,
+    db: AsyncSession,
+    current_user: User,
+) -> dict[str, Any]:
+    normalized_type = _normalize_employee_adjustment_type(entry_type)
+    label = _employee_adjustment_label(normalized_type)
     if current_user.role not in {'admin', 'superadmin'}:
-        raise HTTPException(status_code=403, detail='Редактировать премии может только управляющий.')
+        raise HTTPException(status_code=403, detail=f'Редактировать {_employee_adjustment_plural_label(normalized_type)} может только управляющий.')
     entry = await db.get(EmployeeBonusEntry, entry_id)
-    if not entry:
-        raise HTTPException(status_code=404, detail='Премия не найдена.')
+    if not entry or _normalize_employee_adjustment_type(getattr(entry, 'entry_type', None)) != normalized_type:
+        raise HTTPException(status_code=404, detail=f'{label} не найдена.' if normalized_type == EMPLOYEE_ADJUSTMENT_BONUS else f'{label} не найден.')
     point = await db.get(LocationPoint, entry.location_point_id)
     if not point:
-        raise HTTPException(status_code=404, detail='Точка премии не найдена.')
+        raise HTTPException(status_code=404, detail='Точка не найдена.')
     await ensure_user_can_access_location(current_user, point.name, db)
-    employee = await _ensure_bonus_employee(point, payload.employee_user_id, db)
+    employee = await _ensure_bonus_employee(point, employee_user_id, db, action_label=_employee_adjustment_action_label(normalized_type))
     before = {
         'employee_user_id': entry.employee_user_id,
         'amount': entry.amount,
-        'bonus_date': entry.bonus_date.isoformat() if entry.bonus_date else None,
+        'adjustment_date': entry.bonus_date.isoformat() if entry.bonus_date else None,
+        'entry_type': _normalize_employee_adjustment_type(getattr(entry, 'entry_type', None)),
         'comment': entry.comment,
         'is_active': entry.is_active,
     }
     entry.employee_user_id = employee.id
-    entry.amount = payload.amount
-    entry.bonus_date = _clip_expense_date_to_month(payload.bonus_date or _resolve_bonus_date(entry), entry.month_start)
-    entry.comment = (payload.comment or '').strip() or None
-    entry.is_active = bool(payload.is_active)
+    entry.amount = amount
+    entry.bonus_date = _clip_expense_date_to_month(adjustment_date, entry.month_start)
+    entry.entry_type = normalized_type
+    entry.comment = (comment or '').strip() or None
+    entry.is_active = bool(is_active)
     entry.updated_by_user_id = current_user.id
     entry.updated_at = datetime.utcnow()
     await _log_payroll_action(
         db,
         actor_user_id=current_user.id,
         location_point_id=point.id,
-        entity_type='employee_bonus',
+        entity_type='employee_bonus' if normalized_type == EMPLOYEE_ADJUSTMENT_BONUS else 'employee_penalty',
         entity_id=str(entry.id),
         action_type='update',
         details={'before': before, 'after': {
             'employee_user_id': entry.employee_user_id,
             'employee_name': employee.full_name,
             'amount': entry.amount,
-            'bonus_date': entry.bonus_date.isoformat() if entry.bonus_date else None,
+            'adjustment_date': entry.bonus_date.isoformat() if entry.bonus_date else None,
+            'entry_type': entry.entry_type,
             'comment': entry.comment,
             'is_active': entry.is_active,
         }},
     )
     await db.commit()
+    if normalized_type == EMPLOYEE_ADJUSTMENT_PENALTY:
+        return await list_employee_penalties(point.name, entry.month_start, db, current_user)
     return await list_employee_bonuses(point.name, entry.month_start, db, current_user)
 
 
-async def delete_employee_bonus(entry_id: int, db: AsyncSession, current_user: User) -> dict[str, Any]:
+async def update_employee_bonus(entry_id: int, payload: EmployeeBonusUpdateRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
+    return await _update_employee_adjustment(
+        entry_id,
+        employee_user_id=payload.employee_user_id,
+        amount=payload.amount,
+        adjustment_date=payload.bonus_date,
+        comment=payload.comment,
+        is_active=payload.is_active,
+        entry_type=EMPLOYEE_ADJUSTMENT_BONUS,
+        db=db,
+        current_user=current_user,
+    )
+
+
+async def update_employee_penalty(entry_id: int, payload: EmployeePenaltyUpdateRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
+    return await _update_employee_adjustment(
+        entry_id,
+        employee_user_id=payload.employee_user_id,
+        amount=payload.amount,
+        adjustment_date=payload.penalty_date,
+        comment=payload.comment,
+        is_active=payload.is_active,
+        entry_type=EMPLOYEE_ADJUSTMENT_PENALTY,
+        db=db,
+        current_user=current_user,
+    )
+
+
+async def _delete_employee_adjustment(entry_id: int, db: AsyncSession, current_user: User, *, entry_type: str) -> dict[str, Any]:
+    normalized_type = _normalize_employee_adjustment_type(entry_type)
+    label = _employee_adjustment_label(normalized_type)
     if current_user.role not in {'admin', 'superadmin'}:
-        raise HTTPException(status_code=403, detail='Удалять премии может только управляющий.')
+        raise HTTPException(status_code=403, detail=f'Удалять {_employee_adjustment_plural_label(normalized_type)} может только управляющий.')
     entry = await db.get(EmployeeBonusEntry, entry_id)
-    if not entry:
-        raise HTTPException(status_code=404, detail='Премия не найдена.')
+    if not entry or _normalize_employee_adjustment_type(getattr(entry, 'entry_type', None)) != normalized_type:
+        raise HTTPException(status_code=404, detail=f'{label} не найдена.' if normalized_type == EMPLOYEE_ADJUSTMENT_BONUS else f'{label} не найден.')
     point = await db.get(LocationPoint, entry.location_point_id)
     if not point:
-        raise HTTPException(status_code=404, detail='Точка премии не найдена.')
+        raise HTTPException(status_code=404, detail='Точка не найдена.')
     await ensure_user_can_access_location(current_user, point.name, db)
     month_key = entry.month_start
     details = {
         'month_start': month_key.isoformat(),
-        'bonus_date': entry.bonus_date.isoformat() if entry.bonus_date else None,
+        'adjustment_date': entry.bonus_date.isoformat() if entry.bonus_date else None,
+        'entry_type': _normalize_employee_adjustment_type(getattr(entry, 'entry_type', None)),
         'employee_user_id': entry.employee_user_id,
         'amount': float(entry.amount or 0),
         'comment': entry.comment,
@@ -2502,13 +2710,23 @@ async def delete_employee_bonus(entry_id: int, db: AsyncSession, current_user: U
         db,
         actor_user_id=current_user.id,
         location_point_id=point.id,
-        entity_type='employee_bonus',
+        entity_type='employee_bonus' if normalized_type == EMPLOYEE_ADJUSTMENT_BONUS else 'employee_penalty',
         entity_id=str(entry_id),
         action_type='delete',
         details=details,
     )
     await db.commit()
+    if normalized_type == EMPLOYEE_ADJUSTMENT_PENALTY:
+        return await list_employee_penalties(point.name, month_key, db, current_user)
     return await list_employee_bonuses(point.name, month_key, db, current_user)
+
+
+async def delete_employee_bonus(entry_id: int, db: AsyncSession, current_user: User) -> dict[str, Any]:
+    return await _delete_employee_adjustment(entry_id, db, current_user, entry_type=EMPLOYEE_ADJUSTMENT_BONUS)
+
+
+async def delete_employee_penalty(entry_id: int, db: AsyncSession, current_user: User) -> dict[str, Any]:
+    return await _delete_employee_adjustment(entry_id, db, current_user, entry_type=EMPLOYEE_ADJUSTMENT_PENALTY)
 
 
 async def _build_top_category_lookup(point: LocationPoint) -> dict[str, dict[str, str]]:
@@ -4694,6 +4912,108 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
     }
 
 
+async def auto_close_due_shifts(
+    date_from: date,
+    date_to: date,
+    db: AsyncSession,
+    location: str | None = None,
+    *,
+    progress_callback: Any | None = None,
+) -> dict[str, Any]:
+    query = (
+        select(WorkShift)
+        .where(
+            WorkShift.is_deleted.is_(False),
+            WorkShift.status != 'closed',
+            WorkShift.shift_date >= date_from,
+            WorkShift.shift_date <= date_to,
+        )
+        .order_by(WorkShift.shift_date.asc(), WorkShift.id.asc())
+    )
+    normalized_location = _normalize_location(location) if location else None
+    if normalized_location:
+        point = await db.scalar(select(LocationPoint).where(LocationPoint.name == normalized_location).limit(1))
+        if point is None:
+            return {
+                'date_from': date_from.isoformat(),
+                'date_to': date_to.isoformat(),
+                'location': normalized_location,
+                'closed': 0,
+                'processed': 0,
+                'details': [],
+            }
+        query = query.where(WorkShift.location_point_id == point.id)
+
+    shifts = (await db.scalars(query)).all()
+    details: list[dict[str, Any]] = []
+
+    async def _notify(current: int, total: int, shift: WorkShift) -> None:
+        if progress_callback is None:
+            return
+        result = progress_callback(current, total, shift)
+        if asyncio.iscoroutine(result):
+            await result
+
+    for index, shift in enumerate(shifts, start=1):
+        await _notify(index, len(shifts), shift)
+        result = await close_shift(shift.id, db, actor_user=None, auto=True)
+        serialized = result.get('shift') or {}
+        details.append({
+            'shift_id': shift.id,
+            'shift_date': shift.shift_date.isoformat(),
+            'employee_user_id': shift.employee_user_id,
+            'location_point_id': shift.location_point_id,
+            'net_salary_amount': serialized.get('net_salary_amount'),
+            'gross_salary_amount': serialized.get('gross_salary_amount'),
+        })
+
+    return {
+        'date_from': date_from.isoformat(),
+        'date_to': date_to.isoformat(),
+        'location': normalized_location,
+        'closed': len(details),
+        'processed': len(shifts),
+        'details': details,
+    }
+
+
+async def refresh_current_open_shift_metrics(reason: str = 'cli') -> dict[str, Any]:
+    today = get_payroll_operational_today()
+    async with AsyncSessionLocal() as db:
+        rows = (
+            await db.scalars(
+                select(WorkShift)
+                .where(
+                    WorkShift.is_deleted.is_(False),
+                    WorkShift.status != 'closed',
+                    WorkShift.shift_date == today,
+                )
+                .order_by(WorkShift.location_point_id.asc(), WorkShift.id.asc())
+            )
+        ).all()
+        point_ids = sorted({shift.location_point_id for shift in rows})
+        refreshed: list[dict[str, Any]] = []
+        for point_id in point_ids:
+            point = await db.get(LocationPoint, point_id)
+            if not point:
+                continue
+            refreshed.append(
+                await refresh_payroll_metrics_cache(
+                    today,
+                    today,
+                    db,
+                    location=point.name,
+                    force_refresh=True,
+                )
+            )
+        return {
+            'reason': reason,
+            'date': today.isoformat(),
+            'open_shift_count': len(rows),
+            'refreshed_locations': refreshed,
+        }
+
+
 async def refresh_payroll_metrics_cache(
     date_from: date,
     date_to: date,
@@ -4860,6 +5180,7 @@ async def rebuild_closed_shift_snapshots(
                 sales_amount=row['sales_amount'],
                 return_amount=row['return_amount'],
                 net_sales_amount=row['net_sales_amount'],
+                cost_amount=row.get('cost_amount', 0.0),
                 earning_amount=row['earning_amount'],
                 is_other_category=row['is_other_category'],
             ))

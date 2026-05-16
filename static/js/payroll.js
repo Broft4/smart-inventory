@@ -13,6 +13,7 @@ const payrollState = {
     templates: [],
     expenses: [],
     employeeBonuses: [],
+    employeePenalties: [],
     audit: [],
     shiftDays: [],
     categoryFilters: {
@@ -133,6 +134,18 @@ function syncEmployeeBonusDefaults({ forceDate = false } = {}) {
     const dateInput = qs('employee-bonus-date');
     if (dateInput && (forceDate || !dateInput.value)) {
         dateInput.value = defaultEmployeeBonusDate();
+    }
+}
+
+function defaultEmployeePenaltyDate() {
+    const selectedMonth = selectedMonthStart('employee-penalties-month-input');
+    const today = todayIso();
+    return today.startsWith(selectedMonth.slice(0, 7)) ? today : selectedMonth;
+}
+function syncEmployeePenaltyDefaults({ forceDate = false } = {}) {
+    const dateInput = qs('employee-penalty-date');
+    if (dateInput && (forceDate || !dateInput.value)) {
+        dateInput.value = defaultEmployeePenaltyDate();
     }
 }
 function formatApiErrorMessage(payload) {
@@ -463,9 +476,11 @@ function setDefaultDates() {
     if (qs('shift-month-input')) qs('shift-month-input').value = monthIso();
     if (qs('expenses-month-input')) qs('expenses-month-input').value = monthIso();
     if (qs('employee-bonuses-month-input')) qs('employee-bonuses-month-input').value = monthIso();
+    if (qs('employee-penalties-month-input')) qs('employee-penalties-month-input').value = monthIso();
     if (qs('shift-date-input')) qs('shift-date-input').value = todayIso();
     syncManualExpenseDefaults({ forceDate: true });
     syncEmployeeBonusDefaults({ forceDate: true });
+    syncEmployeePenaltyDefaults({ forceDate: true });
 }
 
 function selectedLocation() {
@@ -553,7 +568,7 @@ function renderLocations() {
 
 function syncAllLocationsModeControls() {
     const allLocations = isAllLocationsSelected();
-    const disabledCards = ['admin-settings-card', 'expenses-card', 'employee-bonuses-card'];
+    const disabledCards = ['admin-settings-card', 'expenses-card', 'employee-bonuses-card', 'employee-penalties-card'];
     disabledCards.forEach((id) => {
         const card = qs(id);
         if (card && isAdminRole()) {
@@ -566,6 +581,7 @@ function syncAllLocationsModeControls() {
         payrollState.templates = [];
         payrollState.expenses = [];
         payrollState.employeeBonuses = [];
+        payrollState.employeePenalties = [];
     }
 }
 
@@ -576,6 +592,7 @@ function renderUsersForLocation() {
     const shiftModalEmployeeSelect = qs('shift-modal-employee-select');
     const auditEmployeeSelect = qs('audit-employee-filter');
     const employeeBonusEmployeeSelect = qs('employee-bonus-employee');
+    const employeePenaltyEmployeeSelect = qs('employee-penalty-employee');
     const employeeOptions = payrollState.employees.map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}</option>`).join('');
     if (!isAdminRole()) {
         employeeLabel.classList.add('hidden');
@@ -591,6 +608,7 @@ function renderUsersForLocation() {
     if (shiftEmployeeSelect) shiftEmployeeSelect.innerHTML = employeeOptions;
     if (shiftModalEmployeeSelect) shiftModalEmployeeSelect.innerHTML = employeeOptions;
     if (employeeBonusEmployeeSelect) employeeBonusEmployeeSelect.innerHTML = ['<option value="">Выберите сотрудника</option>', ...payrollState.employees.map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}</option>`)].join('');
+    if (employeePenaltyEmployeeSelect) employeePenaltyEmployeeSelect.innerHTML = ['<option value="">Выберите сотрудника</option>', ...payrollState.employees.map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}</option>`)].join('');
     if (auditEmployeeSelect) {
         const people = new Map();
         [...(payrollState.employees || []), ...(payrollState.admins || [])].forEach(item => {
@@ -725,7 +743,7 @@ function renderShiftPenaltyComments(day) {
     return `
         <div class="payroll-shift-section-head">
             <h3>Штрафы и комментарии</h3>
-            <p class="muted-text">Эти суммы вычитаются из зарплаты сотрудника и не попадают в расходы точки.</p>
+            <p class="muted-text">Эти суммы вычитаются из зарплаты сотрудника только за выбранную дату.</p>
         </div>
         <div class="expense-entry-grid payroll-shift-bonus-list">
             ${penalties.map((penalty) => `
@@ -733,7 +751,7 @@ function renderShiftPenaltyComments(day) {
                     <div class="expense-entry-card-head">
                         <div>
                             <strong>${formatMoney(penalty.share_amount || 0)} за эту смену</strong>
-                            <div class="muted-text">${escapeHtml(penalty.name || 'Штраф')} · всего: ${formatMoney(penalty.amount || 0)}${penalty.distribution_mode === 'spread' ? ` · смен в месяце: ${Number(penalty.shift_count || 0)}` : ''}</div>
+                            <div class="muted-text">${escapeHtml(penalty.name || 'Штраф')} · дата: ${escapeHtml(formatDateRu(penalty.penalty_date || penalty.expense_date))}</div>
                         </div>
                     </div>
                     ${penalty.comment ? `<div class="muted-text">${escapeHtml(penalty.comment)}</div>` : '<div class="muted-text">Комментарий не указан.</div>'}
@@ -749,7 +767,7 @@ function renderShiftBonusComments(day) {
     return `
         <div class="payroll-shift-section-head">
             <h3>Премии и комментарии</h3>
-            <p class="muted-text">Сумма премии делится поровну на все смены сотрудника в месяце.</p>
+            <p class="muted-text">Сумма премии применяется только к выбранной дате.</p>
         </div>
         <div class="expense-entry-grid payroll-shift-bonus-list">
             ${bonuses.map((bonus) => `
@@ -757,7 +775,7 @@ function renderShiftBonusComments(day) {
                     <div class="expense-entry-card-head">
                         <div>
                             <strong>${formatMoney(bonus.share_amount || 0)} за эту смену</strong>
-                            <div class="muted-text">Всего премия: ${formatMoney(bonus.amount || 0)} · смен в месяце: ${Number(bonus.shift_count || 0)}</div>
+                            <div class="muted-text">Дата премии: ${escapeHtml(formatDateRu(bonus.bonus_date))}</div>
                         </div>
                     </div>
                     ${bonus.comment ? `<div class="muted-text">${escapeHtml(bonus.comment)}</div>` : '<div class="muted-text">Комментарий не указан.</div>'}
@@ -1424,6 +1442,77 @@ function renderEmployeeBonuses() {
     });
 }
 
+
+function renderEmployeePenalties() {
+    const card = qs('employee-penalties-card');
+    const list = qs('employee-penalty-entry-tbody');
+    if (!isAdminRole() || isAllLocationsSelected()) {
+        card?.classList.add('hidden');
+        return;
+    }
+    card?.classList.remove('hidden');
+    if (!list) return;
+    const employeeOptions = ['<option value="">Выберите сотрудника</option>', ...payrollState.employees.map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}</option>`)].join('');
+    list.innerHTML = (payrollState.employeePenalties || []).map(entry => {
+        const employeeName = escapeHtml(bonusEmployeeName(entry));
+        const stateLabel = entry.is_active ? 'Активен' : 'Неактивен';
+        return `
+        <details class="expense-entry-card expense-entry-card--accordion ${entry.is_active ? '' : 'inactive'}">
+            <summary class="expense-entry-toggle">
+                <div>
+                    <h4>Штраф · ${employeeName}</h4>
+                    <p class="muted-text">${escapeHtml(formatDateRu(entry.penalty_date || entry.adjustment_date || entry.month_start))}</p>
+                </div>
+                <div class="expense-entry-toggle-side">
+                    <span class="expense-entry-badge">${formatMoney(entry.amount || 0)}</span>
+                    <span class="muted-text expense-entry-toggle-meta">${stateLabel}</span>
+                    <span class="btn secondary btn-inline expense-entry-toggle-text">Развернуть</span>
+                </div>
+            </summary>
+            <div class="expense-entry-accordion-body">
+                <div class="expense-entry-form">
+                    <label>
+                        Сотрудник
+                        <select data-employee-penalty-employee="${entry.id}">${employeeOptions}</select>
+                    </label>
+                    <label>
+                        Сумма
+                        <input type="number" min="0" step="0.01" data-employee-penalty-amount="${entry.id}" value="${entry.amount}">
+                    </label>
+                    <label>
+                        Дата штрафа
+                        <input type="date" data-employee-penalty-date="${entry.id}" value="${escapeHtml(entry.penalty_date || entry.adjustment_date || entry.month_start || '')}">
+                    </label>
+                    <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline">
+                        <input type="checkbox" data-employee-penalty-active="${entry.id}" ${entry.is_active ? 'checked' : ''}>
+                        Учитывать в зарплате
+                    </label>
+                    <label class="expense-comment-field expense-entry-comment">
+                        Комментарий
+                        <textarea rows="3" data-employee-penalty-comment="${entry.id}" placeholder="Комментарий к штрафу">${escapeHtml(entry.comment || '')}</textarea>
+                    </label>
+                </div>
+                <div class="expense-entry-actions">
+                    <button type="button" class="btn secondary btn-inline btn-with-loader" data-employee-penalty-save="${entry.id}" onclick="saveEmployeePenalty(${entry.id})">
+                        <span class="btn-loader hidden" aria-hidden="true"></span>
+                        <span class="btn-label">Сохранить штраф</span>
+                    </button>
+                    <button type="button" class="btn danger btn-inline" onclick="deleteEmployeePenalty(${entry.id})">Удалить</button>
+                </div>
+                <div id="employee-penalty-status-${entry.id}" class="inventory-status hidden save-action-status"></div>
+            </div>
+        </details>`;
+    }).join('') || '<div class="empty-text">Штрафов за выбранный месяц пока нет.</div>';
+    (payrollState.employeePenalties || []).forEach(entry => {
+        const select = document.querySelector(`[data-employee-penalty-employee="${entry.id}"]`);
+        if (select) select.value = String(entry.employee_user_id || '');
+    });
+    list.querySelectorAll('.expense-entry-card--accordion').forEach((details) => {
+        syncExpenseEntryToggle(details);
+        details.addEventListener('toggle', () => syncExpenseEntryToggle(details));
+    });
+}
+
 function describeAuditLog(log) {
     const actor = log.actor_name || 'Система';
     const when = formatTimeRu(log.created_at);
@@ -1482,6 +1571,21 @@ function describeAuditLog(log) {
         }
         if (log.action_type === 'delete') {
             return `${when} · ${actor} удалил премию ${employeeName} на ${formatMoney(details.amount || 0)}.`;
+        }
+    }
+
+    if (log.entity_type === 'employee_penalty') {
+        const employeeName = payrollState.employees.find(item => Number(item.id) === Number(details.employee_user_id))?.full_name || details.employee_name || 'сотруднику';
+        if (log.action_type === 'create') {
+            return `${when} · ${actor} добавил штраф ${employeeName} на ${formatMoney(details.amount || 0)}.`;
+        }
+        if (log.action_type === 'update') {
+            const after = details.after || {};
+            const name = payrollState.employees.find(item => Number(item.id) === Number(after.employee_user_id))?.full_name || after.employee_name || employeeName;
+            return `${when} · ${actor} изменил штраф ${name}.`;
+        }
+        if (log.action_type === 'delete') {
+            return `${when} · ${actor} удалил штраф ${employeeName} на ${formatMoney(details.amount || 0)}.`;
         }
     }
 
@@ -1559,6 +1663,7 @@ async function loadSetupForLocation() {
         renderSettings();
         renderTemplates();
         renderEmployeeBonuses();
+        renderEmployeePenalties();
         await loadAudit();
         return;
     }
@@ -1581,6 +1686,7 @@ async function loadSetupForLocation() {
             loadShiftCalendar(location),
             loadExpenseTemplatesAndEntries(location),
             loadEmployeeBonuses(location),
+            loadEmployeePenalties(location),
             loadAudit(location),
         ]);
 
@@ -1705,6 +1811,26 @@ async function loadEmployeeBonuses(expectedLocation = selectedLocation()) {
         employeeSelect.innerHTML = ['<option value="">Выберите сотрудника</option>', ...payrollState.employees.map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}</option>`)].join('');
     }
     syncEmployeeBonusDefaults();
+}
+
+
+async function loadEmployeePenalties(expectedLocation = selectedLocation()) {
+    if (!isAdminRole() || isAllLocationsSelected()) {
+        payrollState.employeePenalties = [];
+        renderEmployeePenalties();
+        return;
+    }
+    const location = expectedLocation || selectedLocation();
+    const month = selectedMonthStart('employee-penalties-month-input');
+    const penalties = await api(`/api/payroll/employee-penalties?location=${encodeURIComponent(location)}&month=${month}`);
+    if (selectedLocation() !== location || isAllLocationsSelected() || selectedMonthStart('employee-penalties-month-input') !== month) return;
+    payrollState.employeePenalties = penalties.entries || [];
+    renderEmployeePenalties();
+    const employeeSelect = qs('employee-penalty-employee');
+    if (employeeSelect) {
+        employeeSelect.innerHTML = ['<option value="">Выберите сотрудника</option>', ...payrollState.employees.map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}</option>`)].join('');
+    }
+    syncEmployeePenaltyDefaults();
 }
 
 async function loadAudit(expectedLocation = selectedLocation()) {
@@ -2072,6 +2198,11 @@ async function createEmployeeBonus() {
         showScopedStatus('create-employee-bonus-status', 'Введите сумму премии.', 'error');
         return;
     }
+    if (!payload.bonus_date) {
+        showStatus('Выберите дату премии.', 'error');
+        showScopedStatus('create-employee-bonus-status', 'Выберите дату премии.', 'error');
+        return;
+    }
     showScopedStatus('create-employee-bonus-status', 'Сохраняем премию...', 'loading');
     setButtonLoading(button, true, 'Сохраняем...');
     try {
@@ -2106,6 +2237,10 @@ window.saveEmployeeBonus = async function saveEmployeeBonus(id) {
         showScopedStatus(`employee-bonus-status-${id}`, 'Выберите сотрудника.', 'error');
         return;
     }
+    if (!payload.bonus_date) {
+        showScopedStatus(`employee-bonus-status-${id}`, 'Выберите дату премии.', 'error');
+        return;
+    }
     showScopedStatus(`employee-bonus-status-${id}`, 'Сохраняем премию...', 'loading');
     setButtonLoading(button, true, 'Сохраняем...');
     try {
@@ -2133,6 +2268,103 @@ window.deleteEmployeeBonus = async function deleteEmployeeBonus(id) {
         showStatus('Премия удалена.', 'success');
     } catch (error) {
         showStatus(error.message || 'Не удалось удалить премию.', 'error');
+    }
+};
+
+async function createEmployeePenalty() {
+    if (isAllLocationsSelected()) {
+        showStatus('В режиме «Все точки» штрафы недоступны. Выберите конкретную точку.', 'warning');
+        return;
+    }
+    const button = qs('create-employee-penalty-btn');
+    const payload = {
+        location: selectedLocation(),
+        month_start: selectedMonthStart('employee-penalties-month-input'),
+        employee_user_id: qs('employee-penalty-employee').value ? Number(qs('employee-penalty-employee').value) : null,
+        amount: Number(qs('employee-penalty-amount').value || 0),
+        penalty_date: qs('employee-penalty-date').value || null,
+        comment: qs('employee-penalty-comment').value.trim(),
+    };
+    if (!payload.employee_user_id) {
+        showStatus('Выберите сотрудника для штрафа.', 'error');
+        showScopedStatus('create-employee-penalty-status', 'Выберите сотрудника.', 'error');
+        return;
+    }
+    if (!payload.amount || payload.amount <= 0) {
+        showStatus('Введите сумму штрафа.', 'error');
+        showScopedStatus('create-employee-penalty-status', 'Введите сумму штрафа.', 'error');
+        return;
+    }
+    if (!payload.penalty_date) {
+        showStatus('Выберите дату штрафа.', 'error');
+        showScopedStatus('create-employee-penalty-status', 'Выберите дату штрафа.', 'error');
+        return;
+    }
+    showScopedStatus('create-employee-penalty-status', 'Сохраняем штраф...', 'loading');
+    setButtonLoading(button, true, 'Сохраняем...');
+    try {
+        await api('/api/payroll/employee-penalties', { method: 'POST', body: JSON.stringify(payload) });
+        qs('employee-penalty-amount').value = '';
+        qs('employee-penalty-comment').value = '';
+        syncEmployeePenaltyDefaults({ forceDate: true });
+        await loadEmployeePenalties();
+        await loadSummary();
+        await loadAudit();
+        showStatus('Штраф добавлен.', 'success');
+        showScopedStatus('create-employee-penalty-status', 'Штраф сохранён.', 'success');
+    } catch (error) {
+        showStatus(error.message || 'Не удалось добавить штраф.', 'error');
+        showScopedStatus('create-employee-penalty-status', error.message || 'Не удалось добавить штраф.', 'error');
+    } finally {
+        setButtonLoading(button, false);
+    }
+}
+
+window.saveEmployeePenalty = async function saveEmployeePenalty(id) {
+    const button = document.querySelector(`[data-employee-penalty-save="${id}"]`);
+    const employeeValue = document.querySelector(`[data-employee-penalty-employee="${id}"]`)?.value || '';
+    const payload = {
+        employee_user_id: employeeValue ? Number(employeeValue) : null,
+        amount: Number(document.querySelector(`[data-employee-penalty-amount="${id}"]`)?.value || 0),
+        penalty_date: document.querySelector(`[data-employee-penalty-date="${id}"]`)?.value || null,
+        comment: document.querySelector(`[data-employee-penalty-comment="${id}"]`)?.value || '',
+        is_active: Boolean(document.querySelector(`[data-employee-penalty-active="${id}"]`)?.checked),
+    };
+    if (!payload.employee_user_id) {
+        showScopedStatus(`employee-penalty-status-${id}`, 'Выберите сотрудника.', 'error');
+        return;
+    }
+    if (!payload.penalty_date) {
+        showScopedStatus(`employee-penalty-status-${id}`, 'Выберите дату штрафа.', 'error');
+        return;
+    }
+    showScopedStatus(`employee-penalty-status-${id}`, 'Сохраняем штраф...', 'loading');
+    setButtonLoading(button, true, 'Сохраняем...');
+    try {
+        await api(`/api/payroll/employee-penalties/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
+        await loadEmployeePenalties();
+        await loadSummary();
+        await loadAudit();
+        showStatus('Штраф сохранён.', 'success');
+        showScopedStatus(`employee-penalty-status-${id}`, 'Штраф сохранён.', 'success');
+    } catch (error) {
+        showStatus(error.message || 'Не удалось сохранить штраф.', 'error');
+        showScopedStatus(`employee-penalty-status-${id}`, error.message || 'Не удалось сохранить штраф.', 'error');
+    } finally {
+        setButtonLoading(button, false);
+    }
+};
+
+window.deleteEmployeePenalty = async function deleteEmployeePenalty(id) {
+    if (!confirm('Удалить этот штраф?')) return;
+    try {
+        await api(`/api/payroll/employee-penalties/${id}`, { method: 'DELETE' });
+        await loadEmployeePenalties();
+        await loadSummary();
+        await loadAudit();
+        showStatus('Штраф удалён.', 'success');
+    } catch (error) {
+        showStatus(error.message || 'Не удалось удалить штраф.', 'error');
     }
 };
 
@@ -2212,9 +2444,14 @@ qs('employee-bonuses-month-input')?.addEventListener('change', async () => {
     syncEmployeeBonusDefaults({ forceDate: true });
     await loadEmployeeBonuses();
 });
+qs('employee-penalties-month-input')?.addEventListener('change', async () => {
+    syncEmployeePenaltyDefaults({ forceDate: true });
+    await loadEmployeePenalties();
+});
 qs('create-expense-template-btn')?.addEventListener('click', createExpenseTemplate);
 qs('create-manual-expense-btn')?.addEventListener('click', createManualExpense);
 qs('create-employee-bonus-btn')?.addEventListener('click', createEmployeeBonus);
+qs('create-employee-penalty-btn')?.addEventListener('click', createEmployeePenalty);
 qs('payroll-category-search')?.addEventListener('input', applyPayrollCategoryFiltersFromUi);
 qs('payroll-category-view')?.addEventListener('change', applyPayrollCategoryFiltersFromUi);
 qs('payroll-category-sort')?.addEventListener('change', applyPayrollCategoryFiltersFromUi);
