@@ -4685,6 +4685,23 @@ async def _sum_shift_salaries(point: LocationPoint, date_from: date, date_to: da
     return round(total, 2)
 
 
+async def _calculate_manager_operating_profit(
+    point: LocationPoint,
+    date_from: date,
+    date_to: date,
+    db: AsyncSession,
+) -> float:
+    if date_to < date_from:
+        return 0.0
+
+    metrics = await _load_point_sales_metrics(point, date_from, date_to, db)
+    gross_sales_amount = round(sum(float(day.get('gross_sales_amount') or 0.0) for day in metrics.values()), 2)
+    cost_amount = round(sum(float(day.get('cost_amount') or 0.0) for day in metrics.values()), 2)
+    employee_salary_total = await _sum_shift_salaries(point, date_from, date_to, db)
+    expenses_total = await _collect_period_company_expenses(point, date_from, date_to, db)
+    return round(gross_sales_amount - cost_amount - employee_salary_total - expenses_total, 2)
+
+
 async def _calculate_manager_salary_proration(
     point: LocationPoint,
     date_from: date,
@@ -4706,21 +4723,33 @@ async def _calculate_manager_salary_proration(
         if selected_to < selected_from:
             continue
 
-        month_metrics = await _load_point_sales_metrics(point, month_start, realized_end, db)
-        month_net_sales = round(sum(_resolve_calculation_sales_base(day.get('gross_sales_amount'), day.get('net_sales_amount')) for day in month_metrics.values()), 2)
-        month_cost_amount = round(sum(float(day.get('cost_amount') or 0.0) for day in month_metrics.values()), 2)
-        month_employee_salary_total = await _sum_shift_salaries(point, month_start, realized_end, db)
-        month_expenses_total = await _collect_period_company_expenses(point, month_start, realized_end, db)
-        month_operating_profit = round(month_net_sales - month_cost_amount - month_employee_salary_total - month_expenses_total, 2)
+        month_operating_profit = await _calculate_manager_operating_profit(
+            point,
+            month_start,
+            realized_end,
+            db,
+        )
+        selected_operating_profit = await _calculate_manager_operating_profit(
+            point,
+            selected_from,
+            selected_to,
+            db,
+        )
 
         month_settings = await _get_settings_for_date(point, selected_to, db)
         month_brackets = _load_manager_salary_brackets(month_settings)
         month_rate_percent = _manager_rate_for_profit(month_operating_profit, month_brackets)
         month_salary_amount = round(max(month_operating_profit, 0.0) * (month_rate_percent / 100.0), 2)
 
+        # Процент определяется по прибыли месяца, а начисление за выбранный
+        # период считается от прибыли именно выбранного периода. Так при
+        # выборе 1 дня порог остаётся месячным, но сумма ЗП не размазывается
+        # по календарным дням и совпадает с карточкой "Прибыль до зарплаты
+        # управляющего" за выбранный период.
+        prorated_amount = round(max(selected_operating_profit, 0.0) * (month_rate_percent / 100.0), 2)
+
         realized_days_count = (realized_end - month_start).days + 1
         selected_days_count = (selected_to - selected_from).days + 1
-        prorated_amount = round(month_salary_amount / realized_days_count * selected_days_count, 2) if realized_days_count > 0 else 0.0
         total_salary += prorated_amount
         representative_rate = max(representative_rate, month_rate_percent)
         details.append({
@@ -4732,9 +4761,11 @@ async def _calculate_manager_salary_proration(
             'realized_days_count': realized_days_count,
             'selected_days_count': selected_days_count,
             'operating_profit': month_operating_profit,
+            'selected_operating_profit': selected_operating_profit,
             'manager_rate_percent': month_rate_percent,
             'manager_salary_full_amount': month_salary_amount,
             'manager_salary_prorated_amount': prorated_amount,
+            'calculation_base': 'selected_period_profit_with_month_rate',
         })
 
     return round(total_salary, 2), round(representative_rate, 2), details
