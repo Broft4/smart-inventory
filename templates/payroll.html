@@ -104,6 +104,7 @@
                     <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Выход</span><strong id="kpi-exit">0 ₽</strong></div>
                     <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Бонус</span><strong id="kpi-bonus">0 ₽</strong></div>
                     <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Категории</span><strong id="kpi-category">0 ₽</strong></div>
+                    <div class="summary-kpi-card plus"><span class="summary-kpi-label">Мотивация</span><strong id="kpi-sales-motivation">0 ₽</strong></div>
                     <div class="summary-kpi-card plus"><span class="summary-kpi-label">Премия</span><strong id="kpi-employee-bonus">0 ₽</strong></div>
                     <div class="summary-kpi-card warning"><span class="summary-kpi-label">Штрафы</span><strong id="kpi-employee-expenses">0 ₽</strong></div>
                     <div class="summary-kpi-card plus"><span class="summary-kpi-label">К выплате</span><strong id="kpi-payout">0 ₽</strong></div>
@@ -241,6 +242,83 @@
                     </button>
                 </div>
                 <div id="settings-status" class="inventory-status hidden save-action-status"></div>
+            </div>
+        </details>
+    </section>
+
+    <section class="category-card" id="hot-products-card">
+        <details class="payroll-collapse">
+            <summary class="report-summary-header payroll-collapse-summary">
+                <div>
+                    <h2>Горящие товары</h2>
+                    <p class="muted-text">Активные товары с повышенной мотивацией. Продавцу стоит подсвечивать их покупателю.</p>
+                </div>
+                <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
+            </summary>
+            <div class="payroll-collapse-body">
+                <div id="hot-products-status" class="inventory-status hidden"></div>
+                <div id="hot-products-list" class="expense-entry-grid"></div>
+            </div>
+        </details>
+    </section>
+
+    <section class="category-card{% if user.role not in ['admin', 'superadmin'] %} hidden{% endif %}" id="sales-motivations-card">
+        <details class="payroll-collapse">
+            <summary class="report-summary-header payroll-collapse-summary">
+                <div>
+                    <h2>Мотивации продавцов</h2>
+                    <p class="muted-text">Отдельные модели начислений за продажу выбранных товаров. Работают параллельно и суммируются поверх стандартных процентов.</p>
+                </div>
+                <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
+            </summary>
+            <div class="payroll-collapse-body">
+                <div class="expense-layout">
+                    <div id="sales-motivations-status" class="inventory-status hidden"></div>
+                    <div class="expense-create-card">
+                        <div class="expense-section-head">
+                            <div>
+                                <h3>Создать модель мотивации</h3>
+                                <p class="muted-text">Например: “365 дней без продаж” с +10% или “Одноразки” с +100 ₽ за каждую позицию.</p>
+                            </div>
+                        </div>
+                        <div class="payroll-filter-grid expense-manual-grid">
+                            <label>Название<input type="text" id="sales-motivation-name" placeholder="Например, 365 дней без продаж"></label>
+                            <label>Тип отбора<select id="sales-motivation-source"><option value="manual">Вручную</option><option value="no_sales_days">Без продаж N дней</option></select></label>
+                            <label>Дней без продаж<input type="number" id="sales-motivation-days" min="1" step="1" value="365"></label>
+                            <label>Тип начисления<select id="sales-motivation-reward-type"><option value="percent">% от суммы продаж</option><option value="fixed">₽ за каждую позицию</option></select></label>
+                            <label>Значение<input type="number" id="sales-motivation-reward-value" min="0" step="0.01" placeholder="10 или 100"></label>
+                            <label>Дата начала<input type="date" id="sales-motivation-date-from"></label>
+                            <label>Дата окончания<input type="date" id="sales-motivation-date-to"></label>
+                            <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline"><input type="checkbox" id="sales-motivation-include-fiscalized" checked> Начислять при фискализации</label>
+                            <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline"><input type="checkbox" id="sales-motivation-active" checked> Активна</label>
+                        </div>
+                        <div class="payroll-category-filters">
+                            <label>Поиск товаров<input type="text" id="sales-motivation-product-query" placeholder="Название, код, категория..."></label>
+                            <div class="payroll-filter-actions-inline">
+                                <button id="sales-motivation-load-products-btn" type="button" class="btn secondary btn-inline">Подобрать товары</button>
+                                <button id="sales-motivation-clear-products-btn" type="button" class="btn secondary btn-inline">Очистить выбор</button>
+                            </div>
+                            <div class="payroll-category-filter-meta muted-text" id="sales-motivation-selected-meta">Выбрано товаров: 0</div>
+                        </div>
+                        <div id="sales-motivation-product-catalog" class="payroll-days-container"></div>
+                        <div class="admin-toolbar-actions">
+                            <button id="create-sales-motivation-btn" type="button" class="btn primary btn-inline btn-with-loader">
+                                <span class="btn-loader hidden" aria-hidden="true"></span>
+                                <span class="btn-label">Создать мотивацию</span>
+                            </button>
+                        </div>
+                        <div id="create-sales-motivation-status" class="inventory-status hidden save-action-status"></div>
+                    </div>
+                    <div class="expense-section">
+                        <div class="expense-section-head expense-section-head--stacked">
+                            <div>
+                                <h3>Модели мотивации</h3>
+                                <p class="muted-text">Каждая модель живёт отдельно. Удаление одной модели не влияет на остальные и не ломает закрытые смены.</p>
+                            </div>
+                        </div>
+                        <div id="sales-motivation-model-list" class="expense-entry-grid"></div>
+                    </div>
+                </div>
             </div>
         </details>
     </section>

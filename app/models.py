@@ -518,3 +518,68 @@ class PayrollRecalcJob(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class SalesMotivationModel(Base):
+    __tablename__ = 'sales_motivation_models'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    location_point_id: Mapped[int] = mapped_column(ForeignKey('location_points.id', ondelete='CASCADE'), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(30), default='manual', nullable=False, index=True)
+    reward_type: Mapped[str] = mapped_column(String(30), default='percent', nullable=False)
+    reward_value: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    no_sales_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    include_fiscalized_sales: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    date_from: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    date_to: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    updated_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class SalesMotivationProduct(Base):
+    __tablename__ = 'sales_motivation_products'
+    __table_args__ = (
+        UniqueConstraint('model_id', 'item_id', name='uq_sales_motivation_product_model_item'),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    model_id: Mapped[int] = mapped_column(ForeignKey('sales_motivation_models.id', ondelete='CASCADE'), nullable=False, index=True)
+    item_id: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    item_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    item_code: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    category_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    category_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    subcategory_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    subcategory_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    current_stock_qty: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    last_sale_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    days_without_sales: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    added_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class ShiftSalesMotivationSnapshot(Base):
+    __tablename__ = 'shift_sales_motivation_snapshots'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    snapshot_id: Mapped[int] = mapped_column(ForeignKey('shift_payroll_snapshots.id', ondelete='CASCADE'), nullable=False, index=True)
+    shift_id: Mapped[int] = mapped_column(ForeignKey('work_shifts.id', ondelete='CASCADE'), nullable=False, index=True)
+    location_point_id: Mapped[int] = mapped_column(ForeignKey('location_points.id', ondelete='CASCADE'), nullable=False, index=True)
+    employee_user_id: Mapped[int] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    shift_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    model_id: Mapped[int | None] = mapped_column(ForeignKey('sales_motivation_models.id', ondelete='SET NULL'), nullable=True, index=True)
+    model_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    reward_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    reward_value: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    include_fiscalized_sales: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    fiscalization_status: Mapped[str] = mapped_column(String(30), default='any', nullable=False)
+    item_id: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    item_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    item_code: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    quantity: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    sales_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    bonus_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)

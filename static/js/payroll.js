@@ -14,6 +14,8 @@ const payrollState = {
     expenses: [],
     employeeBonuses: [],
     employeePenalties: [],
+    salesMotivations: [],
+    selectedMotivationProducts: new Map(),
     audit: [],
     shiftDays: [],
     categoryFilters: {
@@ -568,7 +570,7 @@ function renderLocations() {
 
 function syncAllLocationsModeControls() {
     const allLocations = isAllLocationsSelected();
-    const disabledCards = ['admin-settings-card', 'expenses-card', 'employee-bonuses-card', 'employee-penalties-card'];
+    const disabledCards = ['admin-settings-card', 'sales-motivations-card', 'expenses-card', 'employee-bonuses-card', 'employee-penalties-card'];
     disabledCards.forEach((id) => {
         const card = qs(id);
         if (card && isAdminRole()) {
@@ -582,6 +584,9 @@ function syncAllLocationsModeControls() {
         payrollState.expenses = [];
         payrollState.employeeBonuses = [];
         payrollState.employeePenalties = [];
+        payrollState.salesMotivations = [];
+        renderSalesMotivations();
+        renderHotProducts({ models: [] });
     }
 }
 
@@ -814,6 +819,7 @@ function renderShiftDetailsInto(containerId, summary, { audience = 'admin' } = {
                         <div><span class="summary-label">Выход</span><strong>${formatMoney(day.exit_amount || 0)}</strong></div>
                         <div><span class="summary-label">Бонус к выходу</span><strong>${formatMoney(day.bonus_amount || 0)}</strong></div>
                         <div><span class="summary-label">Бонус по категориям</span><strong>${formatMoney(day.category_earnings_total || 0)}</strong></div>
+                        <div><span class="summary-label">Мотивация</span><strong>${formatMoney(day.sales_motivation_amount || 0)}</strong></div>
                         <div><span class="summary-label">Премия</span><strong>${formatMoney(day.employee_bonus_amount || 0)}</strong></div>
                         <div><span class="summary-label">Штраф</span><strong>${formatMoney(day.employee_penalty_amount || 0)}</strong></div>
                         <div><span class="summary-label">Итог за смену</span><strong>${formatMoney(shiftNetSalaryAmount(day))}</strong></div>
@@ -823,6 +829,7 @@ function renderShiftDetailsInto(containerId, summary, { audience = 'admin' } = {
                         <p class="muted-text">${audience === 'employee' ? 'По этой смене видно, сколько вам начислено по каждой категории.' : 'По этой смене видно, за какие категории сотрудник получил начисления.'}</p>
                     </div>
                     ${renderShiftCategoryBreakdown(day.categories || [])}
+                    ${renderShiftSalesMotivations(day)}
                     ${renderShiftBonusComments(day)}
                     ${renderShiftPenaltyComments(day)}
                 </div>
@@ -842,6 +849,7 @@ function renderSummary(summary) {
     qs('kpi-exit').textContent = formatMoney(summary.totals?.exit_amount || 0);
     qs('kpi-bonus').textContent = formatMoney(summary.totals?.bonus_amount || 0);
     qs('kpi-category').textContent = formatMoney(summary.totals?.category_earnings_total || 0);
+    if (qs('kpi-sales-motivation')) qs('kpi-sales-motivation').textContent = formatMoney(summary.sales_motivation_total ?? summary.totals?.sales_motivation_amount ?? 0);
     if (qs('kpi-employee-bonus')) qs('kpi-employee-bonus').textContent = formatMoney(summary.employee_bonuses_total ?? summary.totals?.employee_bonus_amount ?? 0);
     qs('kpi-employee-expenses').textContent = formatMoney(summary.employee_expenses_total || 0);
     qs('kpi-payout').textContent = formatMoney(summary.net_payout_amount || 0);
@@ -1687,6 +1695,8 @@ async function loadSetupForLocation() {
             loadExpenseTemplatesAndEntries(location),
             loadEmployeeBonuses(location),
             loadEmployeePenalties(location),
+            loadSalesMotivations(location),
+            loadHotProducts(location),
             loadAudit(location),
         ]);
 
@@ -2368,6 +2378,308 @@ window.deleteEmployeePenalty = async function deleteEmployeePenalty(id) {
     }
 };
 
+function salesMotivationRewardText(model) {
+    const value = Number(model?.reward_value || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 });
+    return model?.reward_type === 'fixed' ? `${value} ₽ за позицию` : `${value}% от суммы продаж`;
+}
+
+function salesMotivationFiscalizationText(model) {
+    if (!model || model.include_fiscalized_sales !== false) return 'с фискализацией и без неё';
+    return 'только без фискализации';
+}
+
+function renderShiftSalesMotivations(day) {
+    const motivations = Array.isArray(day?.sales_motivations) ? day.sales_motivations : [];
+    if (!motivations.length) return '';
+    return `
+        <div class="payroll-shift-section-head">
+            <h3>Мотивации продавца</h3>
+            <p class="muted-text">Дополнительные начисления за продажу горящих товаров. Суммируются поверх обычных процентов.</p>
+        </div>
+        <div class="expense-entry-grid payroll-shift-bonus-list">
+            ${motivations.map((model) => `
+                <article class="expense-entry-card">
+                    <div class="expense-entry-card-head">
+                        <div>
+                            <strong>${escapeHtml(model.model_name || 'Мотивация')} · ${formatMoney(model.bonus_amount || 0)}</strong>
+                            <div class="muted-text">${escapeHtml(salesMotivationRewardText(model))} · ${escapeHtml(salesMotivationFiscalizationText(model))} · продажи ${formatMoney(model.sales_amount || 0)} · позиций ${Number(model.quantity || 0).toLocaleString('ru-RU')}</div>
+                        </div>
+                    </div>
+                    <div class="payroll-days-container payroll-days-container--note-only">
+                        ${(model.items || []).map((item) => `
+                            <div class="muted-text">${escapeHtml(item.item_name || 'Товар')}${item.item_code ? ` · код ${escapeHtml(item.item_code)}` : ''}: ${formatMoney(item.bonus_amount || 0)} / продажи ${formatMoney(item.sales_amount || 0)} / ${Number(item.quantity || 0).toLocaleString('ru-RU')} шт.</div>
+                        `).join('')}
+                    </div>
+                </article>
+            `).join('')}
+        </div>
+    `;
+}
+
+function updateMotivationSelectedMeta() {
+    const meta = qs('sales-motivation-selected-meta');
+    if (meta) meta.textContent = `Выбрано товаров: ${payrollState.selectedMotivationProducts.size}`;
+}
+
+function flattenMotivationCatalogProducts(payload) {
+    const items = [];
+    (payload?.categories || []).forEach((category) => {
+        (category.subcategories || []).forEach((subcategory) => {
+            (subcategory.items || []).forEach((item) => {
+                items.push({ ...item, category_name: item.category_name || category.name, category_id: item.category_id || category.id, subcategory_name: item.subcategory_name || subcategory.name, subcategory_id: item.subcategory_id || subcategory.id });
+            });
+        });
+    });
+    return items;
+}
+
+function toggleMotivationProductSelection(product, checked) {
+    const id = String(product?.item_id || '').trim();
+    if (!id) return;
+    if (checked) {
+        payrollState.selectedMotivationProducts.set(id, product);
+    } else {
+        payrollState.selectedMotivationProducts.delete(id);
+    }
+    updateMotivationSelectedMeta();
+}
+
+function renderSalesMotivationProductCatalog(payload) {
+    const container = qs('sales-motivation-product-catalog');
+    if (!container) return;
+    const categories = Array.isArray(payload?.categories) ? payload.categories : [];
+    if (!categories.length) {
+        container.innerHTML = '<div class="muted-text">Товары не найдены. Попробуйте изменить фильтр или поиск.</div>';
+        return;
+    }
+    container.innerHTML = categories.map((category) => `
+        <details class="payroll-day-card payroll-day-card--accordion">
+            <summary class="payroll-day-toggle">
+                <div>
+                    <strong>${escapeHtml(category.name || 'Категория')}</strong>
+                    <div class="muted-text">Товаров: ${(category.subcategories || []).reduce((sum, sub) => sum + (sub.items || []).length, 0)}</div>
+                </div>
+                <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
+            </summary>
+            <div class="payroll-day-accordion-body">
+                ${(category.subcategories || []).map((subcategory) => `
+                    <div class="expense-section">
+                        <div class="expense-section-head"><div><h3>${escapeHtml(subcategory.name || 'Без подкатегории')}</h3></div></div>
+                        <div class="expense-entry-grid">
+                            ${(subcategory.items || []).map((item) => {
+                                const selected = payrollState.selectedMotivationProducts.has(String(item.item_id || ''));
+                                return `
+                                <label class="expense-entry-card checkbox-like expense-checkbox-card">
+                                    <input type="checkbox" data-motivation-product-id="${escapeHtml(item.item_id || '')}" ${selected ? 'checked' : ''}>
+                                    <span>
+                                        <strong>${escapeHtml(item.item_name || 'Товар')}</strong>
+                                        <span class="muted-text">${item.item_code ? `код ${escapeHtml(item.item_code)} · ` : ''}остаток ${Number(item.current_stock_qty || 0).toLocaleString('ru-RU')} шт.${item.days_without_sales ? ` · без продаж ${item.days_without_sales}+ дней` : ''}</span>
+                                    </span>
+                                </label>`;
+                            }).join('')}
+                        </div>
+                    </div>
+                `).join('')}
+            </div>
+        </details>
+    `).join('');
+    const productMap = new Map(flattenMotivationCatalogProducts(payload).map(item => [String(item.item_id || ''), item]));
+    container.querySelectorAll('[data-motivation-product-id]').forEach((input) => {
+        input.addEventListener('change', () => toggleMotivationProductSelection(productMap.get(input.dataset.motivationProductId), input.checked));
+    });
+    updateMotivationSelectedMeta();
+}
+
+async function loadSalesMotivationProductCatalog() {
+    if (!isAdminRole() || isAllLocationsSelected()) return;
+    const location = selectedLocation();
+    const source = qs('sales-motivation-source')?.value || 'manual';
+    const days = Number(qs('sales-motivation-days')?.value || 0);
+    const query = qs('sales-motivation-product-query')?.value || '';
+    const params = new URLSearchParams({ location });
+    if (source === 'no_sales_days' && days > 0) params.set('no_sales_days', String(days));
+    if (query.trim()) params.set('query', query.trim());
+    showScopedStatus('sales-motivations-status', 'Подбираем товары...', 'loading');
+    try {
+        const payload = await api(`/api/payroll/sales-motivations/product-catalog?${params.toString()}`);
+        renderSalesMotivationProductCatalog(payload);
+        showScopedStatus('sales-motivations-status', `Найдено товаров: ${payload.product_count || 0}`, 'success');
+    } catch (error) {
+        showScopedStatus('sales-motivations-status', error.message || 'Не удалось подобрать товары.', 'error');
+    }
+}
+
+function renderSalesMotivations() {
+    const list = qs('sales-motivation-model-list');
+    if (!list) return;
+    const models = payrollState.salesMotivations || [];
+    if (!models.length) {
+        list.innerHTML = '<div class="muted-text">Модели мотивации пока не созданы.</div>';
+        return;
+    }
+    list.innerHTML = models.map((model) => `
+        <details class="expense-entry-card expense-entry-card--accordion ${model.is_active ? '' : 'inactive'}">
+            <summary class="expense-entry-toggle">
+                <div>
+                    <strong>${escapeHtml(model.name || 'Мотивация')}</strong>
+                    <div class="muted-text">${escapeHtml(model.source_label || '')} · ${escapeHtml(salesMotivationRewardText(model))} · ${escapeHtml(salesMotivationFiscalizationText(model))} · товаров ${model.product_count || 0}</div>
+                </div>
+                <div class="expense-entry-toggle-side">
+                    <span class="payroll-chip ${model.is_active ? 'green' : 'orange'}">${model.is_active ? 'Активна' : 'Выключена'}</span>
+                    <span class="btn secondary btn-inline expense-entry-toggle-text">Развернуть</span>
+                </div>
+            </summary>
+            <div class="expense-entry-accordion-body">
+                <div class="payroll-day-grid payroll-day-grid--emphasis">
+                    <div><span class="summary-label">Начисление</span><strong>${escapeHtml(salesMotivationRewardText(model))}</strong></div>
+                    <div><span class="summary-label">Период</span><strong>${escapeHtml(model.date_from || 'без начала')} — ${escapeHtml(model.date_to || 'без окончания')}</strong></div>
+                    <div><span class="summary-label">Фильтр</span><strong>${model.no_sales_days ? `${model.no_sales_days}+ дней без продаж` : 'ручной выбор'}</strong></div>
+                    <div><span class="summary-label">Фискализация</span><strong>${escapeHtml(salesMotivationFiscalizationText(model))}</strong></div>
+                </div>
+                <div class="payroll-days-container payroll-days-container--note-only">
+                    ${(model.products || []).slice(0, 80).map((item) => `<div class="muted-text">${escapeHtml(item.item_name || 'Товар')}${item.item_code ? ` · код ${escapeHtml(item.item_code)}` : ''}${item.category_name ? ` · ${escapeHtml(item.category_name)}` : ''}</div>`).join('') || '<div class="muted-text">Товары не указаны.</div>'}
+                    ${(model.products || []).length > 80 ? `<div class="muted-text">И ещё ${(model.products || []).length - 80} товаров.</div>` : ''}
+                </div>
+                <div class="expense-entry-actions">
+                    <button type="button" class="btn danger btn-inline" onclick="deleteSalesMotivation(${model.id})">Удалить модель</button>
+                </div>
+            </div>
+        </details>
+    `).join('');
+}
+
+async function loadSalesMotivations(expectedLocation = selectedLocation()) {
+    if (!isAdminRole() || isAllLocationsSelected()) {
+        payrollState.salesMotivations = [];
+        renderSalesMotivations();
+        return;
+    }
+    const location = expectedLocation || selectedLocation();
+    try {
+        const payload = await api(`/api/payroll/sales-motivations?location=${encodeURIComponent(location)}`);
+        if (selectedLocation() !== location || isAllLocationsSelected()) return;
+        payrollState.salesMotivations = payload.models || [];
+        renderSalesMotivations();
+    } catch (error) {
+        showScopedStatus('sales-motivations-status', error.message || 'Не удалось загрузить мотивации.', 'error');
+    }
+}
+
+function renderHotProducts(payload) {
+    const list = qs('hot-products-list');
+    if (!list) return;
+    const models = payload?.models || [];
+    if (!models.length) {
+        list.innerHTML = '<div class="muted-text">Активных горящих товаров по этой точке сейчас нет.</div>';
+        return;
+    }
+    list.innerHTML = models.map((model) => `
+        <details class="expense-entry-card expense-entry-card--accordion" open>
+            <summary class="expense-entry-toggle">
+                <div>
+                    <strong>${escapeHtml(model.name || 'Мотивация')}</strong>
+                    <div class="muted-text">${escapeHtml(salesMotivationRewardText(model))} · ${escapeHtml(salesMotivationFiscalizationText(model))} · товаров ${model.product_count || 0}</div>
+                </div>
+                <span class="btn secondary btn-inline expense-entry-toggle-text">Развернуть</span>
+            </summary>
+            <div class="expense-entry-accordion-body">
+                <div class="expense-entry-grid">
+                    ${(model.products || []).map((item) => `
+                        <article class="expense-entry-card">
+                            <div class="expense-entry-card-head"><div><strong>${escapeHtml(item.item_name || 'Товар')}</strong><div class="muted-text">${item.item_code ? `код ${escapeHtml(item.item_code)} · ` : ''}${item.category_name ? `${escapeHtml(item.category_name)} · ` : ''}остаток ${Number(item.current_stock_qty || 0).toLocaleString('ru-RU')} шт.${item.days_without_sales ? ` · без продаж ${item.days_without_sales}+ дней` : ''}</div></div></div>
+                        </article>
+                    `).join('') || '<div class="muted-text">Товары не указаны.</div>'}
+                </div>
+            </div>
+        </details>
+    `).join('');
+}
+
+async function loadHotProducts(expectedLocation = selectedLocation()) {
+    const card = qs('hot-products-card');
+    if (!card || isAllLocationsSelected()) {
+        renderHotProducts({ models: [] });
+        return;
+    }
+    const location = expectedLocation || selectedLocation();
+    try {
+        const payload = await api(`/api/payroll/sales-motivations/active-products?location=${encodeURIComponent(location)}`);
+        if (selectedLocation() !== location || isAllLocationsSelected()) return;
+        renderHotProducts(payload);
+    } catch (error) {
+        showScopedStatus('hot-products-status', error.message || 'Не удалось загрузить горящие товары.', 'error');
+    }
+}
+
+async function createSalesMotivation() {
+    if (!isAdminRole() || isAllLocationsSelected()) return;
+    const button = qs('create-sales-motivation-btn');
+    const products = [...payrollState.selectedMotivationProducts.values()];
+    const payload = {
+        location: selectedLocation(),
+        name: qs('sales-motivation-name')?.value?.trim() || '',
+        source_type: qs('sales-motivation-source')?.value || 'manual',
+        reward_type: qs('sales-motivation-reward-type')?.value || 'percent',
+        reward_value: Number(qs('sales-motivation-reward-value')?.value || 0),
+        no_sales_days: qs('sales-motivation-source')?.value === 'no_sales_days' ? Number(qs('sales-motivation-days')?.value || 0) : null,
+        include_fiscalized_sales: Boolean(qs('sales-motivation-include-fiscalized')?.checked ?? true),
+        date_from: qs('sales-motivation-date-from')?.value || null,
+        date_to: qs('sales-motivation-date-to')?.value || null,
+        is_active: Boolean(qs('sales-motivation-active')?.checked),
+        products,
+    };
+    if (!payload.name) {
+        showScopedStatus('create-sales-motivation-status', 'Введите название мотивации.', 'error');
+        return;
+    }
+    if (!payload.reward_value || payload.reward_value <= 0) {
+        showScopedStatus('create-sales-motivation-status', 'Введите значение начисления.', 'error');
+        return;
+    }
+    if (!products.length) {
+        showScopedStatus('create-sales-motivation-status', 'Выберите товары для мотивации.', 'error');
+        return;
+    }
+    showScopedStatus('create-sales-motivation-status', 'Сохраняем мотивацию...', 'loading');
+    setButtonLoading(button, true, 'Сохраняем...');
+    try {
+        const result = await api('/api/payroll/sales-motivations', { method: 'POST', body: JSON.stringify(payload) });
+        payrollState.salesMotivations = result.models || [];
+        payrollState.selectedMotivationProducts.clear();
+        qs('sales-motivation-name').value = '';
+        qs('sales-motivation-reward-value').value = '';
+        if (qs('sales-motivation-include-fiscalized')) qs('sales-motivation-include-fiscalized').checked = true;
+        if (qs('sales-motivation-product-query')) qs('sales-motivation-product-query').value = '';
+        renderSalesMotivationProductCatalog({ categories: [] });
+        renderSalesMotivations();
+        updateMotivationSelectedMeta();
+        await loadHotProducts();
+        await loadSummary({ silent: true });
+        await loadAudit();
+        showScopedStatus('create-sales-motivation-status', 'Мотивация сохранена.', 'success');
+    } catch (error) {
+        showScopedStatus('create-sales-motivation-status', error.message || 'Не удалось сохранить мотивацию.', 'error');
+    } finally {
+        setButtonLoading(button, false);
+    }
+}
+
+window.deleteSalesMotivation = async function deleteSalesMotivation(id) {
+    if (!confirm('Удалить эту модель мотивации? Закрытые смены сохранят уже сделанные снимки начислений.')) return;
+    try {
+        const result = await api(`/api/payroll/sales-motivations/${id}`, { method: 'DELETE' });
+        payrollState.salesMotivations = result.models || [];
+        renderSalesMotivations();
+        await loadHotProducts();
+        await loadSummary({ silent: true });
+        await loadAudit();
+        showStatus('Мотивация удалена.', 'success');
+    } catch (error) {
+        showStatus(error.message || 'Не удалось удалить мотивацию.', 'error');
+    }
+};
+
+
 function toggleExpenseTemplates() {
     const list = qs('expense-template-tbody');
     const button = qs('expense-templates-toggle-btn');
@@ -2452,6 +2764,22 @@ qs('create-expense-template-btn')?.addEventListener('click', createExpenseTempla
 qs('create-manual-expense-btn')?.addEventListener('click', createManualExpense);
 qs('create-employee-bonus-btn')?.addEventListener('click', createEmployeeBonus);
 qs('create-employee-penalty-btn')?.addEventListener('click', createEmployeePenalty);
+qs('sales-motivation-load-products-btn')?.addEventListener('click', loadSalesMotivationProductCatalog);
+qs('sales-motivation-clear-products-btn')?.addEventListener('click', () => {
+    payrollState.selectedMotivationProducts.clear();
+    renderSalesMotivationProductCatalog({ categories: [] });
+    updateMotivationSelectedMeta();
+});
+qs('create-sales-motivation-btn')?.addEventListener('click', createSalesMotivation);
+qs('sales-motivation-product-query')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+        event.preventDefault();
+        loadSalesMotivationProductCatalog();
+    }
+});
+qs('sales-motivation-source')?.addEventListener('change', () => {
+    updateMotivationSelectedMeta();
+});
 qs('payroll-category-search')?.addEventListener('input', applyPayrollCategoryFiltersFromUi);
 qs('payroll-category-view')?.addEventListener('change', applyPayrollCategoryFiltersFromUi);
 qs('payroll-category-sort')?.addEventListener('change', applyPayrollCategoryFiltersFromUi);

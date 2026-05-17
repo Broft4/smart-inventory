@@ -6,6 +6,7 @@ const shiftsState = {
     shiftAssignees: [],
     shiftDays: [],
     payrollDays: [],
+    hotProducts: [],
     filterMode: 'month',
     selectedDate: '',
     payrollDaysLoaded: false,
@@ -48,6 +49,16 @@ function escapeHtml(value) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
+}
+
+function salesMotivationRewardText(model) {
+    const value = Number(model?.reward_value || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 });
+    return model?.reward_type === 'fixed' ? `${value} ₽ за позицию` : `${value}% от суммы продаж`;
+}
+
+function salesMotivationFiscalizationText(model) {
+    if (!model || model.include_fiscalized_sales !== false) return 'с фискализацией и без неё';
+    return 'только без фискализации';
 }
 
 function formatLocalDateIso(value) {
@@ -354,6 +365,63 @@ async function ensurePayrollDaysLoaded(force = false, options = {}) {
     }
 }
 
+
+function renderShiftHotProducts(payload = null) {
+    const list = qs('shift-hot-products-list');
+    if (!list) return;
+    const models = payload?.models || shiftsState.hotProducts || [];
+    if (!models.length) {
+        list.innerHTML = '<div class="muted-text">Активных горящих товаров по этой точке сейчас нет.</div>';
+        return;
+    }
+    list.innerHTML = models.map((model) => `
+        <details class="expense-entry-card expense-entry-card--accordion">
+            <summary class="expense-entry-toggle">
+                <div>
+                    <strong>${escapeHtml(model.name || 'Мотивация')}</strong>
+                    <div class="muted-text">${escapeHtml(salesMotivationRewardText(model))} · ${escapeHtml(salesMotivationFiscalizationText(model))} · товаров ${model.product_count || 0}</div>
+                </div>
+                <span class="btn secondary btn-inline expense-entry-toggle-text">Развернуть</span>
+            </summary>
+            <div class="expense-entry-accordion-body">
+                <div class="expense-entry-grid">
+                    ${(model.products || []).map((item) => `
+                        <article class="expense-entry-card">
+                            <div class="expense-entry-card-head">
+                                <div>
+                                    <strong>${escapeHtml(item.item_name || 'Товар')}</strong>
+                                    <div class="muted-text">${item.item_code ? `код ${escapeHtml(item.item_code)} · ` : ''}${item.category_name ? `${escapeHtml(item.category_name)} · ` : ''}остаток ${Number(item.current_stock_qty || 0).toLocaleString('ru-RU')} шт.${item.days_without_sales ? ` · без продаж ${item.days_without_sales}+ дней` : ''}</div>
+                                </div>
+                            </div>
+                        </article>
+                    `).join('') || '<div class="muted-text">Товары не указаны.</div>'}
+                </div>
+            </div>
+        </details>
+    `).join('');
+}
+
+async function loadShiftHotProducts() {
+    const location = selectedLocation();
+    if (!location) {
+        shiftsState.hotProducts = [];
+        renderShiftHotProducts({ models: [] });
+        return;
+    }
+    try {
+        showScopedStatus('shift-hot-products-status', 'Загружаем горящие товары...', 'loading');
+        const payload = await api(`/api/payroll/sales-motivations/active-products?location=${encodeURIComponent(location)}`);
+        if (selectedLocation() !== location) return;
+        shiftsState.hotProducts = payload.models || [];
+        renderShiftHotProducts(payload);
+        hideScopedStatus('shift-hot-products-status');
+    } catch (error) {
+        shiftsState.hotProducts = [];
+        renderShiftHotProducts({ models: [] });
+        showScopedStatus('shift-hot-products-status', error.message || 'Не удалось загрузить горящие товары.', 'error');
+    }
+}
+
 function renderPayrollDays() {
     const container = qs('shift-payroll-days-container');
     if (!container) return;
@@ -383,6 +451,7 @@ function renderPayrollDays() {
                 <div><span class="summary-label">Выход</span><strong>${formatMoney(day.exit_amount)}</strong></div>
                 <div><span class="summary-label">Бонус к выходу</span><strong>${formatMoney(day.bonus_amount)}</strong></div>
                 <div><span class="summary-label">Бонус по категориям</span><strong>${formatMoney(day.category_earnings_total)}</strong></div>
+                <div><span class="summary-label">Мотивация</span><strong>${formatMoney(day.sales_motivation_amount || 0)}</strong></div>
                 <div><span class="summary-label">Итого</span><strong>${formatMoney(day.gross_salary_amount)}</strong></div>
             </div>
             ${(day.id && !day.is_closed) ? `
@@ -580,6 +649,7 @@ function renderShiftCalendar() {
                 `<div class="employee-shift-line"><span>Выход</span><strong>${formatMoney(shift.exit_amount || 0)}</strong></div>`,
                 `<div class="employee-shift-line"><span>Бонус</span><strong>${formatMoney(shift.bonus_amount || 0)}</strong></div>`,
                 `<div class="employee-shift-line"><span>Категории</span><strong>${formatMoney(shift.category_earnings_total || 0)}</strong></div>`,
+                `<div class="employee-shift-line"><span>Мотивация</span><strong>${formatMoney(shift.sales_motivation_amount || 0)}</strong></div>`,
             ];
             if (shift.is_closed || day.date <= today) {
                 lines.push(`<div class="employee-shift-line total"><span>${shift.is_closed ? 'Итог' : 'Промежуточно'}</span><strong>${formatMoney(shift.gross_salary_amount || 0)}</strong></div>`);
@@ -682,6 +752,7 @@ async function refreshPageData(showSuccess = true, options = {}) {
             shiftsState.payrollDays = [];
         }
         await loadSetupForLocation();
+        await loadShiftHotProducts();
         await loadShiftCalendar();
         if (isPayrollSectionOpen()) {
             await ensurePayrollDaysLoaded(forcePayrollReload, { showLoading: true });

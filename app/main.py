@@ -76,6 +76,8 @@ from app.payroll import (
     ManualMonthlyExpenseCreateRequest,
     MonthlyExpenseEntryUpdateRequest,
     PayrollSettingsUpdateRequest,
+    SalesMotivationCreateRequest,
+    SalesMotivationUpdateRequest,
     WorkShiftUpsertRequest,
     close_shift,
     bootstrap_payroll_schema,
@@ -83,11 +85,13 @@ from app.payroll import (
     create_employee_penalty,
     create_expense_template,
     create_manual_monthly_expense,
+    create_sales_motivation_model,
     deactivate_expense_template,
     delete_employee_bonus,
     delete_employee_penalty,
     delete_expense_template,
     delete_monthly_expense_entry,
+    delete_sales_motivation_model,
     delete_work_shift,
     export_employee_payroll_xlsx,
     get_employee_payroll_summary,
@@ -95,6 +99,8 @@ from app.payroll import (
     get_location_shift_setup,
     get_manager_payroll_summary,
     get_payroll_category_catalog,
+    get_active_sales_motivation_products,
+    get_sales_motivation_product_catalog,
     get_payroll_recalc_status,
     get_user_accessible_locations as get_payroll_accessible_locations,
     list_employee_bonuses,
@@ -102,6 +108,7 @@ from app.payroll import (
     list_expense_templates,
     list_monthly_expenses,
     list_payroll_audit_logs,
+    list_sales_motivation_models,
     list_work_shift_day_summary,
     list_work_shifts,
     update_employee_bonus,
@@ -109,6 +116,7 @@ from app.payroll import (
     update_expense_template,
     update_location_payroll_settings,
     update_monthly_expense_entry,
+    update_sales_motivation_model,
     upsert_work_shift,
     resume_pending_payroll_recalc_jobs,
 )
@@ -848,6 +856,36 @@ async def api_payroll_employee_summary(location: str, date_from: date, date_to: 
 @app.get('/api/payroll/manager-summary')
 async def api_payroll_manager_summary(location: str, date_from: date, date_to: date, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
     return await get_manager_payroll_summary(location, date_from, date_to, db, user)
+
+
+@app.get('/api/payroll/sales-motivations')
+async def api_payroll_sales_motivations(location: str, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await list_sales_motivation_models(location, db, user)
+
+
+@app.get('/api/payroll/sales-motivations/active-products')
+async def api_payroll_sales_motivations_active_products(location: str, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
+    return await get_active_sales_motivation_products(location, db, user)
+
+
+@app.get('/api/payroll/sales-motivations/product-catalog')
+async def api_payroll_sales_motivation_product_catalog(location: str, no_sales_days: int | None = None, query: str | None = None, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await get_sales_motivation_product_catalog(location, db, user, no_sales_days=no_sales_days, query=query)
+
+
+@app.post('/api/payroll/sales-motivations')
+async def api_payroll_sales_motivation_create(payload: SalesMotivationCreateRequest, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await create_sales_motivation_model(payload, db, user)
+
+
+@app.put('/api/payroll/sales-motivations/{model_id}')
+async def api_payroll_sales_motivation_update(model_id: int, payload: SalesMotivationUpdateRequest, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await update_sales_motivation_model(model_id, payload, db, user)
+
+
+@app.delete('/api/payroll/sales-motivations/{model_id}')
+async def api_payroll_sales_motivation_delete(model_id: int, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await delete_sales_motivation_model(model_id, db, user)
 
 
 @app.get('/api/payroll/expense-templates')
