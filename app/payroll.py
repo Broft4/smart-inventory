@@ -392,13 +392,16 @@ class ManualMonthlyExpenseCreateRequest(BaseModel):
 
 
 class SalesMotivationProductInput(BaseModel):
-    item_id: str = Field(..., min_length=1, max_length=120)
-    item_name: str = Field(..., min_length=1, max_length=255)
-    item_code: str | None = Field(default=None, max_length=120)
-    category_id: str | None = Field(default=None, max_length=120)
-    category_name: str | None = Field(default=None, max_length=255)
-    subcategory_id: str | None = Field(default=None, max_length=120)
-    subcategory_name: str | None = Field(default=None, max_length=255)
+    # В каталоге МойСклад ID категорий/подкатегорий иногда приходят как fallback по названию
+    # или как длинные href. В БД значения всё равно безопасно обрезаются при сохранении,
+    # поэтому здесь не блокируем создание модели валидацией Pydantic на 120 символах.
+    item_id: str = Field(..., min_length=1, max_length=1024)
+    item_name: str = Field(..., min_length=1, max_length=1024)
+    item_code: str | None = Field(default=None, max_length=1024)
+    category_id: str | None = Field(default=None, max_length=1024)
+    category_name: str | None = Field(default=None, max_length=1024)
+    subcategory_id: str | None = Field(default=None, max_length=1024)
+    subcategory_name: str | None = Field(default=None, max_length=1024)
     current_stock_qty: float = 0.0
     last_sale_date: date | None = None
     days_without_sales: int | None = None
@@ -3774,6 +3777,58 @@ def _extract_position_item_identity(position: dict[str, Any]) -> tuple[str | Non
     return item_id, item_name, item_code
 
 
+def _extract_profit_report_item_id(row: dict[str, Any]) -> str | None:
+    for key in ('assortment', 'product', 'good', 'variant', 'productVariant', 'thing'):
+        nested = row.get(key)
+        if isinstance(nested, dict):
+            nested_id = _extract_id(nested)
+            if nested_id:
+                return nested_id
+    for key in ('assortmentId', 'productId', 'goodId', 'variantId', 'itemId'):
+        raw_id = str(row.get(key) or '').strip()
+        if raw_id:
+            return raw_id
+    return _extract_id(row)
+
+
+def _profit_report_row_has_sale(row: dict[str, Any]) -> bool:
+    quantity = 0.0
+    for key in ('sellQuantity', 'sellQty', 'salesQuantity', 'quantity'):
+        quantity = max(quantity, _quantity(row.get(key)))
+    if quantity > 0:
+        return True
+    return _extract_profit_report_amount(row, 'sellSum', 'salesSum', 'saleSum') > 0
+
+
+async def _load_last_sale_dates_from_profit_report(
+    point: LocationPoint,
+    item_ids: set[str],
+    date_from: date,
+    date_to: date,
+) -> dict[str, date]:
+    store_id = _point_store_id(point)
+    if not store_id or not _ms_client_enabled(token=_point_ms_token(point), location=point.name):
+        return {}
+    rows = await ms_client.get_profit_report_by_product(
+        date_from,
+        date_to,
+        token=_point_ms_token(point),
+        location=point.name,
+        store_id=store_id,
+    )
+    output: dict[str, date] = {}
+    for row in rows or []:
+        if not isinstance(row, dict) or not _profit_report_row_has_sale(row):
+            continue
+        item_id = _extract_profit_report_item_id(row)
+        if item_id and item_id in item_ids:
+            # Отчет прибыльности за период быстрее и стабильнее, чем загрузка всех чеков
+            # с позициями. Для фильтра нам важно само наличие продажи в окне N дней;
+            # точная дата продажи для отсеянных товаров в интерфейсе не используется.
+            output[item_id] = date_to
+    return output
+
+
 async def _load_last_sale_dates_for_products(
     point: LocationPoint,
     item_ids: set[str],
@@ -3782,16 +3837,44 @@ async def _load_last_sale_dates_for_products(
 ) -> dict[str, date]:
     if not item_ids or date_to < date_from:
         return {}
-    rows = await _fetch_document_rows(
-        'retaildemand',
-        date_from,
-        date_to,
-        point,
-        expand='store,retailStore,retailShift,retailShift.store,retailShift.retailStore',
-        include_positions=True,
-        positions_expand='assortment,assortment.productFolder',
-        positions_fields='stock',
-    )
+
+    try:
+        report_dates = await _load_last_sale_dates_from_profit_report(point, item_ids, date_from, date_to)
+        if report_dates:
+            return report_dates
+        # Если отчет вернул пустой список, это нормальная ситуация: продаж в периоде могло не быть.
+        # Для точек без ms_store_id или при недоступном отчете ниже останется legacy-проверка по документам.
+        if _point_store_id(point):
+            return {}
+    except Exception:
+        logger.warning(
+            'Не удалось получить проданные товары из отчета прибыльности МоегоСклада для точки %s за %s..%s. Используем документы продаж.',
+            point.name,
+            date_from.isoformat(),
+            date_to.isoformat(),
+            exc_info=True,
+        )
+
+    try:
+        rows = await _fetch_document_rows(
+            'retaildemand',
+            date_from,
+            date_to,
+            point,
+            expand='store,retailStore,retailShift,retailShift.store,retailShift.retailStore',
+            include_positions=True,
+            positions_expand='assortment,assortment.productFolder',
+            positions_fields='stock',
+        )
+    except Exception:
+        logger.exception(
+            'Не удалось проверить продажи товаров для мотивации точки %s за %s..%s. Возвращаем каталог без падения сервера.',
+            point.name,
+            date_from.isoformat(),
+            date_to.isoformat(),
+        )
+        return {}
+
     output: dict[str, date] = {}
     for doc in rows:
         if not _doc_matches_point(doc, point):

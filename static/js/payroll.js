@@ -155,11 +155,15 @@ function formatApiErrorMessage(payload) {
 
     const fromValidationItem = (item) => {
         const loc = Array.isArray(item?.loc) ? item.loc.map(String).join('.') : '';
+        const msg = typeof item?.msg === 'string' ? item.msg.trim() : '';
+        if (loc.includes('products') && msg.toLowerCase().includes('at most')) {
+            return 'В выбранных товарах есть слишком длинное служебное поле. Обновите страницу и попробуйте сохранить ещё раз.';
+        }
         if (loc.includes('name')) {
             return 'Введите название.';
         }
-        if (typeof item?.msg === 'string' && item.msg.trim()) {
-            return item.msg.trim();
+        if (msg) {
+            return msg;
         }
         return '';
     };
@@ -2421,6 +2425,26 @@ function updateMotivationSelectedMeta() {
     if (meta) meta.textContent = `Выбрано товаров: ${payrollState.selectedMotivationProducts.size}`;
 }
 
+function trimMotivationPayloadText(value, maxLength = 1024) {
+    const text = String(value ?? '').trim();
+    return text ? text.slice(0, maxLength) : null;
+}
+
+function normalizeMotivationProductForPayload(product) {
+    return {
+        item_id: trimMotivationPayloadText(product?.item_id, 1024) || '',
+        item_name: trimMotivationPayloadText(product?.item_name, 1024) || trimMotivationPayloadText(product?.name, 1024) || 'Товар',
+        item_code: trimMotivationPayloadText(product?.item_code, 1024),
+        category_id: trimMotivationPayloadText(product?.category_id, 1024),
+        category_name: trimMotivationPayloadText(product?.category_name, 1024),
+        subcategory_id: trimMotivationPayloadText(product?.subcategory_id, 1024),
+        subcategory_name: trimMotivationPayloadText(product?.subcategory_name, 1024),
+        current_stock_qty: Number(product?.current_stock_qty || 0),
+        last_sale_date: product?.last_sale_date || null,
+        days_without_sales: product?.days_without_sales == null ? null : Number(product.days_without_sales),
+    };
+}
+
 function flattenMotivationCatalogProducts(payload) {
     const items = [];
     (payload?.categories || []).forEach((category) => {
@@ -2433,7 +2457,7 @@ function flattenMotivationCatalogProducts(payload) {
     return items;
 }
 
-function toggleMotivationProductSelection(product, checked) {
+function toggleMotivationProductSelection(product, checked, options = {}) {
     const id = String(product?.item_id || '').trim();
     if (!id) return;
     if (checked) {
@@ -2441,7 +2465,41 @@ function toggleMotivationProductSelection(product, checked) {
     } else {
         payrollState.selectedMotivationProducts.delete(id);
     }
+    if (options.updateMeta !== false) updateMotivationSelectedMeta();
+    if (options.sync !== false) syncMotivationCatalogSelectionStates();
+}
+
+function syncMotivationCatalogSelectionStates(container = qs('sales-motivation-product-catalog')) {
+    if (!container) return;
+    container.querySelectorAll('[data-motivation-product-id]').forEach((input) => {
+        input.checked = payrollState.selectedMotivationProducts.has(String(input.dataset.motivationProductId || ''));
+    });
+    container.querySelectorAll('[data-motivation-subcategory-card]').forEach((card) => {
+        const productInputs = Array.from(card.querySelectorAll('[data-motivation-product-id]'));
+        const selectInput = card.querySelector('[data-motivation-select-subcategory]');
+        if (!selectInput) return;
+        const selectedCount = productInputs.filter((input) => input.checked).length;
+        selectInput.checked = productInputs.length > 0 && selectedCount === productInputs.length;
+        selectInput.indeterminate = selectedCount > 0 && selectedCount < productInputs.length;
+    });
+    container.querySelectorAll('[data-motivation-category-card]').forEach((card) => {
+        const productInputs = Array.from(card.querySelectorAll('[data-motivation-product-id]'));
+        const selectInput = card.querySelector('[data-motivation-select-category]');
+        if (!selectInput) return;
+        const selectedCount = productInputs.filter((input) => input.checked).length;
+        selectInput.checked = productInputs.length > 0 && selectedCount === productInputs.length;
+        selectInput.indeterminate = selectedCount > 0 && selectedCount < productInputs.length;
+    });
+}
+
+function setMotivationProductsFromInputs(productInputs, checked, productMap) {
+    productInputs.forEach((input) => {
+        const product = productMap.get(String(input.dataset.motivationProductId || ''));
+        toggleMotivationProductSelection(product, checked, { updateMeta: false, sync: false });
+        input.checked = checked;
+    });
     updateMotivationSelectedMeta();
+    syncMotivationCatalogSelectionStates();
 }
 
 function renderSalesMotivationProductCatalog(payload) {
@@ -2450,43 +2508,80 @@ function renderSalesMotivationProductCatalog(payload) {
     const categories = Array.isArray(payload?.categories) ? payload.categories : [];
     if (!categories.length) {
         container.innerHTML = '<div class="muted-text">Товары не найдены. Попробуйте изменить фильтр или поиск.</div>';
+        updateMotivationSelectedMeta();
         return;
     }
-    container.innerHTML = categories.map((category) => `
-        <details class="payroll-day-card payroll-day-card--accordion">
+    container.innerHTML = categories.map((category, categoryIndex) => {
+        const subcategories = Array.isArray(category.subcategories) ? category.subcategories : [];
+        const categoryProductCount = subcategories.reduce((sum, sub) => sum + (sub.items || []).length, 0);
+        return `
+        <details class="payroll-day-card payroll-day-card--accordion" data-motivation-category-card="${categoryIndex}">
             <summary class="payroll-day-toggle">
                 <div>
                     <strong>${escapeHtml(category.name || 'Категория')}</strong>
-                    <div class="muted-text">Товаров: ${(category.subcategories || []).reduce((sum, sub) => sum + (sub.items || []).length, 0)}</div>
+                    <div class="muted-text">Подкатегорий: ${subcategories.length} · товаров: ${categoryProductCount}</div>
                 </div>
+                <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline" onclick="event.stopPropagation()">
+                    <input type="checkbox" data-motivation-select-category> Вся категория
+                </label>
                 <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
             </summary>
             <div class="payroll-day-accordion-body">
-                ${(category.subcategories || []).map((subcategory) => `
-                    <div class="expense-section">
-                        <div class="expense-section-head"><div><h3>${escapeHtml(subcategory.name || 'Без подкатегории')}</h3></div></div>
-                        <div class="expense-entry-grid">
-                            ${(subcategory.items || []).map((item) => {
-                                const selected = payrollState.selectedMotivationProducts.has(String(item.item_id || ''));
-                                return `
-                                <label class="expense-entry-card checkbox-like expense-checkbox-card">
-                                    <input type="checkbox" data-motivation-product-id="${escapeHtml(item.item_id || '')}" ${selected ? 'checked' : ''}>
-                                    <span>
-                                        <strong>${escapeHtml(item.item_name || 'Товар')}</strong>
-                                        <span class="muted-text">${item.item_code ? `код ${escapeHtml(item.item_code)} · ` : ''}остаток ${Number(item.current_stock_qty || 0).toLocaleString('ru-RU')} шт.${item.days_without_sales ? ` · без продаж ${item.days_without_sales}+ дней` : ''}</span>
-                                    </span>
-                                </label>`;
-                            }).join('')}
+                ${subcategories.map((subcategory, subcategoryIndex) => {
+                    const items = Array.isArray(subcategory.items) ? subcategory.items : [];
+                    return `
+                    <details class="payroll-day-card payroll-day-card--accordion" data-motivation-subcategory-card="${categoryIndex}-${subcategoryIndex}">
+                        <summary class="payroll-day-toggle">
+                            <div>
+                                <strong>${escapeHtml(subcategory.name || 'Без подкатегории')}</strong>
+                                <div class="muted-text">Товаров: ${items.length}</div>
+                            </div>
+                            <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline" onclick="event.stopPropagation()">
+                                <input type="checkbox" data-motivation-select-subcategory> Вся подкатегория
+                            </label>
+                            <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
+                        </summary>
+                        <div class="payroll-day-accordion-body">
+                            <div class="expense-entry-grid">
+                                ${items.map((item) => {
+                                    const selected = payrollState.selectedMotivationProducts.has(String(item.item_id || ''));
+                                    return `
+                                    <label class="expense-entry-card checkbox-like expense-checkbox-card">
+                                        <input type="checkbox" data-motivation-product-id="${escapeHtml(item.item_id || '')}" ${selected ? 'checked' : ''}>
+                                        <span>
+                                            <strong>${escapeHtml(item.item_name || 'Товар')}</strong>
+                                            <span class="muted-text">${item.item_code ? `код ${escapeHtml(item.item_code)} · ` : ''}остаток ${Number(item.current_stock_qty || 0).toLocaleString('ru-RU')} шт.${item.days_without_sales ? ` · без продаж ${item.days_without_sales}+ дней` : ''}</span>
+                                        </span>
+                                    </label>`;
+                                }).join('')}
+                            </div>
                         </div>
-                    </div>
-                `).join('')}
+                    </details>`;
+                }).join('')}
             </div>
-        </details>
-    `).join('');
+        </details>`;
+    }).join('');
     const productMap = new Map(flattenMotivationCatalogProducts(payload).map(item => [String(item.item_id || ''), item]));
     container.querySelectorAll('[data-motivation-product-id]').forEach((input) => {
         input.addEventListener('change', () => toggleMotivationProductSelection(productMap.get(input.dataset.motivationProductId), input.checked));
     });
+    container.querySelectorAll('[data-motivation-select-subcategory]').forEach((input) => {
+        input.addEventListener('click', (event) => event.stopPropagation());
+        input.addEventListener('change', () => {
+            const card = input.closest('[data-motivation-subcategory-card]');
+            const productInputs = Array.from(card?.querySelectorAll('[data-motivation-product-id]') || []);
+            setMotivationProductsFromInputs(productInputs, input.checked, productMap);
+        });
+    });
+    container.querySelectorAll('[data-motivation-select-category]').forEach((input) => {
+        input.addEventListener('click', (event) => event.stopPropagation());
+        input.addEventListener('change', () => {
+            const card = input.closest('[data-motivation-category-card]');
+            const productInputs = Array.from(card?.querySelectorAll('[data-motivation-product-id]') || []);
+            setMotivationProductsFromInputs(productInputs, input.checked, productMap);
+        });
+    });
+    syncMotivationCatalogSelectionStates(container);
     updateMotivationSelectedMeta();
 }
 
@@ -2614,7 +2709,7 @@ async function loadHotProducts(expectedLocation = selectedLocation()) {
 async function createSalesMotivation() {
     if (!isAdminRole() || isAllLocationsSelected()) return;
     const button = qs('create-sales-motivation-btn');
-    const products = [...payrollState.selectedMotivationProducts.values()];
+    const products = [...payrollState.selectedMotivationProducts.values()].map(normalizeMotivationProductForPayload);
     const payload = {
         location: selectedLocation(),
         name: qs('sales-motivation-name')?.value?.trim() || '',
