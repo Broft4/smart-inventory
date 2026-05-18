@@ -77,6 +77,7 @@ from app.payroll import (
     MonthlyExpenseEntryUpdateRequest,
     PayrollSettingsUpdateRequest,
     SalesMotivationCreateRequest,
+    SalesMotivationDailySnapshotRefreshRequest,
     SalesMotivationUpdateRequest,
     WorkShiftUpsertRequest,
     close_shift,
@@ -101,6 +102,7 @@ from app.payroll import (
     get_payroll_category_catalog,
     get_active_sales_motivation_products,
     get_sales_motivation_product_catalog,
+    list_sales_motivation_daily_snapshots,
     get_payroll_recalc_status,
     get_user_accessible_locations as get_payroll_accessible_locations,
     list_employee_bonuses,
@@ -118,6 +120,7 @@ from app.payroll import (
     update_monthly_expense_entry,
     update_sales_motivation_model,
     upsert_work_shift,
+    refresh_sales_motivation_daily_snapshots,
     resume_pending_payroll_recalc_jobs,
 )
 from app.schemas import (
@@ -871,6 +874,17 @@ async def api_payroll_sales_motivations_active_products(location: str, user: Use
 @app.get('/api/payroll/sales-motivations/product-catalog')
 async def api_payroll_sales_motivation_product_catalog(location: str, no_sales_days: int | None = None, query: str | None = None, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
     return await get_sales_motivation_product_catalog(location, db, user, no_sales_days=no_sales_days, query=query)
+
+
+@app.get('/api/payroll/sales-motivations/daily-snapshots')
+async def api_payroll_sales_motivation_daily_snapshots(location: str, date_from: date, date_to: date, model_id: int | None = None, sold_only: bool | None = None, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await list_sales_motivation_daily_snapshots(location, date_from, date_to, db, user, model_id=model_id, sold_only=sold_only)
+
+
+@app.post('/api/payroll/sales-motivations/daily-snapshots/refresh')
+async def api_payroll_sales_motivation_daily_snapshots_refresh(payload: SalesMotivationDailySnapshotRefreshRequest, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    date_to = payload.date_to or payload.date_from
+    return await refresh_sales_motivation_daily_snapshots(payload.date_from, date_to, db, location=payload.location, current_user=user)
 
 
 @app.post('/api/payroll/sales-motivations')

@@ -35,6 +35,7 @@ from app.models import (
     PayrollSettingsVersion,
     SalesMotivationModel,
     SalesMotivationProduct,
+    SalesMotivationDailySnapshot,
     ShiftSalesMotivationSnapshot,
     Report,
     ReportTargetSnapshot,
@@ -432,6 +433,12 @@ class SalesMotivationUpdateRequest(BaseModel):
     date_to: date | None = None
     is_active: bool = True
     products: list[SalesMotivationProductInput] = Field(default_factory=list)
+
+
+class SalesMotivationDailySnapshotRefreshRequest(BaseModel):
+    location: str
+    date_from: date
+    date_to: date | None = None
 
 class EmployeeBonusCreateRequest(BaseModel):
     location: str
@@ -3793,22 +3800,91 @@ def _extract_profit_report_item_id(row: dict[str, Any]) -> str | None:
 
 def _profit_report_row_has_sale(row: dict[str, Any]) -> bool:
     quantity = 0.0
-    for key in ('sellQuantity', 'sellQty', 'salesQuantity', 'quantity'):
+    for key in ('sellQuantity', 'sellQty', 'salesQuantity', 'quantity', 'salesCount', 'soldQuantity'):
         quantity = max(quantity, _quantity(row.get(key)))
     if quantity > 0:
         return True
-    return _extract_profit_report_amount(row, 'sellSum', 'salesSum', 'saleSum') > 0
+    return _extract_profit_report_amount(row, 'sellSum', 'salesSum', 'saleSum', 'salesAmount', 'revenue') > 0
+
+
+def _sales_motivation_identity_key(kind: str, value: Any) -> str | None:
+    text = _normalize_category_name_key(value)
+    if not text:
+        return None
+    return f'{kind}:{text}'
+
+
+def _sales_motivation_product_identity_keys(product: dict[str, Any]) -> set[str]:
+    keys: set[str] = set()
+    for kind, value in (
+        ('id', product.get('item_id')),
+        ('code', product.get('item_code')),
+        ('name', product.get('item_name')),
+    ):
+        key = _sales_motivation_identity_key(kind, value)
+        if key:
+            keys.add(key)
+    return keys
+
+
+def _sales_motivation_profit_row_identity_keys(row: dict[str, Any]) -> set[str]:
+    keys: set[str] = set()
+
+    def add(kind: str, value: Any) -> None:
+        key = _sales_motivation_identity_key(kind, value)
+        if key:
+            keys.add(key)
+
+    nested_keys = ('assortment', 'product', 'good', 'variant', 'productVariant', 'thing')
+    for nested_key in nested_keys:
+        nested = row.get(nested_key)
+        if not isinstance(nested, dict):
+            continue
+        add('id', _extract_id(nested))
+        for field in ('name', 'code', 'article', 'externalCode'):
+            add('code' if field in ('code', 'article', 'externalCode') else 'name', nested.get(field))
+
+    add('id', _extract_profit_report_item_id(row))
+    for field in ('assortmentId', 'productId', 'goodId', 'variantId', 'itemId', 'id'):
+        add('id', row.get(field))
+    for field in ('code', 'article', 'externalCode', 'assortmentCode', 'productCode', 'goodCode', 'variantCode'):
+        add('code', row.get(field))
+    for field in ('name', 'assortmentName', 'productName', 'goodName', 'variantName'):
+        add('name', row.get(field))
+    return keys
+
+
+def _build_sales_motivation_product_identity_index(products: list[dict[str, Any]]) -> dict[str, set[str]]:
+    index: dict[str, set[str]] = defaultdict(set)
+    for product in products:
+        item_id = str(product.get('item_id') or '').strip()
+        if not item_id:
+            continue
+        for key in _sales_motivation_product_identity_keys(product):
+            index[key].add(item_id)
+    return index
+
+
+def _resolve_sold_product_ids_from_identity_keys(
+    sold_identity_keys: set[str],
+    product_identity_index: dict[str, set[str]],
+) -> set[str]:
+    sold_item_ids: set[str] = set()
+    for key in sold_identity_keys:
+        sold_item_ids.update(product_identity_index.get(key, set()))
+    return sold_item_ids
 
 
 async def _load_last_sale_dates_from_profit_report(
     point: LocationPoint,
-    item_ids: set[str],
+    products: list[dict[str, Any]],
+    product_identity_index: dict[str, set[str]],
     date_from: date,
     date_to: date,
-) -> dict[str, date]:
+) -> tuple[dict[str, date], bool]:
     store_id = _point_store_id(point)
     if not store_id or not _ms_client_enabled(token=_point_ms_token(point), location=point.name):
-        return {}
+        return {}, False
     rows = await ms_client.get_profit_report_by_product(
         date_from,
         date_to,
@@ -3816,36 +3892,52 @@ async def _load_last_sale_dates_from_profit_report(
         location=point.name,
         store_id=store_id,
     )
+
     output: dict[str, date] = {}
+    had_report_rows = False
     for row in rows or []:
         if not isinstance(row, dict) or not _profit_report_row_has_sale(row):
             continue
-        item_id = _extract_profit_report_item_id(row)
-        if item_id and item_id in item_ids:
+        had_report_rows = True
+        sold_ids = _resolve_sold_product_ids_from_identity_keys(
+            _sales_motivation_profit_row_identity_keys(row),
+            product_identity_index,
+        )
+        for item_id in sold_ids:
             # Отчет прибыльности за период быстрее и стабильнее, чем загрузка всех чеков
             # с позициями. Для фильтра нам важно само наличие продажи в окне N дней;
             # точная дата продажи для отсеянных товаров в интерфейсе не используется.
             output[item_id] = date_to
-    return output
+
+    # True означает, что отчет был успешно получен. Даже если продаж в окне нет,
+    # это корректный ответ, а не причина падать или отдавать ошибку пользователю.
+    return output, True if rows is not None else had_report_rows
 
 
 async def _load_last_sale_dates_for_products(
     point: LocationPoint,
-    item_ids: set[str],
+    products: list[dict[str, Any]],
     date_from: date,
     date_to: date,
 ) -> dict[str, date]:
-    if not item_ids or date_to < date_from:
+    if not products or date_to < date_from:
         return {}
 
+    product_identity_index = _build_sales_motivation_product_identity_index(products)
+
     try:
-        report_dates = await _load_last_sale_dates_from_profit_report(point, item_ids, date_from, date_to)
+        report_dates, _report_succeeded = await _load_last_sale_dates_from_profit_report(
+            point,
+            products,
+            product_identity_index,
+            date_from,
+            date_to,
+        )
         if report_dates:
             return report_dates
-        # Если отчет вернул пустой список, это нормальная ситуация: продаж в периоде могло не быть.
-        # Для точек без ms_store_id или при недоступном отчете ниже останется legacy-проверка по документам.
-        if _point_store_id(point):
-            return {}
+        # Если отчет вернул пусто или не смог сопоставить строки с товарами каталога,
+        # проверяем сами документы продаж с позициями. Это медленнее, но важно для
+        # корректного фильтра “Без продаж N дней”: иначе в мотивацию попадали все товары.
     except Exception:
         logger.warning(
             'Не удалось получить проданные товары из отчета прибыльности МоегоСклада для точки %s за %s..%s. Используем документы продаж.',
@@ -3864,7 +3956,6 @@ async def _load_last_sale_dates_for_products(
             expand='store,retailStore,retailShift,retailShift.store,retailShift.retailStore',
             include_positions=True,
             positions_expand='assortment,assortment.productFolder',
-            positions_fields='stock',
         )
     except Exception:
         logger.exception(
@@ -3883,9 +3974,15 @@ async def _load_last_sale_dates_for_products(
         if doc_date is None:
             continue
         for position in _iter_positions(doc):
-            item_id, _item_name, _item_code = _extract_position_item_identity(position)
-            if item_id and item_id in item_ids and (item_id not in output or doc_date > output[item_id]):
-                output[item_id] = doc_date
+            item_id, item_name, item_code = _extract_position_item_identity(position)
+            position_keys = set()
+            for kind, value in (('id', item_id), ('code', item_code), ('name', item_name)):
+                key = _sales_motivation_identity_key(kind, value)
+                if key:
+                    position_keys.add(key)
+            for sold_item_id in _resolve_sold_product_ids_from_identity_keys(position_keys, product_identity_index):
+                if sold_item_id not in output or doc_date > output[sold_item_id]:
+                    output[sold_item_id] = doc_date
     return output
 
 
@@ -3904,8 +4001,7 @@ async def get_sales_motivation_product_catalog(
     normalized_days = int(no_sales_days or 0)
     if normalized_days > 0:
         cutoff = today - timedelta(days=normalized_days - 1)
-        item_ids = {row['item_id'] for row in products}
-        last_sale_dates = await _load_last_sale_dates_for_products(point, item_ids, cutoff, today)
+        last_sale_dates = await _load_last_sale_dates_for_products(point, products, cutoff, today)
         filtered: list[dict[str, Any]] = []
         for row in products:
             item_id = row['item_id']
@@ -4478,6 +4574,359 @@ async def _load_shift_sales_motivation_snapshot_rows(snapshot_id: int, db: Async
         }
         for row in rows
     ]
+
+
+def _resolve_sales_motivation_days_without_sales(product: SalesMotivationProduct, model: SalesMotivationModel, snapshot_date: date, sold_quantity: float) -> int | None:
+    if sold_quantity > 0:
+        return 0
+    if product.last_sale_date:
+        return max((snapshot_date - product.last_sale_date).days, 0)
+    stored_days = product.days_without_sales
+    if stored_days is not None:
+        return max(int(stored_days), int(getattr(model, 'no_sales_days', 0) or 0))
+    if getattr(model, 'no_sales_days', None):
+        return int(model.no_sales_days or 0)
+    return None
+
+
+def _serialize_sales_motivation_daily_snapshot(row: SalesMotivationDailySnapshot) -> dict[str, Any]:
+    return {
+        'id': row.id,
+        'location_point_id': row.location_point_id,
+        'snapshot_date': row.snapshot_date.isoformat(),
+        'model_id': row.model_id,
+        'model_name': row.model_name,
+        'source_type': _normalize_sales_motivation_source(row.source_type),
+        'source_label': _sales_motivation_source_label(row.source_type),
+        'reward_type': _normalize_sales_motivation_reward(row.reward_type),
+        'reward_label': _sales_motivation_reward_label(row.reward_type),
+        'reward_value': round(float(row.reward_value or 0.0), 2),
+        'no_sales_days': row.no_sales_days,
+        'include_fiscalized_sales': bool(row.include_fiscalized_sales),
+        'fiscalization_mode': _sales_motivation_fiscalization_mode(bool(row.include_fiscalized_sales)),
+        'fiscalization_label': _sales_motivation_fiscalization_label(bool(row.include_fiscalized_sales)),
+        'fiscalization_status': row.fiscalization_status,
+        'item_id': row.item_id,
+        'item_name': row.item_name,
+        'item_code': row.item_code,
+        'category_id': row.category_id,
+        'category_name': row.category_name,
+        'subcategory_id': row.subcategory_id,
+        'subcategory_name': row.subcategory_name,
+        'current_stock_qty': round(float(row.current_stock_qty or 0.0), 3),
+        'last_sale_date': row.last_sale_date.isoformat() if row.last_sale_date else None,
+        'days_without_sales': row.days_without_sales,
+        'sold_quantity': round(float(row.sold_quantity or 0.0), 3),
+        'sold_sales_amount': round(float(row.sold_sales_amount or 0.0), 2),
+        'bonus_amount': round(float(row.bonus_amount or 0.0), 2),
+        'fiscalized_quantity': round(float(row.fiscalized_quantity or 0.0), 3),
+        'fiscalized_sales_amount': round(float(row.fiscalized_sales_amount or 0.0), 2),
+        'non_fiscalized_quantity': round(float(row.non_fiscalized_quantity or 0.0), 3),
+        'non_fiscalized_sales_amount': round(float(row.non_fiscalized_sales_amount or 0.0), 2),
+        'unknown_fiscalization_quantity': round(float(row.unknown_fiscalization_quantity or 0.0), 3),
+        'unknown_fiscalization_sales_amount': round(float(row.unknown_fiscalization_sales_amount or 0.0), 2),
+        'is_sold': bool(row.is_sold),
+        'created_at': row.created_at.isoformat() if row.created_at else None,
+        'updated_at': row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+async def _resolve_sales_motivation_snapshot_points(
+    db: AsyncSession,
+    *,
+    location: str | None = None,
+    current_user: User | None = None,
+) -> list[LocationPoint]:
+    normalized_location = str(location or '').strip()
+    if current_user is not None:
+        if normalized_location:
+            points, _is_all = await _get_payroll_scope_points(current_user, normalized_location, db)
+            return points
+        return await _get_accessible_location_points(current_user, db)
+    if normalized_location:
+        return [await _get_location_point_by_name(normalized_location, db)]
+    return (await db.scalars(select(LocationPoint).order_by(LocationPoint.name.asc()))).all()
+
+
+async def refresh_sales_motivation_daily_snapshots(
+    date_from: date,
+    date_to: date,
+    db: AsyncSession,
+    *,
+    location: str | None = None,
+    current_user: User | None = None,
+    progress_callback: Any | None = None,
+) -> dict[str, Any]:
+    if date_from > date_to:
+        raise HTTPException(status_code=400, detail='Дата начала не может быть позже даты окончания.')
+    if current_user is not None and current_user.role not in {'admin', 'superadmin'}:
+        raise HTTPException(status_code=403, detail='Обновлять снимки мотиваций может только управляющий.')
+
+    points = await _resolve_sales_motivation_snapshot_points(db, location=location, current_user=current_user)
+    days = _daterange(date_from, date_to)
+    total_steps = len(points) * len(days)
+    processed_steps = 0
+    snapshots_created = 0
+    sold_rows = 0
+    unsold_rows = 0
+    bonus_total = 0.0
+    now = datetime.utcnow()
+
+    if progress_callback:
+        await progress_callback('start', {'total_locations': len(points), 'total_days': len(days), 'total_steps': total_steps})
+
+    for point_index, point in enumerate(points, start=1):
+        inventory_by_id: dict[str, dict[str, Any]] = {}
+        try:
+            inventory_by_id = {row['item_id']: row for row in await _flatten_inventory_products(point, db) if row.get('item_id')}
+        except Exception:
+            logger.warning(
+                'Не удалось обновить остатки для дневного снимка мотиваций точки %s. Используем товары из моделей.',
+                point.name,
+                exc_info=True,
+            )
+        for day in days:
+            processed_steps += 1
+            if progress_callback:
+                await progress_callback('day_start', {'location': point.name, 'location_index': point_index, 'total_locations': len(points), 'date': day.isoformat(), 'step': processed_steps, 'total_steps': total_steps})
+
+            models = await _get_active_sales_motivation_models(point, day, db)
+            if not models:
+                continue
+            products_by_model = await _get_sales_motivation_products_by_model([int(model.id) for model in models], db)
+            model_ids = [int(model.id) for model in models]
+            await db.execute(
+                delete(SalesMotivationDailySnapshot).where(
+                    SalesMotivationDailySnapshot.location_point_id == point.id,
+                    SalesMotivationDailySnapshot.snapshot_date == day,
+                    SalesMotivationDailySnapshot.model_id.in_(model_ids),
+                )
+            )
+
+            needs_fiscalization_resolution = any(not bool(getattr(model, 'include_fiscalized_sales', True)) for model in models)
+            try:
+                product_metrics = await _load_product_sales_metrics_for_day(
+                    point,
+                    day,
+                    resolve_fiscalization=needs_fiscalization_resolution,
+                )
+            except Exception:
+                logger.warning(
+                    'Не удалось загрузить продажи товаров для дневного снимка мотиваций точки %s за %s. Сохраняем снимок без продаж.',
+                    point.name,
+                    day.isoformat(),
+                    exc_info=True,
+                )
+                product_metrics = {}
+
+            for model in models:
+                source_type = _normalize_sales_motivation_source(model.source_type)
+                reward_type = _normalize_sales_motivation_reward(model.reward_type)
+                reward_value = round(float(model.reward_value or 0.0), 2)
+                include_fiscalized_sales = bool(getattr(model, 'include_fiscalized_sales', True))
+                fiscalization_status = SALES_MOTIVATION_FISCAL_ANY if include_fiscalized_sales else 'not_fiscalized'
+                for product in products_by_model.get(int(model.id), []):
+                    metric = product_metrics.get(product.item_id) or {}
+                    if include_fiscalized_sales:
+                        sold_quantity_source = metric.get('quantity')
+                        sold_amount_source = metric.get('sales_amount')
+                    else:
+                        sold_quantity_source = metric.get('non_fiscalized_quantity')
+                        sold_amount_source = metric.get('non_fiscalized_sales_amount')
+                    sold_quantity = round(float(sold_quantity_source or 0.0), 3)
+                    sold_sales_amount = round(float(sold_amount_source or 0.0), 2)
+                    bonus_amount = _calculate_sales_motivation_bonus(reward_type, reward_value, sold_quantity, sold_sales_amount)
+                    is_sold = sold_quantity > 0 and sold_sales_amount > 0
+                    inventory_row = inventory_by_id.get(product.item_id) or {}
+                    item_name = str(inventory_row.get('item_name') or product.item_name or metric.get('item_name') or product.item_id).strip()[:255]
+                    item_code = _clean_optional_string(inventory_row.get('item_code') or product.item_code or metric.get('item_code'), max_length=120)
+                    category_id = _clean_optional_string(inventory_row.get('category_id') or product.category_id, max_length=120)
+                    category_name = _clean_optional_string(inventory_row.get('category_name') or product.category_name, max_length=255)
+                    subcategory_id = _clean_optional_string(inventory_row.get('subcategory_id') or product.subcategory_id, max_length=120)
+                    subcategory_name = _clean_optional_string(inventory_row.get('subcategory_name') or product.subcategory_name, max_length=255)
+                    stock_source = inventory_row.get('current_stock_qty') if inventory_row else product.current_stock_qty
+                    current_stock_qty = round(float(stock_source or 0.0), 3)
+                    last_sale_date = day if is_sold else product.last_sale_date
+                    days_without_sales = _resolve_sales_motivation_days_without_sales(product, model, day, sold_quantity)
+                    row = SalesMotivationDailySnapshot(
+                        location_point_id=point.id,
+                        snapshot_date=day,
+                        model_id=model.id,
+                        model_name=str(model.name or 'Мотивация')[:255],
+                        source_type=source_type,
+                        reward_type=reward_type,
+                        reward_value=reward_value,
+                        no_sales_days=model.no_sales_days,
+                        include_fiscalized_sales=include_fiscalized_sales,
+                        fiscalization_status=fiscalization_status,
+                        item_id=str(product.item_id or '')[:120],
+                        item_name=item_name or str(product.item_id or '')[:120],
+                        item_code=item_code,
+                        category_id=category_id,
+                        category_name=category_name,
+                        subcategory_id=subcategory_id,
+                        subcategory_name=subcategory_name,
+                        current_stock_qty=current_stock_qty,
+                        last_sale_date=last_sale_date,
+                        days_without_sales=days_without_sales,
+                        sold_quantity=sold_quantity,
+                        sold_sales_amount=sold_sales_amount,
+                        bonus_amount=bonus_amount,
+                        fiscalized_quantity=round(float(metric.get('fiscalized_quantity') or 0.0), 3),
+                        fiscalized_sales_amount=round(float(metric.get('fiscalized_sales_amount') or 0.0), 2),
+                        non_fiscalized_quantity=round(float(metric.get('non_fiscalized_quantity') or 0.0), 3),
+                        non_fiscalized_sales_amount=round(float(metric.get('non_fiscalized_sales_amount') or 0.0), 2),
+                        unknown_fiscalization_quantity=round(float(metric.get('unknown_fiscalization_quantity') or 0.0), 3),
+                        unknown_fiscalization_sales_amount=round(float(metric.get('unknown_fiscalization_sales_amount') or 0.0), 2),
+                        is_sold=is_sold,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    db.add(row)
+                    snapshots_created += 1
+                    if is_sold:
+                        sold_rows += 1
+                    else:
+                        unsold_rows += 1
+                    bonus_total += bonus_amount
+            if progress_callback:
+                await progress_callback('day_done', {'location': point.name, 'date': day.isoformat(), 'snapshots_created': snapshots_created, 'sold_rows': sold_rows, 'unsold_rows': unsold_rows})
+
+    await db.commit()
+    result = {
+        'date_from': date_from.isoformat(),
+        'date_to': date_to.isoformat(),
+        'location': location,
+        'locations_processed': len(points),
+        'days_processed': len(days),
+        'snapshots_created': snapshots_created,
+        'sold_rows': sold_rows,
+        'unsold_rows': unsold_rows,
+        'bonus_total': round(float(bonus_total or 0.0), 2),
+    }
+    if progress_callback:
+        await progress_callback('done', result)
+    return result
+
+
+async def list_sales_motivation_daily_snapshots(
+    location: str,
+    date_from: date,
+    date_to: date,
+    db: AsyncSession,
+    current_user: User,
+    *,
+    model_id: int | None = None,
+    sold_only: bool | None = None,
+) -> dict[str, Any]:
+    if date_from > date_to:
+        raise HTTPException(status_code=400, detail='Дата начала не может быть позже даты окончания.')
+    await ensure_user_can_access_location(current_user, location, db)
+    points, is_all = await _get_payroll_scope_points(current_user, location, db)
+    point_ids = [int(point.id) for point in points]
+    location_names = {int(point.id): point.name for point in points}
+    conditions = [
+        SalesMotivationDailySnapshot.location_point_id.in_(point_ids),
+        SalesMotivationDailySnapshot.snapshot_date >= date_from,
+        SalesMotivationDailySnapshot.snapshot_date <= date_to,
+    ]
+    if model_id is not None:
+        conditions.append(SalesMotivationDailySnapshot.model_id == int(model_id))
+    if sold_only is True:
+        conditions.append(SalesMotivationDailySnapshot.is_sold.is_(True))
+    elif sold_only is False:
+        conditions.append(SalesMotivationDailySnapshot.is_sold.is_(False))
+    rows = (
+        await db.scalars(
+            select(SalesMotivationDailySnapshot)
+            .where(and_(*conditions))
+            .order_by(
+                SalesMotivationDailySnapshot.snapshot_date.desc(),
+                SalesMotivationDailySnapshot.model_name.asc(),
+                SalesMotivationDailySnapshot.category_name.asc(),
+                SalesMotivationDailySnapshot.item_name.asc(),
+            )
+        )
+    ).all()
+
+    grouped_days: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        day_key = row.snapshot_date.isoformat()
+        day_bucket = grouped_days.setdefault(day_key, {
+            'date': day_key,
+            'locations': {},
+            'sold_rows': 0,
+            'unsold_rows': 0,
+            'sold_quantity': 0.0,
+            'sold_sales_amount': 0.0,
+            'bonus_amount': 0.0,
+        })
+        location_name = location_names.get(int(row.location_point_id), '')
+        location_bucket = day_bucket['locations'].setdefault(str(row.location_point_id), {
+            'location_point_id': row.location_point_id,
+            'location': location_name,
+            'models': {},
+            'sold_rows': 0,
+            'unsold_rows': 0,
+            'sold_quantity': 0.0,
+            'sold_sales_amount': 0.0,
+            'bonus_amount': 0.0,
+        })
+        model_key = str(row.model_id or f'snapshot-{row.model_name}')
+        model_bucket = location_bucket['models'].setdefault(model_key, {
+            'model_id': row.model_id,
+            'model_name': row.model_name,
+            'source_type': _normalize_sales_motivation_source(row.source_type),
+            'source_label': _sales_motivation_source_label(row.source_type),
+            'reward_type': _normalize_sales_motivation_reward(row.reward_type),
+            'reward_label': _sales_motivation_reward_label(row.reward_type),
+            'reward_value': round(float(row.reward_value or 0.0), 2),
+            'include_fiscalized_sales': bool(row.include_fiscalized_sales),
+            'fiscalization_label': _sales_motivation_fiscalization_label(bool(row.include_fiscalized_sales)),
+            'sold_rows': 0,
+            'unsold_rows': 0,
+            'sold_quantity': 0.0,
+            'sold_sales_amount': 0.0,
+            'bonus_amount': 0.0,
+            'products': [],
+        })
+        serialized = _serialize_sales_motivation_daily_snapshot(row)
+        model_bucket['products'].append(serialized)
+        for bucket in (day_bucket, location_bucket, model_bucket):
+            if row.is_sold:
+                bucket['sold_rows'] += 1
+            else:
+                bucket['unsold_rows'] += 1
+            bucket['sold_quantity'] = round(float(bucket['sold_quantity']) + float(row.sold_quantity or 0.0), 3)
+            bucket['sold_sales_amount'] = round(float(bucket['sold_sales_amount']) + float(row.sold_sales_amount or 0.0), 2)
+            bucket['bonus_amount'] = round(float(bucket['bonus_amount']) + float(row.bonus_amount or 0.0), 2)
+
+    day_list: list[dict[str, Any]] = []
+    for day_bucket in grouped_days.values():
+        locations = []
+        for location_bucket in day_bucket['locations'].values():
+            location_bucket['models'] = list(location_bucket['models'].values())
+            locations.append(location_bucket)
+        location_bucket_sort_key = lambda item: str(item.get('location') or '').lower()
+        locations.sort(key=location_bucket_sort_key)
+        day_bucket['locations'] = locations
+        day_list.append(day_bucket)
+    day_list.sort(key=lambda item: item['date'], reverse=True)
+
+    return {
+        'location': PAYROLL_ALL_LOCATIONS_LABEL if is_all else points[0].name,
+        'date_from': date_from.isoformat(),
+        'date_to': date_to.isoformat(),
+        'model_id': model_id,
+        'sold_only': sold_only,
+        'total_rows': len(rows),
+        'sold_rows': sum(1 for row in rows if row.is_sold),
+        'unsold_rows': sum(1 for row in rows if not row.is_sold),
+        'sold_quantity': round(sum(float(row.sold_quantity or 0.0) for row in rows), 3),
+        'sold_sales_amount': round(sum(float(row.sold_sales_amount or 0.0) for row in rows), 2),
+        'bonus_amount': round(sum(float(row.bonus_amount or 0.0) for row in rows), 2),
+        'days': day_list,
+    }
 
 
 async def _get_active_shift_count(point: LocationPoint, shift_date: date, db: AsyncSession) -> int:

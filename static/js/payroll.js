@@ -2521,10 +2521,12 @@ function renderSalesMotivationProductCatalog(payload) {
                     <strong>${escapeHtml(category.name || 'Категория')}</strong>
                     <div class="muted-text">Подкатегорий: ${subcategories.length} · товаров: ${categoryProductCount}</div>
                 </div>
-                <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline" onclick="event.stopPropagation()">
-                    <input type="checkbox" data-motivation-select-category> Вся категория
-                </label>
-                <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
+                <div class="payroll-day-toggle-side sales-motivation-toggle-side">
+                    <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline sales-motivation-select-card" onclick="event.stopPropagation()">
+                        <input type="checkbox" data-motivation-select-category> Вся категория
+                    </label>
+                    <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
+                </div>
             </summary>
             <div class="payroll-day-accordion-body">
                 ${subcategories.map((subcategory, subcategoryIndex) => {
@@ -2536,10 +2538,12 @@ function renderSalesMotivationProductCatalog(payload) {
                                 <strong>${escapeHtml(subcategory.name || 'Без подкатегории')}</strong>
                                 <div class="muted-text">Товаров: ${items.length}</div>
                             </div>
-                            <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline" onclick="event.stopPropagation()">
-                                <input type="checkbox" data-motivation-select-subcategory> Вся подкатегория
-                            </label>
-                            <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
+                            <div class="payroll-day-toggle-side sales-motivation-toggle-side">
+                                <label class="checkbox-like expense-checkbox-card expense-checkbox-card--inline sales-motivation-select-card" onclick="event.stopPropagation()">
+                                    <input type="checkbox" data-motivation-select-subcategory> Вся подкатегория
+                                </label>
+                                <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
+                            </div>
                         </summary>
                         <div class="payroll-day-accordion-body">
                             <div class="expense-entry-grid">
@@ -2587,6 +2591,9 @@ function renderSalesMotivationProductCatalog(payload) {
 
 async function loadSalesMotivationProductCatalog() {
     if (!isAdminRole() || isAllLocationsSelected()) return;
+    const button = qs('sales-motivation-load-products-btn');
+    if (button?.disabled) return;
+    const previousButtonText = button?.textContent || 'Подобрать товары';
     const location = selectedLocation();
     const source = qs('sales-motivation-source')?.value || 'manual';
     const days = Number(qs('sales-motivation-days')?.value || 0);
@@ -2594,6 +2601,11 @@ async function loadSalesMotivationProductCatalog() {
     const params = new URLSearchParams({ location });
     if (source === 'no_sales_days' && days > 0) params.set('no_sales_days', String(days));
     if (query.trim()) params.set('query', query.trim());
+    if (button) {
+        button.disabled = true;
+        button.classList.add('loading');
+        button.textContent = 'Загружаем...';
+    }
     showScopedStatus('sales-motivations-status', 'Подбираем товары...', 'loading');
     try {
         const payload = await api(`/api/payroll/sales-motivations/product-catalog?${params.toString()}`);
@@ -2601,6 +2613,12 @@ async function loadSalesMotivationProductCatalog() {
         showScopedStatus('sales-motivations-status', `Найдено товаров: ${payload.product_count || 0}`, 'success');
     } catch (error) {
         showScopedStatus('sales-motivations-status', error.message || 'Не удалось подобрать товары.', 'error');
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.classList.remove('loading');
+            button.textContent = previousButtonText;
+        }
     }
 }
 
