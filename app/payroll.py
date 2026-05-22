@@ -4500,6 +4500,60 @@ def _add_shift_sales_motivation_snapshot_rows(
         ))
 
 
+async def _load_shift_sales_motivation_rows_from_daily_snapshots(
+    point: LocationPoint,
+    shift: WorkShift,
+    share_ratio: float,
+    db: AsyncSession,
+) -> list[dict[str, Any]] | None:
+    """Load seller motivation rows from saved daily snapshots instead of calling MoySklad.
+
+    This path is used for already closed shifts when an old payroll snapshot does not
+    yet contain per-item motivation rows. Reading the payroll page must be fast and
+    must not trigger a live per-product MoySklad export for every closed shift. The
+    nightly cron saves SalesMotivationDailySnapshot rows; we reuse them and apply the
+    same shift share ratio that is used for sales/category earnings.
+    """
+    rows = (
+        await db.scalars(
+            select(SalesMotivationDailySnapshot)
+            .where(
+                SalesMotivationDailySnapshot.location_point_id == point.id,
+                SalesMotivationDailySnapshot.snapshot_date == shift.shift_date,
+            )
+            .order_by(SalesMotivationDailySnapshot.model_name.asc(), SalesMotivationDailySnapshot.item_name.asc())
+        )
+    ).all()
+    if not rows:
+        return None
+
+    ratio = float(share_ratio or 0.0)
+    output: list[dict[str, Any]] = []
+    for row in rows:
+        quantity = round(float(row.sold_quantity or 0.0) * ratio, 3)
+        sales_amount = round(float(row.sold_sales_amount or 0.0) * ratio, 2)
+        bonus_amount = round(float(row.bonus_amount or 0.0) * ratio, 2)
+        if quantity <= 0 or sales_amount <= 0 or bonus_amount <= 0:
+            continue
+        output.append({
+            'model_id': row.model_id,
+            'model_name': row.model_name,
+            'reward_type': _normalize_sales_motivation_reward(row.reward_type),
+            'reward_value': round(float(row.reward_value or 0.0), 2),
+            'include_fiscalized_sales': bool(row.include_fiscalized_sales),
+            'fiscalization_mode': _sales_motivation_fiscalization_mode(bool(row.include_fiscalized_sales)),
+            'fiscalization_label': _sales_motivation_fiscalization_label(bool(row.include_fiscalized_sales)),
+            'fiscalization_status': str(row.fiscalization_status or SALES_MOTIVATION_FISCAL_ANY),
+            'item_id': row.item_id,
+            'item_name': row.item_name,
+            'item_code': row.item_code,
+            'quantity': quantity,
+            'sales_amount': sales_amount,
+            'bonus_amount': bonus_amount,
+        })
+    return output
+
+
 async def _load_or_calculate_shift_sales_motivation_snapshot_rows(
     snapshot: ShiftPayrollSnapshot,
     point: LocationPoint,
@@ -4509,13 +4563,23 @@ async def _load_or_calculate_shift_sales_motivation_snapshot_rows(
     rows = await _load_shift_sales_motivation_snapshot_rows(snapshot.id, db)
     if rows:
         return rows
-    _amount, _grouped, calculated_rows = await _calculate_shift_sales_motivations(
+
+    daily_snapshot_rows = await _load_shift_sales_motivation_rows_from_daily_snapshots(
         point,
         shift,
         float(snapshot.share_ratio or 0.0),
         db,
     )
-    return calculated_rows
+    if daily_snapshot_rows is not None:
+        return daily_snapshot_rows
+
+    logger.info(
+        'В payroll snapshot смены %s за %s нет строк мотивации, и дневной snapshot мотиваций ещё не найден. '
+        'Не запускаем live-выгрузку МойСклад из GET-запроса.',
+        shift.id,
+        shift.shift_date.isoformat(),
+    )
+    return []
 
 
 def _group_sales_motivation_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -4563,7 +4627,20 @@ async def _calculate_shift_sales_motivations(
     shift: WorkShift,
     share_ratio: float,
     db: AsyncSession,
+    *,
+    prefer_daily_snapshots: bool = True,
 ) -> tuple[float, list[dict[str, Any]], list[dict[str, Any]]]:
+    if prefer_daily_snapshots:
+        daily_snapshot_rows = await _load_shift_sales_motivation_rows_from_daily_snapshots(
+            point,
+            shift,
+            share_ratio,
+            db,
+        )
+        if daily_snapshot_rows is not None:
+            total = round(sum(float(row.get('bonus_amount') or 0.0) for row in daily_snapshot_rows), 2)
+            return total, _group_sales_motivation_rows(daily_snapshot_rows), daily_snapshot_rows
+
     models = await _get_active_sales_motivation_models(point, shift.shift_date, db)
     if not models:
         return 0.0, [], []
@@ -5251,6 +5328,7 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
         shift,
         share_ratio,
         db,
+        prefer_daily_snapshots=(not force_refresh_metrics and shift.shift_date < get_moscow_today()),
     )
     base_gross_salary_amount = round(float(settings.exit_amount or 0) + bonus + category_earnings_total, 2)
     gross_salary_amount = round(base_gross_salary_amount + employee_bonus_amount + sales_motivation_amount, 2)

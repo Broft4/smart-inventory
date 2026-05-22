@@ -186,6 +186,39 @@ async def _run() -> None:
                 progress_callback=cache_progress,
             )
 
+            if args.refresh_sales_motivation_snapshots:
+                explicit_start = bool(args.date_from)
+                motivation_days = max(int(args.sales_motivation_days or 1), 1)
+                motivation_date_to = date_to
+                motivation_date_from = date_from if explicit_start else max(date_from, motivation_date_to - timedelta(days=motivation_days - 1))
+                _log(
+                    'Начинаю сохранение дневных снимков мотиваций продавцов: '
+                    f'{motivation_date_from.isoformat()} — {motivation_date_to.isoformat()}.'
+                )
+                stage['message'] = 'сохранение дневных снимков мотиваций'
+
+                async def motivation_progress(event: str, data: dict[str, Any]) -> None:
+                    if event == 'start':
+                        stage['message'] = f'снимки мотиваций: подготовка, шагов {data.get("total_steps")}'
+                        _log(f'Снимки мотиваций: точек={data.get("total_locations")}, дней={data.get("total_days")}.')
+                    elif event == 'day_start':
+                        stage['message'] = f'снимки мотиваций {data.get("step")}/{data.get("total_steps")}'
+                        _log(f'Снимок мотиваций: {data.get("location")} за {data.get("date")} ({data.get("step")}/{data.get("total_steps")}).')
+                    elif event == 'done':
+                        stage['message'] = 'снимки мотиваций сохранены'
+                        _log(
+                            f'Снимки мотиваций сохранены: строк={data.get("snapshots_created")}, '
+                            f'продано={data.get("sold_rows")}, не продано={data.get("unsold_rows")}, '
+                            f'бонусы={_format_money(data.get("bonus_total"))}.'
+                        )
+
+                payload['sales_motivation_daily_snapshots'] = await refresh_sales_motivation_daily_snapshots(
+                    motivation_date_from,
+                    motivation_date_to,
+                    db,
+                    location=args.location,
+                    progress_callback=motivation_progress,
+                )
             if args.auto_close_due_shifts:
                 _log('Начинаю автоматическое закрытие незакрытых смен за период...')
                 stage['message'] = 'автоматическое закрытие смен'
@@ -223,39 +256,7 @@ async def _run() -> None:
                 )
                 _log('Пересборка закрытых смен завершена.')
 
-            if args.refresh_sales_motivation_snapshots:
-                explicit_start = bool(args.date_from)
-                motivation_days = max(int(args.sales_motivation_days or 1), 1)
-                motivation_date_to = date_to
-                motivation_date_from = date_from if explicit_start else max(date_from, motivation_date_to - timedelta(days=motivation_days - 1))
-                _log(
-                    'Начинаю сохранение дневных снимков мотиваций продавцов: '
-                    f'{motivation_date_from.isoformat()} — {motivation_date_to.isoformat()}.'
-                )
-                stage['message'] = 'сохранение дневных снимков мотиваций'
 
-                async def motivation_progress(event: str, data: dict[str, Any]) -> None:
-                    if event == 'start':
-                        stage['message'] = f'снимки мотиваций: подготовка, шагов {data.get("total_steps")}'
-                        _log(f'Снимки мотиваций: точек={data.get("total_locations")}, дней={data.get("total_days")}.')
-                    elif event == 'day_start':
-                        stage['message'] = f'снимки мотиваций {data.get("step")}/{data.get("total_steps")}'
-                        _log(f'Снимок мотиваций: {data.get("location")} за {data.get("date")} ({data.get("step")}/{data.get("total_steps")}).')
-                    elif event == 'done':
-                        stage['message'] = 'снимки мотиваций сохранены'
-                        _log(
-                            f'Снимки мотиваций сохранены: строк={data.get("snapshots_created")}, '
-                            f'продано={data.get("sold_rows")}, не продано={data.get("unsold_rows")}, '
-                            f'бонусы={_format_money(data.get("bonus_total"))}.'
-                        )
-
-                payload['sales_motivation_daily_snapshots'] = await refresh_sales_motivation_daily_snapshots(
-                    motivation_date_from,
-                    motivation_date_to,
-                    db,
-                    location=args.location,
-                    progress_callback=motivation_progress,
-                )
 
         stage['message'] = 'готово'
         _log('Готово. Итоговый JSON ниже.')

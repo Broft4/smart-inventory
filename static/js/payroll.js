@@ -2432,17 +2432,32 @@ function renderMotivationSelectedProducts() {
         list.innerHTML = '';
         return;
     }
-    list.innerHTML = products.slice(0, 120).map((product) => `
-        <article class="expense-entry-card">
-            <div class="expense-entry-card-head">
+    list.innerHTML = `
+        <details class="expense-entry-card expense-entry-card--accordion sales-motivation-products-details">
+            <summary class="expense-entry-toggle">
                 <div>
-                    <strong>${escapeHtml(product.item_name || 'Товар')}</strong>
-                    <div class="muted-text">${product.item_code ? `код ${escapeHtml(product.item_code)} · ` : ''}${product.category_name ? `${escapeHtml(product.category_name)} · ` : ''}остаток ${Number(product.current_stock_qty || 0).toLocaleString('ru-RU')} шт.</div>
+                    <strong>Выбранные товары</strong>
+                    <div class="muted-text">Товаров: ${products.length}. Список свёрнут, чтобы не мешать сохранению и редактированию.</div>
                 </div>
-                <button type="button" class="btn secondary btn-inline" onclick="removeSelectedMotivationProduct('${escapeHtml(product.item_id)}')">Убрать</button>
+                <span class="btn secondary btn-inline expense-entry-toggle-text">Показать товары</span>
+            </summary>
+            <div class="expense-entry-accordion-body">
+                <div class="expense-entry-grid">
+                    ${products.map((product) => `
+                        <article class="expense-entry-card">
+                            <div class="expense-entry-card-head">
+                                <div>
+                                    <strong>${escapeHtml(product.item_name || 'Товар')}</strong>
+                                    <div class="muted-text">${product.item_code ? `код ${escapeHtml(product.item_code)} · ` : ''}${product.category_name ? `${escapeHtml(product.category_name)} · ` : ''}остаток ${Number(product.current_stock_qty || 0).toLocaleString('ru-RU')} шт.</div>
+                                </div>
+                                <button type="button" class="btn secondary btn-inline" onclick="removeSelectedMotivationProduct('${escapeHtml(product.item_id)}')">Убрать</button>
+                            </div>
+                        </article>
+                    `).join('')}
+                </div>
             </div>
-        </article>
-    `).join('') + (products.length > 120 ? `<div class="muted-text">И ещё ${products.length - 120} товаров.</div>` : '');
+        </details>
+    `;
 }
 
 function updateMotivationSelectedMeta() {
@@ -2681,16 +2696,26 @@ function renderSalesMotivations() {
                     <div><span class="summary-label">Фильтр</span><strong>${model.no_sales_days ? `${model.no_sales_days}+ дней без продаж` : 'ручной выбор'}</strong></div>
                     <div><span class="summary-label">Фискализация</span><strong>${escapeHtml(salesMotivationFiscalizationText(model))}</strong></div>
                 </div>
-                <div class="payroll-days-container payroll-days-container--note-only">
-                    ${(model.products || []).slice(0, 80).map((item) => `<div class="muted-text">${escapeHtml(item.item_name || 'Товар')}${item.item_code ? ` · код ${escapeHtml(item.item_code)}` : ''}${item.category_name ? ` · ${escapeHtml(item.category_name)}` : ''}</div>`).join('') || '<div class="muted-text">Товары не указаны.</div>'}
-                    ${(model.products || []).length > 80 ? `<div class="muted-text">И ещё ${(model.products || []).length - 80} товаров.</div>` : ''}
-                </div>
                 <div class="expense-entry-actions">
                     <button type="button" class="btn secondary btn-inline" onclick="editSalesMotivation(${model.id})">Редактировать</button>
                     <button type="button" class="btn secondary btn-inline" onclick="cloneSalesMotivationToForm(${model.id})">Копировать в форму</button>
                     <button type="button" class="btn secondary btn-inline" onclick="copySalesMotivationToLocation(${model.id})">Копировать на точку</button>
                     <button type="button" class="btn danger btn-inline" onclick="deleteSalesMotivation(${model.id})">Удалить модель</button>
                 </div>
+                <details class="expense-entry-card expense-entry-card--accordion sales-motivation-products-details">
+                    <summary class="expense-entry-toggle">
+                        <div>
+                            <strong>Товары модели</strong>
+                            <div class="muted-text">Товаров: ${(model.products || []).length}. Нажмите, чтобы посмотреть полный список.</div>
+                        </div>
+                        <span class="btn secondary btn-inline expense-entry-toggle-text">Показать товары</span>
+                    </summary>
+                    <div class="expense-entry-accordion-body">
+                        <div class="payroll-days-container payroll-days-container--note-only">
+                            ${(model.products || []).map((item) => `<div class="muted-text">${escapeHtml(item.item_name || 'Товар')}${item.item_code ? ` · код ${escapeHtml(item.item_code)}` : ''}${item.category_name ? ` · ${escapeHtml(item.category_name)}` : ''}</div>`).join('') || '<div class="muted-text">Товары не указаны.</div>'}
+                        </div>
+                    </div>
+                </details>
             </div>
         </details>
     `).join('');
