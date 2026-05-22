@@ -3777,11 +3777,114 @@ def _extract_position_item_identity(position: dict[str, Any]) -> tuple[str | Non
     item_code = _clean_optional_string(
         assortment.get('code')
         or assortment.get('article')
+        or assortment.get('externalCode')
         or position.get('code')
-        or position.get('article'),
+        or position.get('article')
+        or position.get('externalCode'),
         max_length=120,
     )
     return item_id, item_name, item_code
+
+
+def _sales_motivation_raw_lookup_key(value: Any) -> str | None:
+    text = str(value or '').strip()
+    return text or None
+
+
+def _sales_motivation_metric_lookup_keys_for_values(
+    *,
+    item_id: Any = None,
+    item_code: Any = None,
+    item_name: Any = None,
+    extra_ids: list[Any] | None = None,
+    extra_codes: list[Any] | None = None,
+    extra_names: list[Any] | None = None,
+) -> list[str]:
+    """Build stable lookup keys for matching motivation products to sales positions.
+
+    МойСклад может вернуть разные идентификаторы для одного и того же товара в
+    остатках и в позициях продажи: например, в остатках может быть id товара, а
+    в чеке — id модификации/ассортимента. Поэтому мотивацию нельзя искать только
+    по item_id. Параллельно держим ключи по id, коду/артикулу и нормализованному
+    названию.
+    """
+    keys: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw_key: str | None) -> None:
+        key = str(raw_key or '').strip()
+        if key and key not in seen:
+            seen.add(key)
+            keys.append(key)
+
+    def add_raw(value: Any) -> None:
+        add(_sales_motivation_raw_lookup_key(value))
+
+    def add_identity(kind: str, value: Any) -> None:
+        add(_sales_motivation_identity_key(kind, value))
+
+    for value in [item_id, *(extra_ids or [])]:
+        add_raw(value)
+        add_identity('id', value)
+    for value in [item_code, *(extra_codes or [])]:
+        add_raw(value)
+        add_identity('code', value)
+    for value in [item_name, *(extra_names or [])]:
+        add_identity('name', value)
+
+    return keys
+
+
+def _sales_motivation_position_metric_lookup_keys(position: dict[str, Any]) -> list[str]:
+    assortment = position.get('assortment') if isinstance(position.get('assortment'), dict) else {}
+    item_id, item_name, item_code = _extract_position_item_identity(position)
+
+    extra_ids: list[Any] = []
+    extra_codes: list[Any] = []
+    extra_names: list[Any] = []
+
+    for nested_key in ('product', 'good', 'variant', 'productVariant', 'thing'):
+        nested = assortment.get(nested_key) if isinstance(assortment, dict) else None
+        if not isinstance(nested, dict):
+            nested = position.get(nested_key) if isinstance(position.get(nested_key), dict) else None
+        if not isinstance(nested, dict):
+            continue
+        extra_ids.append(_extract_id(nested))
+        extra_names.append(nested.get('name'))
+        extra_codes.extend([nested.get('code'), nested.get('article'), nested.get('externalCode')])
+
+    # Некоторые ответы МойСклад кладут код/название позиции рядом с assortment.
+    extra_names.extend([position.get('assortmentName'), position.get('productName'), position.get('goodName'), position.get('variantName')])
+    extra_codes.extend([position.get('assortmentCode'), position.get('productCode'), position.get('goodCode'), position.get('variantCode')])
+
+    return _sales_motivation_metric_lookup_keys_for_values(
+        item_id=item_id,
+        item_code=item_code,
+        item_name=item_name,
+        extra_ids=extra_ids,
+        extra_codes=extra_codes,
+        extra_names=extra_names,
+    )
+
+
+def _sales_motivation_product_metric_lookup_keys(product: Any) -> list[str]:
+    getter = product.get if isinstance(product, dict) else lambda key, default=None: getattr(product, key, default)
+    return _sales_motivation_metric_lookup_keys_for_values(
+        item_id=getter('item_id'),
+        item_code=getter('item_code'),
+        item_name=getter('item_name'),
+    )
+
+
+def _find_sales_motivation_metric_for_product(
+    product: Any,
+    product_metrics: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    for key in _sales_motivation_product_metric_lookup_keys(product):
+        metric = product_metrics.get(key)
+        if metric:
+            return metric
+    return None
 
 
 def _extract_profit_report_item_id(row: dict[str, Any]) -> str | None:
@@ -4370,7 +4473,6 @@ async def _load_product_sales_metrics_for_day(point: LocationPoint, target_date:
             expand='store,retailStore,retailShift,retailShift.store,retailShift.retailStore',
             include_positions=True,
             positions_expand='assortment,assortment.productFolder',
-            positions_fields='stock',
         ),
         _fetch_document_rows(
             'retailsalesreturn',
@@ -4380,7 +4482,6 @@ async def _load_product_sales_metrics_for_day(point: LocationPoint, target_date:
             expand='store,retailStore,retailShift,retailShift.store,retailShift.retailStore,demand,demand.store,demand.retailStore,demand.retailShift,demand.retailShift.store,demand.retailShift.retailStore',
             include_positions=True,
             positions_expand='assortment,assortment.productFolder',
-            positions_fields='stock',
         ),
     )
     metrics: dict[str, dict[str, Any]] = {}
@@ -4396,24 +4497,30 @@ async def _load_product_sales_metrics_for_day(point: LocationPoint, target_date:
         )
         for position in _iter_positions(doc):
             item_id, item_name, item_code = _extract_position_item_identity(position)
-            if not item_id:
+            lookup_keys = _sales_motivation_position_metric_lookup_keys(position)
+            if not lookup_keys:
                 continue
             quantity = _quantity(position.get('quantity')) * sign
             sales_amount = _extract_position_amount(position) * sign
-            bucket = metrics.setdefault(item_id, {
-                'item_id': item_id,
-                'item_name': item_name or item_id,
-                'item_code': item_code,
-                'quantity': 0.0,
-                'sales_amount': 0.0,
-                'fiscalized_quantity': 0.0,
-                'fiscalized_sales_amount': 0.0,
-                'non_fiscalized_quantity': 0.0,
-                'non_fiscalized_sales_amount': 0.0,
-                'unknown_fiscalization_quantity': 0.0,
-                'unknown_fiscalization_sales_amount': 0.0,
-            })
-            if item_name and bucket.get('item_name') == item_id:
+            bucket = next((metrics.get(key) for key in lookup_keys if metrics.get(key)), None)
+            if bucket is None:
+                primary_key = item_id or lookup_keys[0]
+                bucket = {
+                    'item_id': item_id or primary_key,
+                    'item_name': item_name or item_id or primary_key,
+                    'item_code': item_code,
+                    'quantity': 0.0,
+                    'sales_amount': 0.0,
+                    'fiscalized_quantity': 0.0,
+                    'fiscalized_sales_amount': 0.0,
+                    'non_fiscalized_quantity': 0.0,
+                    'non_fiscalized_sales_amount': 0.0,
+                    'unknown_fiscalization_quantity': 0.0,
+                    'unknown_fiscalization_sales_amount': 0.0,
+                }
+            for key in lookup_keys:
+                metrics[key] = bucket
+            if item_name and bucket.get('item_name') == bucket.get('item_id'):
                 bucket['item_name'] = item_name
             if item_code and not bucket.get('item_code'):
                 bucket['item_code'] = item_code
@@ -4428,7 +4535,12 @@ async def _load_product_sales_metrics_for_day(point: LocationPoint, target_date:
             else:
                 bucket['unknown_fiscalization_quantity'] += quantity
                 bucket['unknown_fiscalization_sales_amount'] += sales_amount
+    seen_buckets: set[int] = set()
     for bucket in metrics.values():
+        marker = id(bucket)
+        if marker in seen_buckets:
+            continue
+        seen_buckets.add(marker)
         for quantity_key in ('quantity', 'fiscalized_quantity', 'non_fiscalized_quantity', 'unknown_fiscalization_quantity'):
             bucket[quantity_key] = round(float(bucket.get(quantity_key) or 0.0), 3)
         for amount_key in ('sales_amount', 'fiscalized_sales_amount', 'non_fiscalized_sales_amount', 'unknown_fiscalization_sales_amount'):
@@ -4662,7 +4774,7 @@ async def _calculate_shift_sales_motivations(
         fiscalization_mode = _sales_motivation_fiscalization_mode(include_fiscalized_sales)
         fiscalization_label = _sales_motivation_fiscalization_label(include_fiscalized_sales)
         for product in products_by_model.get(int(model.id), []):
-            metric = product_metrics.get(product.item_id)
+            metric = _find_sales_motivation_metric_for_product(product, product_metrics)
             if not metric:
                 continue
             quantity_source, sales_amount_source, fiscalization_status = _sales_motivation_metric_values(
@@ -4872,7 +4984,7 @@ async def refresh_sales_motivation_daily_snapshots(
                 reward_value = round(float(model.reward_value or 0.0), 2)
                 include_fiscalized_sales = bool(getattr(model, 'include_fiscalized_sales', True))
                 for product in products_by_model.get(int(model.id), []):
-                    metric = product_metrics.get(product.item_id) or {}
+                    metric = _find_sales_motivation_metric_for_product(product, product_metrics) or {}
                     sold_quantity_source, sold_amount_source, fiscalization_status = _sales_motivation_metric_values(
                         metric,
                         include_fiscalized_sales,
