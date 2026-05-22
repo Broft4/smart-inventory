@@ -16,6 +16,8 @@ const payrollState = {
     employeePenalties: [],
     salesMotivations: [],
     selectedMotivationProducts: new Map(),
+    editingSalesMotivationId: null,
+    editingSalesMotivationLocation: null,
     audit: [],
     shiftDays: [],
     categoryFilters: {
@@ -2420,10 +2422,40 @@ function renderShiftSalesMotivations(day) {
     `;
 }
 
+function renderMotivationSelectedProducts() {
+    const list = qs('sales-motivation-selected-list');
+    if (!list) return;
+    const products = [...payrollState.selectedMotivationProducts.values()]
+        .map(normalizeMotivationProductForPayload)
+        .sort((a, b) => String(a.item_name || '').localeCompare(String(b.item_name || ''), 'ru'));
+    if (!products.length) {
+        list.innerHTML = '';
+        return;
+    }
+    list.innerHTML = products.slice(0, 120).map((product) => `
+        <article class="expense-entry-card">
+            <div class="expense-entry-card-head">
+                <div>
+                    <strong>${escapeHtml(product.item_name || 'Товар')}</strong>
+                    <div class="muted-text">${product.item_code ? `код ${escapeHtml(product.item_code)} · ` : ''}${product.category_name ? `${escapeHtml(product.category_name)} · ` : ''}остаток ${Number(product.current_stock_qty || 0).toLocaleString('ru-RU')} шт.</div>
+                </div>
+                <button type="button" class="btn secondary btn-inline" onclick="removeSelectedMotivationProduct('${escapeHtml(product.item_id)}')">Убрать</button>
+            </div>
+        </article>
+    `).join('') + (products.length > 120 ? `<div class="muted-text">И ещё ${products.length - 120} товаров.</div>` : '');
+}
+
 function updateMotivationSelectedMeta() {
     const meta = qs('sales-motivation-selected-meta');
     if (meta) meta.textContent = `Выбрано товаров: ${payrollState.selectedMotivationProducts.size}`;
+    renderMotivationSelectedProducts();
 }
+
+window.removeSelectedMotivationProduct = function removeSelectedMotivationProduct(itemId) {
+    payrollState.selectedMotivationProducts.delete(String(itemId || ''));
+    updateMotivationSelectedMeta();
+    syncMotivationCatalogSelectionStates();
+};
 
 function trimMotivationPayloadText(value, maxLength = 1024) {
     const text = String(value ?? '').trim();
@@ -2654,6 +2686,9 @@ function renderSalesMotivations() {
                     ${(model.products || []).length > 80 ? `<div class="muted-text">И ещё ${(model.products || []).length - 80} товаров.</div>` : ''}
                 </div>
                 <div class="expense-entry-actions">
+                    <button type="button" class="btn secondary btn-inline" onclick="editSalesMotivation(${model.id})">Редактировать</button>
+                    <button type="button" class="btn secondary btn-inline" onclick="cloneSalesMotivationToForm(${model.id})">Копировать в форму</button>
+                    <button type="button" class="btn secondary btn-inline" onclick="copySalesMotivationToLocation(${model.id})">Копировать на точку</button>
                     <button type="button" class="btn danger btn-inline" onclick="deleteSalesMotivation(${model.id})">Удалить модель</button>
                 </div>
             </div>
@@ -2724,12 +2759,60 @@ async function loadHotProducts(expectedLocation = selectedLocation()) {
     }
 }
 
-async function createSalesMotivation() {
-    if (!isAdminRole() || isAllLocationsSelected()) return;
-    const button = qs('create-sales-motivation-btn');
+function getSalesMotivationModelById(id) {
+    return (payrollState.salesMotivations || []).find((model) => String(model.id) === String(id));
+}
+
+function setSalesMotivationFormMode(mode = 'create') {
+    const isEdit = mode === 'edit';
+    const title = qs('create-sales-motivation-btn')?.querySelector('.btn-label');
+    if (title) title.textContent = isEdit ? 'Сохранить изменения' : 'Создать мотивацию';
+    qs('cancel-sales-motivation-edit-btn')?.classList.toggle('hidden', !isEdit);
+}
+
+function setSalesMotivationFormValues(model, { copy = false } = {}) {
+    if (!model) return;
+    qs('sales-motivation-name').value = copy ? `Копия: ${model.name || 'Мотивация'}` : (model.name || '');
+    qs('sales-motivation-source').value = model.source_type || 'manual';
+    qs('sales-motivation-days').value = model.no_sales_days || 365;
+    qs('sales-motivation-reward-type').value = model.reward_type || 'percent';
+    qs('sales-motivation-reward-value').value = model.reward_value || '';
+    qs('sales-motivation-date-from').value = model.date_from || '';
+    qs('sales-motivation-date-to').value = model.date_to || '';
+    if (qs('sales-motivation-include-fiscalized')) qs('sales-motivation-include-fiscalized').checked = model.include_fiscalized_sales !== false;
+    if (qs('sales-motivation-active')) qs('sales-motivation-active').checked = model.is_active !== false;
+    payrollState.selectedMotivationProducts.clear();
+    (model.products || []).forEach((product) => {
+        const normalized = normalizeMotivationProductForPayload(product);
+        if (normalized.item_id) payrollState.selectedMotivationProducts.set(String(normalized.item_id), normalized);
+    });
+    updateMotivationSelectedMeta();
+    syncMotivationCatalogSelectionStates();
+}
+
+function resetSalesMotivationForm() {
+    payrollState.editingSalesMotivationId = null;
+    payrollState.editingSalesMotivationLocation = null;
+    setSalesMotivationFormMode('create');
+    if (qs('sales-motivation-name')) qs('sales-motivation-name').value = '';
+    if (qs('sales-motivation-source')) qs('sales-motivation-source').value = 'manual';
+    if (qs('sales-motivation-days')) qs('sales-motivation-days').value = 365;
+    if (qs('sales-motivation-reward-type')) qs('sales-motivation-reward-type').value = 'percent';
+    if (qs('sales-motivation-reward-value')) qs('sales-motivation-reward-value').value = '';
+    if (qs('sales-motivation-date-from')) qs('sales-motivation-date-from').value = '';
+    if (qs('sales-motivation-date-to')) qs('sales-motivation-date-to').value = '';
+    if (qs('sales-motivation-include-fiscalized')) qs('sales-motivation-include-fiscalized').checked = true;
+    if (qs('sales-motivation-active')) qs('sales-motivation-active').checked = true;
+    if (qs('sales-motivation-product-query')) qs('sales-motivation-product-query').value = '';
+    payrollState.selectedMotivationProducts.clear();
+    renderSalesMotivationProductCatalog({ categories: [] });
+    updateMotivationSelectedMeta();
+}
+
+function buildSalesMotivationPayload(location = selectedLocation()) {
     const products = [...payrollState.selectedMotivationProducts.values()].map(normalizeMotivationProductForPayload);
-    const payload = {
-        location: selectedLocation(),
+    return {
+        location,
         name: qs('sales-motivation-name')?.value?.trim() || '',
         source_type: qs('sales-motivation-source')?.value || 'manual',
         reward_type: qs('sales-motivation-reward-type')?.value || 'percent',
@@ -2741,37 +2824,107 @@ async function createSalesMotivation() {
         is_active: Boolean(qs('sales-motivation-active')?.checked),
         products,
     };
+}
+
+function validateSalesMotivationPayload(payload) {
     if (!payload.name) {
         showScopedStatus('create-sales-motivation-status', 'Введите название мотивации.', 'error');
-        return;
+        return false;
     }
     if (!payload.reward_value || payload.reward_value <= 0) {
         showScopedStatus('create-sales-motivation-status', 'Введите значение начисления.', 'error');
-        return;
+        return false;
     }
-    if (!products.length) {
+    if (!payload.products.length) {
         showScopedStatus('create-sales-motivation-status', 'Выберите товары для мотивации.', 'error');
+        return false;
+    }
+    return true;
+}
+
+window.editSalesMotivation = function editSalesMotivation(id) {
+    const model = getSalesMotivationModelById(id);
+    if (!model) return;
+    payrollState.editingSalesMotivationId = Number(model.id);
+    payrollState.editingSalesMotivationLocation = selectedLocation();
+    setSalesMotivationFormValues(model);
+    setSalesMotivationFormMode('edit');
+    qs('sales-motivations-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    showScopedStatus('create-sales-motivation-status', 'Редактируете существующую модель. После сохранения открытые и старые закрытые смены с отсутствующим snapshot мотивации будут считаться по обновлённым правилам.', 'loading');
+};
+
+window.cloneSalesMotivationToForm = function cloneSalesMotivationToForm(id) {
+    const model = getSalesMotivationModelById(id);
+    if (!model) return;
+    payrollState.editingSalesMotivationId = null;
+    payrollState.editingSalesMotivationLocation = null;
+    setSalesMotivationFormValues(model, { copy: true });
+    setSalesMotivationFormMode('create');
+    qs('sales-motivations-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    showScopedStatus('create-sales-motivation-status', 'Шаблон скопирован в форму. Измените товары или параметры и сохраните как новую модель.', 'loading');
+};
+
+window.copySalesMotivationToLocation = async function copySalesMotivationToLocation(id) {
+    const model = getSalesMotivationModelById(id);
+    if (!model) return;
+    const locations = normalizeLocationList(payrollState.locations || fallbackLocations()).filter((location) => !isAllLocationsSelected(location));
+    const variants = locations.filter((location) => location !== selectedLocation());
+    const targetLocation = prompt(`На какую точку скопировать модель?\nДоступные точки: ${(variants.length ? variants : locations).join(', ')}`, variants[0] || selectedLocation());
+    const normalizedTarget = String(targetLocation || '').trim();
+    if (!normalizedTarget) return;
+    const payload = {
+        location: normalizedTarget,
+        name: model.name || 'Мотивация',
+        source_type: model.source_type || 'manual',
+        reward_type: model.reward_type || 'percent',
+        reward_value: Number(model.reward_value || 0),
+        no_sales_days: model.no_sales_days || null,
+        include_fiscalized_sales: model.include_fiscalized_sales !== false,
+        date_from: model.date_from || null,
+        date_to: model.date_to || null,
+        is_active: model.is_active !== false,
+        products: (model.products || []).map(normalizeMotivationProductForPayload),
+    };
+    if (!payload.products.length) {
+        showStatus('В модели нет товаров для копирования.', 'error');
         return;
     }
-    showScopedStatus('create-sales-motivation-status', 'Сохраняем мотивацию...', 'loading');
-    setButtonLoading(button, true, 'Сохраняем...');
     try {
         const result = await api('/api/payroll/sales-motivations', { method: 'POST', body: JSON.stringify(payload) });
+        if (normalizedTarget === selectedLocation()) {
+            payrollState.salesMotivations = result.models || [];
+            renderSalesMotivations();
+        }
+        await loadAudit();
+        showStatus(`Модель скопирована на точку «${normalizedTarget}». Теперь её можно открыть на этой точке и отредактировать индивидуально.`, 'success');
+    } catch (error) {
+        showStatus(error.message || 'Не удалось скопировать мотивацию на другую точку.', 'error');
+    }
+};
+
+async function createSalesMotivation() {
+    if (!isAdminRole() || isAllLocationsSelected()) return;
+    const button = qs('create-sales-motivation-btn');
+    const isEdit = Boolean(payrollState.editingSalesMotivationId);
+    const payload = buildSalesMotivationPayload(selectedLocation());
+    if (!validateSalesMotivationPayload(payload)) return;
+    showScopedStatus('create-sales-motivation-status', isEdit ? 'Сохраняем изменения мотивации...' : 'Сохраняем мотивацию...', 'loading');
+    setButtonLoading(button, true, isEdit ? 'Сохраняем...' : 'Сохраняем...');
+    try {
+        const url = isEdit
+            ? `/api/payroll/sales-motivations/${payrollState.editingSalesMotivationId}`
+            : '/api/payroll/sales-motivations';
+        const method = isEdit ? 'PUT' : 'POST';
+        const result = await api(url, { method, body: JSON.stringify(payload) });
         payrollState.salesMotivations = result.models || [];
-        payrollState.selectedMotivationProducts.clear();
-        qs('sales-motivation-name').value = '';
-        qs('sales-motivation-reward-value').value = '';
-        if (qs('sales-motivation-include-fiscalized')) qs('sales-motivation-include-fiscalized').checked = true;
-        if (qs('sales-motivation-product-query')) qs('sales-motivation-product-query').value = '';
-        renderSalesMotivationProductCatalog({ categories: [] });
+        resetSalesMotivationForm();
         renderSalesMotivations();
-        updateMotivationSelectedMeta();
         await loadHotProducts();
         await loadSummary({ silent: true });
         await loadAudit();
-        showScopedStatus('create-sales-motivation-status', 'Мотивация сохранена.', 'success');
+        showScopedStatus('create-sales-motivation-status', isEdit ? 'Мотивация обновлена.' : 'Мотивация сохранена.', 'success');
     } catch (error) {
-        showScopedStatus('create-sales-motivation-status', error.message || 'Не удалось сохранить мотивацию.', 'error');
+        showScopedStatus('create-sales-motivation-status', error.message || (isEdit ? 'Не удалось обновить мотивацию.' : 'Не удалось сохранить мотивацию.'), 'error');
     } finally {
         setButtonLoading(button, false);
     }
@@ -2840,6 +2993,7 @@ async function bootstrap() {
 }
 
 qs('payroll-location-select').addEventListener('change', async () => {
+    resetSalesMotivationForm();
     const location = selectedLocation();
     payrollState.requestedSettingsEffectiveFrom = getStoredSettingsEffectiveFrom(location) || '';
     syncAllLocationsModeControls();
@@ -2884,6 +3038,7 @@ qs('sales-motivation-clear-products-btn')?.addEventListener('click', () => {
     updateMotivationSelectedMeta();
 });
 qs('create-sales-motivation-btn')?.addEventListener('click', createSalesMotivation);
+qs('cancel-sales-motivation-edit-btn')?.addEventListener('click', resetSalesMotivationForm);
 qs('sales-motivation-product-query')?.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
         event.preventDefault();

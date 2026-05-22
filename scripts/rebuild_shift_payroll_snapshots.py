@@ -17,9 +17,10 @@ from app.models import (  # noqa: E402
     LocationPoint,
     ShiftPayrollCategorySnapshot,
     ShiftPayrollSnapshot,
+    ShiftSalesMotivationSnapshot,
     WorkShift,
 )
-from app.payroll import _build_computed_shift  # noqa: E402
+from app.payroll import _add_shift_sales_motivation_snapshot_rows, _build_computed_shift  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -77,6 +78,10 @@ async def rebuild_snapshot_for_shift(shift: WorkShift, dry_run: bool) -> tuple[b
             )
 
         await db.execute(
+            delete(ShiftSalesMotivationSnapshot)
+            .where(ShiftSalesMotivationSnapshot.snapshot_id == snapshot.id)
+        )
+        await db.execute(
             delete(ShiftPayrollCategorySnapshot)
             .where(ShiftPayrollCategorySnapshot.snapshot_id == snapshot.id)
         )
@@ -125,6 +130,14 @@ async def rebuild_snapshot_for_shift(shift: WorkShift, dry_run: bool) -> tuple[b
                 earning_amount=row['earning_amount'],
                 is_other_category=row['is_other_category'],
             ))
+
+        _add_shift_sales_motivation_snapshot_rows(
+            db,
+            snapshot=new_snapshot,
+            shift=shift,
+            point=point,
+            rows=computed.sales_motivation_rows,
+        )
 
         await db.commit()
         return True, (

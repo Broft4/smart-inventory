@@ -4444,6 +4444,80 @@ def _calculate_sales_motivation_bonus(reward_type: str, reward_value: float, qua
     return round(sales_amount * (float(reward_value or 0.0) / 100.0), 2)
 
 
+def _sales_motivation_metric_values(metric: dict[str, Any], include_fiscalized_sales: bool) -> tuple[float, float, str]:
+    """Return quantity/amount for a motivation model.
+
+    МоемуСкладу не всегда удаётся однозначно вернуть признак фискализации для
+    розничной продажи. Такие строки попадают в unknown_fiscalization_*. Для
+    моделей “только без фискализации” считаем unknown как безопасный fallback:
+    пользователь видит продажу в детализации смены, и она не должна теряться из
+    карточки «Мотивация».
+    """
+    if include_fiscalized_sales:
+        return (
+            float(metric.get('quantity') or 0.0),
+            float(metric.get('sales_amount') or 0.0),
+            SALES_MOTIVATION_FISCAL_ANY,
+        )
+    non_fiscalized_quantity = float(metric.get('non_fiscalized_quantity') or 0.0)
+    non_fiscalized_amount = float(metric.get('non_fiscalized_sales_amount') or 0.0)
+    unknown_quantity = float(metric.get('unknown_fiscalization_quantity') or 0.0)
+    unknown_amount = float(metric.get('unknown_fiscalization_sales_amount') or 0.0)
+    return (
+        non_fiscalized_quantity + unknown_quantity,
+        non_fiscalized_amount + unknown_amount,
+        'not_fiscalized' if unknown_quantity <= 0 and unknown_amount <= 0 else 'not_fiscalized_or_unknown',
+    )
+
+
+def _add_shift_sales_motivation_snapshot_rows(
+    db: AsyncSession,
+    *,
+    snapshot: ShiftPayrollSnapshot,
+    shift: WorkShift,
+    point: LocationPoint,
+    rows: list[dict[str, Any]],
+) -> None:
+    for row in rows or []:
+        db.add(ShiftSalesMotivationSnapshot(
+            snapshot_id=snapshot.id,
+            shift_id=shift.id,
+            location_point_id=point.id,
+            employee_user_id=shift.employee_user_id,
+            shift_date=shift.shift_date,
+            model_id=row.get('model_id'),
+            model_name=str(row.get('model_name') or 'Мотивация')[:255],
+            reward_type=_normalize_sales_motivation_reward(row.get('reward_type')),
+            reward_value=round(float(row.get('reward_value') or 0.0), 2),
+            include_fiscalized_sales=bool(row.get('include_fiscalized_sales', True)),
+            fiscalization_status=str(row.get('fiscalization_status') or SALES_MOTIVATION_FISCAL_ANY)[:30],
+            item_id=str(row.get('item_id') or '')[:120],
+            item_name=str(row.get('item_name') or 'Товар')[:255],
+            item_code=_clean_optional_string(row.get('item_code'), max_length=120),
+            quantity=round(float(row.get('quantity') or 0.0), 3),
+            sales_amount=round(float(row.get('sales_amount') or 0.0), 2),
+            bonus_amount=round(float(row.get('bonus_amount') or 0.0), 2),
+        ))
+
+
+async def _load_or_calculate_shift_sales_motivation_snapshot_rows(
+    snapshot: ShiftPayrollSnapshot,
+    point: LocationPoint,
+    shift: WorkShift,
+    db: AsyncSession,
+) -> list[dict[str, Any]]:
+    rows = await _load_shift_sales_motivation_snapshot_rows(snapshot.id, db)
+    if rows:
+        return rows
+    _amount, _grouped, calculated_rows = await _calculate_shift_sales_motivations(
+        point,
+        shift,
+        float(snapshot.share_ratio or 0.0),
+        db,
+    )
+    return calculated_rows
+
+
 def _group_sales_motivation_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[str, dict[str, Any]] = {}
     for row in rows or []:
@@ -4514,14 +4588,10 @@ async def _calculate_shift_sales_motivations(
             metric = product_metrics.get(product.item_id)
             if not metric:
                 continue
-            if include_fiscalized_sales:
-                quantity_source = metric.get('quantity')
-                sales_amount_source = metric.get('sales_amount')
-                fiscalization_status = SALES_MOTIVATION_FISCAL_ANY
-            else:
-                quantity_source = metric.get('non_fiscalized_quantity')
-                sales_amount_source = metric.get('non_fiscalized_sales_amount')
-                fiscalization_status = 'not_fiscalized'
+            quantity_source, sales_amount_source, fiscalization_status = _sales_motivation_metric_values(
+                metric,
+                include_fiscalized_sales,
+            )
             quantity = round(float(quantity_source or 0.0) * float(share_ratio or 0.0), 3)
             sales_amount = round(float(sales_amount_source or 0.0) * float(share_ratio or 0.0), 2)
             bonus_amount = _calculate_sales_motivation_bonus(reward_type, reward_value, quantity, sales_amount)
@@ -4724,15 +4794,12 @@ async def refresh_sales_motivation_daily_snapshots(
                 reward_type = _normalize_sales_motivation_reward(model.reward_type)
                 reward_value = round(float(model.reward_value or 0.0), 2)
                 include_fiscalized_sales = bool(getattr(model, 'include_fiscalized_sales', True))
-                fiscalization_status = SALES_MOTIVATION_FISCAL_ANY if include_fiscalized_sales else 'not_fiscalized'
                 for product in products_by_model.get(int(model.id), []):
                     metric = product_metrics.get(product.item_id) or {}
-                    if include_fiscalized_sales:
-                        sold_quantity_source = metric.get('quantity')
-                        sold_amount_source = metric.get('sales_amount')
-                    else:
-                        sold_quantity_source = metric.get('non_fiscalized_quantity')
-                        sold_amount_source = metric.get('non_fiscalized_sales_amount')
+                    sold_quantity_source, sold_amount_source, fiscalization_status = _sales_motivation_metric_values(
+                        metric,
+                        include_fiscalized_sales,
+                    )
                     sold_quantity = round(float(sold_quantity_source or 0.0), 3)
                     sold_sales_amount = round(float(sold_amount_source or 0.0), 2)
                     bonus_amount = _calculate_sales_motivation_bonus(reward_type, reward_value, sold_quantity, sold_sales_amount)
@@ -5054,7 +5121,7 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
                 shift.shift_date,
                 db,
             )
-            snapshot_sales_motivation_rows = await _load_shift_sales_motivation_snapshot_rows(snapshot.id, db)
+            snapshot_sales_motivation_rows = await _load_or_calculate_shift_sales_motivation_snapshot_rows(snapshot, point, shift, db)
             snapshot_sales_motivation_amount = round(sum(float(row.get('bonus_amount') or 0.0) for row in snapshot_sales_motivation_rows), 2)
             snapshot_sales_motivations = _group_sales_motivation_rows(snapshot_sales_motivation_rows)
             snapshot_base_gross_salary = round(snapshot_exit + snapshot_bonus + snapshot_category_earnings_total, 2)
@@ -5304,26 +5371,13 @@ async def _close_shift_unlocked(shift_id: int, db: AsyncSession, actor_user: Use
             earning_amount=row['earning_amount'],
             is_other_category=row['is_other_category'],
         ))
-    for row in computed.sales_motivation_rows:
-        db.add(ShiftSalesMotivationSnapshot(
-            snapshot_id=snapshot.id,
-            shift_id=shift.id,
-            location_point_id=point.id,
-            employee_user_id=shift.employee_user_id,
-            shift_date=shift.shift_date,
-            model_id=row.get('model_id'),
-            model_name=str(row.get('model_name') or 'Мотивация')[:255],
-            reward_type=_normalize_sales_motivation_reward(row.get('reward_type')),
-            reward_value=round(float(row.get('reward_value') or 0.0), 2),
-            include_fiscalized_sales=bool(row.get('include_fiscalized_sales', True)),
-            fiscalization_status=str(row.get('fiscalization_status') or SALES_MOTIVATION_FISCAL_ANY)[:30],
-            item_id=str(row.get('item_id') or '')[:120],
-            item_name=str(row.get('item_name') or 'Товар')[:255],
-            item_code=_clean_optional_string(row.get('item_code'), max_length=120),
-            quantity=round(float(row.get('quantity') or 0.0), 3),
-            sales_amount=round(float(row.get('sales_amount') or 0.0), 2),
-            bonus_amount=round(float(row.get('bonus_amount') or 0.0), 2),
-        ))
+    _add_shift_sales_motivation_snapshot_rows(
+        db,
+        snapshot=snapshot,
+        shift=shift,
+        point=point,
+        rows=computed.sales_motivation_rows,
+    )
     shift.status = 'closed'
     shift.closed_at = datetime.utcnow()
     shift.closed_by_user_id = None if auto else (actor_user.id if actor_user else None)
@@ -5574,7 +5628,7 @@ async def _serialize_shift_lightweight(
             shift.shift_date,
             db,
         )
-        sales_motivation_rows = await _load_shift_sales_motivation_snapshot_rows(snapshot.id, db)
+        sales_motivation_rows = await _load_or_calculate_shift_sales_motivation_snapshot_rows(snapshot, point, shift, db)
         sales_motivation_amount = round(sum(float(row.get('bonus_amount') or 0.0) for row in sales_motivation_rows), 2)
         sales_motivations = _group_sales_motivation_rows(sales_motivation_rows)
         gross_salary_amount = round(float(snapshot.gross_salary_amount or 0) + employee_bonus_amount + sales_motivation_amount, 2)
@@ -6575,6 +6629,7 @@ async def rebuild_closed_shift_snapshots(
         is_auto_closed = bool(snapshot.is_auto_closed) if snapshot else False
 
         if snapshot is not None:
+            await db.execute(delete(ShiftSalesMotivationSnapshot).where(ShiftSalesMotivationSnapshot.snapshot_id == snapshot.id))
             await db.execute(delete(ShiftPayrollCategorySnapshot).where(ShiftPayrollCategorySnapshot.snapshot_id == snapshot.id))
             await db.delete(snapshot)
             await db.flush()
@@ -6621,6 +6676,14 @@ async def rebuild_closed_shift_snapshots(
                 earning_amount=row['earning_amount'],
                 is_other_category=row['is_other_category'],
             ))
+
+        _add_shift_sales_motivation_snapshot_rows(
+            db,
+            snapshot=new_snapshot,
+            shift=shift,
+            point=point,
+            rows=computed.sales_motivation_rows,
+        )
 
         await db.commit()
         updated += 1
