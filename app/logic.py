@@ -466,6 +466,26 @@ def _normalize_location(location: str) -> str:
     return location.strip().title()
 
 
+IMPLICIT_ROOT_SUBCATEGORY_NAME = 'Основная'
+
+
+def _is_implicit_root_subcategory(category: dict[str, Any], subcategory: dict[str, Any]) -> bool:
+    """
+    Товары могут лежать прямо в верхней папке МойСклад без вложенной
+    подкатегории. Раньше такая единственная ветка получала служебное имя
+    «Без подкатегории» и полностью скрывалась из ревизий, хотя в бухгалтерии
+    категория продолжала отображаться по продажам. Для таких случаев оставляем
+    категорию в ревизиях и показываем её как обычную техническую подкатегорию
+    «Основная».
+    """
+    if category.get('name') == DEFAULT_CATEGORY_NAME:
+        return False
+    if subcategory.get('name') != DEFAULT_SUBCATEGORY_NAME:
+        return False
+    real_subcategories = [row for row in category.get('subcategories', []) if row.get('items')]
+    return len(real_subcategories) == 1
+
+
 def _strip_ignored_inventory_branches(inventory: dict[str, Any]) -> dict[str, Any]:
     categories: list[dict[str, Any]] = []
     for category in inventory.get('categories', []):
@@ -473,11 +493,12 @@ def _strip_ignored_inventory_branches(inventory: dict[str, Any]) -> dict[str, An
             continue
         filtered_subcategories: list[dict[str, Any]] = []
         for subcategory in category.get('subcategories', []):
-            if subcategory.get('name') == DEFAULT_SUBCATEGORY_NAME:
+            is_implicit_root = _is_implicit_root_subcategory(category, subcategory)
+            if subcategory.get('name') == DEFAULT_SUBCATEGORY_NAME and not is_implicit_root:
                 continue
             filtered_subcategories.append({
                 'id': subcategory['id'],
-                'name': subcategory['name'],
+                'name': IMPLICIT_ROOT_SUBCATEGORY_NAME if is_implicit_root else subcategory['name'],
                 'items': [dict(item) for item in subcategory.get('items', [])],
             })
         if filtered_subcategories:
