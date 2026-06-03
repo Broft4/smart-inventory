@@ -15,6 +15,7 @@ from app.payroll import (
     rebuild_closed_shift_snapshots,
     refresh_payroll_metrics_cache,
     refresh_sales_motivation_daily_snapshots,
+    refresh_sales_motivation_product_catalog_cache,
 )
 
 
@@ -65,6 +66,16 @@ def _build_parser() -> argparse.ArgumentParser:
         '--refresh-sales-motivation-snapshots',
         action='store_true',
         help='Сохранить дневные снимки мотиваций продавцов: проданные и непроданные товары по активным моделям.',
+    )
+    parser.add_argument(
+        '--refresh-sales-motivation-catalog',
+        action='store_true',
+        help='Обновить БД-кеш каталога товаров для мотиваций продавцов.',
+    )
+    parser.add_argument(
+        '--only-sales-motivation-catalog',
+        action='store_true',
+        help='Запустить только обновление каталога товаров для мотиваций без пересчёта payroll-метрик.',
     )
     parser.add_argument(
         '--sales-motivation-days',
@@ -150,6 +161,42 @@ async def _run() -> None:
         )
 
         async with AsyncSessionLocal() as db:
+            if args.only_sales_motivation_catalog:
+                args.refresh_sales_motivation_catalog = True
+
+            async def catalog_progress(event: str, data: dict[str, Any]) -> None:
+                location_name = data.get('location') or 'все точки'
+                if event == 'start':
+                    stage['message'] = f'обновление каталога мотиваций, точек: {data.get("total_locations")}'
+                    _log(f'Каталог мотиваций: точек={data.get("total_locations")}.')
+                elif event == 'location_start':
+                    stage['message'] = f'каталог мотиваций: {location_name} ({data.get("index")}/{data.get("total")})'
+                    _log(f'Каталог мотиваций: {location_name}, наборов={data.get("catalogs")}.')
+                elif event == 'catalog_done':
+                    stage['message'] = f'каталог мотиваций: {location_name}, дней без продаж={data.get("no_sales_days") or 0}'
+                    _log(
+                        f'Каталог мотиваций обновлён: {location_name}, '
+                        f'дней без продаж={data.get("no_sales_days") or 0}, '
+                        f'товаров={data.get("product_count")}.'
+                    )
+                elif event == 'done':
+                    stage['message'] = 'каталог мотиваций обновлён'
+                    _log(
+                        f'Каталог мотиваций обновлён: наборов={data.get("catalogs_refreshed")}, '
+                        f'товаров всего={data.get("product_count_total")}.'
+                    )
+
+            if args.refresh_sales_motivation_catalog:
+                _log('Начинаю обновление БД-кеша каталога товаров для мотиваций продавцов...')
+                payload['sales_motivation_product_catalog_cache'] = await refresh_sales_motivation_product_catalog_cache(
+                    db,
+                    location=args.location,
+                    progress_callback=catalog_progress,
+                )
+
+            if args.only_sales_motivation_catalog:
+                return
+
             async def cache_progress(event: str, data: dict[str, Any]) -> None:
                 location_name = data.get('location') or 'все точки'
                 if event == 'start':

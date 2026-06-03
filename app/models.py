@@ -520,6 +520,22 @@ class PayrollRecalcJob(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class SalesMotivationProductCatalogCache(Base):
+    __tablename__ = 'sales_motivation_product_catalog_cache'
+    __table_args__ = (
+        UniqueConstraint('location_point_id', 'no_sales_days', name='uq_sales_motivation_catalog_location_days'),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    location_point_id: Mapped[int] = mapped_column(ForeignKey('location_points.id', ondelete='CASCADE'), nullable=False, index=True)
+    no_sales_days: Mapped[int] = mapped_column(Integer, default=0, nullable=False, index=True)
+    products_json: Mapped[str] = mapped_column(Text, default='[]', nullable=False)
+    product_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    source_refreshed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class SalesMotivationModel(Base):
     __tablename__ = 'sales_motivation_models'
 

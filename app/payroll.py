@@ -35,6 +35,7 @@ from app.models import (
     PayrollSettingsVersion,
     SalesMotivationModel,
     SalesMotivationProduct,
+    SalesMotivationProductCatalogCache,
     SalesMotivationDailySnapshot,
     ShiftSalesMotivationSnapshot,
     Report,
@@ -83,6 +84,7 @@ SALES_MOTIVATION_REWARD_FIXED = 'fixed'
 SALES_MOTIVATION_FISCAL_ANY = 'any'
 SALES_MOTIVATION_FISCAL_ONLY_NOT_FISCALIZED = 'only_not_fiscalized'
 SALES_MOTIVATION_POS_API_BASE_URL = 'https://online.moysklad.ru/api/posap/1.0'
+SALES_MOTIVATION_CATALOG_CACHE_TTL_SECONDS = 3600
 _sales_metrics_cache: dict[tuple[int, str, str], tuple[float, dict[date, dict[str, Any]]]] = {}
 _sales_metrics_refresh_locks: dict[tuple[int, str, str, bool], asyncio.Lock] = {}
 _shift_close_locks: dict[int, asyncio.Lock] = {}
@@ -302,6 +304,26 @@ def bootstrap_payroll_schema(connection) -> None:
             f"UPDATE employee_bonus_entries SET entry_type = '{EMPLOYEE_ADJUSTMENT_BONUS}' WHERE entry_type IS NULL OR entry_type = ''"
         )
         connection.exec_driver_sql("UPDATE employee_bonus_entries SET bonus_date = month_start WHERE bonus_date IS NULL")
+
+    if 'sales_motivation_product_catalog_cache' not in tables:
+        connection.exec_driver_sql(
+            "CREATE TABLE sales_motivation_product_catalog_cache ("
+            "id INTEGER NOT NULL PRIMARY KEY, "
+            "location_point_id INTEGER NOT NULL, "
+            "no_sales_days INTEGER NOT NULL DEFAULT 0, "
+            "products_json TEXT NOT NULL DEFAULT '[]', "
+            "product_count INTEGER NOT NULL DEFAULT 0, "
+            "source_refreshed_at DATETIME NOT NULL, "
+            "created_at DATETIME NOT NULL, "
+            "updated_at DATETIME NOT NULL, "
+            "FOREIGN KEY(location_point_id) REFERENCES location_points (id) ON DELETE CASCADE, "
+            "CONSTRAINT uq_sales_motivation_catalog_location_days UNIQUE (location_point_id, no_sales_days)"
+            ")"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX ix_sales_motivation_catalog_location_days "
+            "ON sales_motivation_product_catalog_cache (location_point_id, no_sales_days)"
+        )
 
     if 'sales_motivation_models' in tables:
         motivation_columns = {
@@ -2341,7 +2363,16 @@ async def create_manual_monthly_expense(payload: ManualMonthlyExpenseCreateReque
         },
     )
     await db.commit()
-    return await list_monthly_expenses(point.name, month_key, db, current_user)
+    employee_names = {}
+    if payload.assigned_employee_user_id:
+        employee_name = employee.full_name if 'employee' in locals() and employee else None
+        employee_names[payload.assigned_employee_user_id] = employee_name
+    return {
+        'success': True,
+        'location': point.name,
+        'month_start': month_key.isoformat(),
+        'entry': _serialize_monthly_expense_entry(entry, template_map={}, employee_names=employee_names),
+    }
 
 
 
@@ -2431,6 +2462,7 @@ async def delete_monthly_expense_entry(entry_id: int, db: AsyncSession, current_
         'comment': entry.comment,
     }
     await db.delete(entry)
+    month_start = entry.month_start
     await _log_payroll_action(
         db,
         actor_user_id=current_user.id,
@@ -2441,7 +2473,7 @@ async def delete_monthly_expense_entry(entry_id: int, db: AsyncSession, current_
         details=details,
     )
     await db.commit()
-    return await list_monthly_expenses(point.name, entry.month_start, db, current_user)
+    return {'success': True, 'location': point.name, 'month_start': month_start.isoformat(), 'deleted_id': entry_id}
 
 
 async def get_monthly_expenses(location: str, month: date, db: AsyncSession, current_user: User) -> dict[str, Any]:
@@ -2537,7 +2569,16 @@ async def update_monthly_expense_entry(entry_id: int, payload: MonthlyExpenseEnt
         }},
     )
     await db.commit()
-    return await list_monthly_expenses(point.name, entry.month_start, db, current_user)
+    employee_names = {}
+    if entry.assigned_employee_user_id:
+        employee_name = employee.full_name if 'employee' in locals() and employee else None
+        employee_names[entry.assigned_employee_user_id] = employee_name
+    return {
+        'success': True,
+        'location': point.name,
+        'month_start': entry.month_start.isoformat(),
+        'entry': _serialize_monthly_expense_entry(entry, template_map={}, employee_names=employee_names),
+    }
 
 
 
@@ -4089,19 +4130,100 @@ async def _load_last_sale_dates_for_products(
     return output
 
 
-async def get_sales_motivation_product_catalog(
-    location: str,
+def _normalize_sales_motivation_no_sales_days(value: Any) -> int:
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _sales_motivation_catalog_cache_is_fresh(row: SalesMotivationProductCatalogCache | None) -> bool:
+    if row is None:
+        return False
+    refreshed_at = row.source_refreshed_at or row.updated_at
+    if not isinstance(refreshed_at, datetime):
+        return False
+    return (datetime.utcnow() - refreshed_at).total_seconds() <= SALES_MOTIVATION_CATALOG_CACHE_TTL_SECONDS
+
+
+def _normalize_cached_sales_motivation_products(raw_products: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_products, list):
+        return []
+    products: list[dict[str, Any]] = []
+    for row in raw_products:
+        if not isinstance(row, dict):
+            continue
+        item_id = str(row.get('item_id') or '').strip()
+        if not item_id:
+            continue
+        cloned = dict(row)
+        cloned['item_id'] = item_id
+        cloned['item_name'] = str(cloned.get('item_name') or item_id).strip()
+        cloned['item_code'] = _clean_optional_string(cloned.get('item_code'), max_length=120)
+        cloned['category_id'] = _clean_optional_string(cloned.get('category_id'), max_length=120)
+        cloned['category_name'] = str(cloned.get('category_name') or DEFAULT_CATEGORY_NAME).strip()
+        cloned['subcategory_id'] = _clean_optional_string(cloned.get('subcategory_id'), max_length=120)
+        cloned['subcategory_name'] = str(cloned.get('subcategory_name') or DEFAULT_SUBCATEGORY_NAME).strip()
+        try:
+            cloned['current_stock_qty'] = round(float(cloned.get('current_stock_qty') or 0.0), 3)
+        except (TypeError, ValueError):
+            cloned['current_stock_qty'] = 0.0
+        last_sale_date = cloned.get('last_sale_date')
+        if isinstance(last_sale_date, date):
+            cloned['last_sale_date'] = last_sale_date.isoformat()
+        elif last_sale_date:
+            cloned['last_sale_date'] = str(last_sale_date)
+        else:
+            cloned['last_sale_date'] = None
+        days_without_sales = cloned.get('days_without_sales')
+        cloned['days_without_sales'] = _normalize_sales_motivation_no_sales_days(days_without_sales) if days_without_sales is not None else None
+        products.append(cloned)
+    products.sort(key=lambda row: (
+        str(row.get('category_name') or '').lower(),
+        str(row.get('subcategory_name') or '').lower(),
+        str(row.get('item_name') or '').lower(),
+    ))
+    return products
+
+
+def _serialize_sales_motivation_catalog_products(products: list[dict[str, Any]]) -> str:
+    normalized = _normalize_cached_sales_motivation_products(products)
+    return json.dumps(normalized, ensure_ascii=False)
+
+
+async def _load_sales_motivation_catalog_cache(
+    point: LocationPoint,
+    no_sales_days: int,
     db: AsyncSession,
-    current_user: User,
+) -> tuple[list[dict[str, Any]], SalesMotivationProductCatalogCache | None]:
+    row = await db.scalar(
+        select(SalesMotivationProductCatalogCache)
+        .where(
+            SalesMotivationProductCatalogCache.location_point_id == point.id,
+            SalesMotivationProductCatalogCache.no_sales_days == no_sales_days,
+        )
+        .limit(1)
+    )
+    if not _sales_motivation_catalog_cache_is_fresh(row):
+        return [], row
+    try:
+        raw_products = json.loads(row.products_json or '[]')
+    except Exception:
+        logger.warning('Повреждён кеш каталога мотивационных товаров для точки %s.', point.name, exc_info=True)
+        return [], row
+    products = _normalize_cached_sales_motivation_products(raw_products)
+    return products, row
+
+
+async def _build_sales_motivation_catalog_products_live(
+    point: LocationPoint,
+    db: AsyncSession,
     *,
-    no_sales_days: int | None = None,
-    query: str | None = None,
-) -> dict[str, Any]:
-    await ensure_user_can_access_location(current_user, location, db)
-    point = await _get_location_point_by_name(location, db)
+    no_sales_days: int = 0,
+) -> list[dict[str, Any]]:
     products = await _flatten_inventory_products(point, db)
     today = get_moscow_today()
-    normalized_days = int(no_sales_days or 0)
+    normalized_days = _normalize_sales_motivation_no_sales_days(no_sales_days)
     if normalized_days > 0:
         cutoff = today - timedelta(days=normalized_days - 1)
         last_sale_dates = await _load_last_sale_dates_for_products(point, products, cutoff, today)
@@ -4119,19 +4241,93 @@ async def get_sales_motivation_product_catalog(
         for row in products:
             row['last_sale_date'] = None
             row['days_without_sales'] = None
+    return _normalize_cached_sales_motivation_products(products)
 
+
+async def _store_sales_motivation_catalog_cache(
+    point: LocationPoint,
+    no_sales_days: int,
+    products: list[dict[str, Any]],
+    db: AsyncSession,
+) -> SalesMotivationProductCatalogCache:
+    normalized_days = _normalize_sales_motivation_no_sales_days(no_sales_days)
+    now = datetime.utcnow()
+    row = await db.scalar(
+        select(SalesMotivationProductCatalogCache)
+        .where(
+            SalesMotivationProductCatalogCache.location_point_id == point.id,
+            SalesMotivationProductCatalogCache.no_sales_days == normalized_days,
+        )
+        .limit(1)
+    )
+    payload = {
+        'products_json': _serialize_sales_motivation_catalog_products(products),
+        'product_count': len(products),
+        'source_refreshed_at': now,
+        'updated_at': now,
+    }
+    if row is None:
+        row = SalesMotivationProductCatalogCache(
+            location_point_id=point.id,
+            no_sales_days=normalized_days,
+            created_at=now,
+            **payload,
+        )
+        db.add(row)
+    else:
+        for key, value in payload.items():
+            setattr(row, key, value)
+    await db.flush()
+    return row
+
+
+async def _get_or_refresh_sales_motivation_catalog_products(
+    point: LocationPoint,
+    db: AsyncSession,
+    *,
+    no_sales_days: int = 0,
+    force_refresh: bool = False,
+    commit: bool = False,
+) -> tuple[list[dict[str, Any]], bool, datetime | None]:
+    normalized_days = _normalize_sales_motivation_no_sales_days(no_sales_days)
+    cache_row: SalesMotivationProductCatalogCache | None = None
+    if not force_refresh:
+        cached_products, cache_row = await _load_sales_motivation_catalog_cache(point, normalized_days, db)
+        if cache_row is not None and _sales_motivation_catalog_cache_is_fresh(cache_row):
+            return cached_products, True, cache_row.source_refreshed_at
+
+    products = await _build_sales_motivation_catalog_products_live(point, db, no_sales_days=normalized_days)
+    cache_row = await _store_sales_motivation_catalog_cache(point, normalized_days, products, db)
+    if commit:
+        await db.commit()
+    return products, False, cache_row.source_refreshed_at
+
+
+def _filter_sales_motivation_catalog_products(products: list[dict[str, Any]], query: str | None) -> list[dict[str, Any]]:
     search = _normalize_category_name_key(query)
-    if search:
-        products = [
-            row for row in products
-            if search in _normalize_category_name_key(row.get('item_name'))
-            or search in _normalize_category_name_key(row.get('item_code'))
-            or search in _normalize_category_name_key(row.get('category_name'))
-            or search in _normalize_category_name_key(row.get('subcategory_name'))
-        ]
+    if not search:
+        return list(products)
+    return [
+        row for row in products
+        if search in _normalize_category_name_key(row.get('item_name'))
+        or search in _normalize_category_name_key(row.get('item_code'))
+        or search in _normalize_category_name_key(row.get('category_name'))
+        or search in _normalize_category_name_key(row.get('subcategory_name'))
+    ]
 
+
+def _build_sales_motivation_catalog_response(
+    point: LocationPoint,
+    products: list[dict[str, Any]],
+    *,
+    no_sales_days: int,
+    query: str | None = None,
+    from_cache: bool = False,
+    refreshed_at: datetime | None = None,
+) -> dict[str, Any]:
+    filtered_products = _filter_sales_motivation_catalog_products(products, query)
     categories: dict[str, dict[str, Any]] = {}
-    for row in products:
+    for row in filtered_products:
         category_key = row.get('category_id') or f"category-name:{row.get('category_name') or DEFAULT_CATEGORY_NAME}"
         category = categories.setdefault(category_key, {
             'id': row.get('category_id') or category_key,
@@ -4156,11 +4352,121 @@ async def get_sales_motivation_product_catalog(
 
     return {
         'location': point.name,
-        'no_sales_days': normalized_days or None,
-        'product_count': len(products),
+        'no_sales_days': no_sales_days or None,
+        'product_count': len(filtered_products),
+        'total_cached_product_count': len(products),
         'categories': category_list,
-        'products': products[:1000],
+        'products': filtered_products[:1000],
+        'from_cache': from_cache,
+        'cache_refreshed_at': refreshed_at.isoformat() if refreshed_at else None,
     }
+
+
+async def get_sales_motivation_product_catalog(
+    location: str,
+    db: AsyncSession,
+    current_user: User,
+    *,
+    no_sales_days: int | None = None,
+    query: str | None = None,
+) -> dict[str, Any]:
+    await ensure_user_can_access_location(current_user, location, db)
+    point = await _get_location_point_by_name(location, db)
+    normalized_days = _normalize_sales_motivation_no_sales_days(no_sales_days)
+    products, from_cache, refreshed_at = await _get_or_refresh_sales_motivation_catalog_products(
+        point,
+        db,
+        no_sales_days=normalized_days,
+        force_refresh=False,
+        commit=True,
+    )
+    return _build_sales_motivation_catalog_response(
+        point,
+        products,
+        no_sales_days=normalized_days,
+        query=query,
+        from_cache=from_cache,
+        refreshed_at=refreshed_at,
+    )
+
+
+async def refresh_sales_motivation_product_catalog_cache(
+    db: AsyncSession,
+    *,
+    location: str | None = None,
+    current_user: User | None = None,
+    progress_callback: Any | None = None,
+) -> dict[str, Any]:
+    points = await _resolve_sales_motivation_snapshot_points(db, location=location, current_user=current_user)
+    total_catalogs = 0
+    refreshed_catalogs = 0
+    product_count_total = 0
+    results: list[dict[str, Any]] = []
+
+    if progress_callback:
+        await progress_callback('start', {'total_locations': len(points)})
+
+    for point_index, point in enumerate(points, start=1):
+        days_values: set[int] = {0, 365}
+        rows = (
+            await db.scalars(
+                select(SalesMotivationModel.no_sales_days)
+                .where(
+                    SalesMotivationModel.location_point_id == point.id,
+                    SalesMotivationModel.source_type == SALES_MOTIVATION_SOURCE_NO_SALES_DAYS,
+                    SalesMotivationModel.is_active.is_(True),
+                )
+            )
+        ).all()
+        for value in rows:
+            days_values.add(_normalize_sales_motivation_no_sales_days(value))
+        days_values = {value for value in days_values if value >= 0}
+
+        if progress_callback:
+            await progress_callback('location_start', {
+                'location': point.name,
+                'index': point_index,
+                'total': len(points),
+                'catalogs': len(days_values),
+            })
+
+        for days_value in sorted(days_values):
+            total_catalogs += 1
+            products, _from_cache, refreshed_at = await _get_or_refresh_sales_motivation_catalog_products(
+                point,
+                db,
+                no_sales_days=days_value,
+                force_refresh=True,
+                commit=False,
+            )
+            refreshed_catalogs += 1
+            product_count_total += len(products)
+            results.append({
+                'location': point.name,
+                'no_sales_days': days_value or None,
+                'product_count': len(products),
+                'cache_refreshed_at': refreshed_at.isoformat() if refreshed_at else None,
+            })
+            if progress_callback:
+                await progress_callback('catalog_done', {
+                    'location': point.name,
+                    'no_sales_days': days_value or None,
+                    'product_count': len(products),
+                    'refreshed_catalogs': refreshed_catalogs,
+                })
+
+    await db.commit()
+    result = {
+        'location': location,
+        'locations_processed': len(points),
+        'catalogs_total': total_catalogs,
+        'catalogs_refreshed': refreshed_catalogs,
+        'product_count_total': product_count_total,
+        'items': results,
+    }
+    if progress_callback:
+        await progress_callback('done', result)
+    return result
 
 
 async def _replace_sales_motivation_products(
@@ -4937,7 +5243,8 @@ async def refresh_sales_motivation_daily_snapshots(
     for point_index, point in enumerate(points, start=1):
         inventory_by_id: dict[str, dict[str, Any]] = {}
         try:
-            inventory_by_id = {row['item_id']: row for row in await _flatten_inventory_products(point, db) if row.get('item_id')}
+            inventory_products, _inventory_from_cache, _inventory_refreshed_at = await _get_or_refresh_sales_motivation_catalog_products(point, db, no_sales_days=0, force_refresh=True, commit=False)
+            inventory_by_id = {row['item_id']: row for row in inventory_products if row.get('item_id')}
         except Exception:
             logger.warning(
                 'Не удалось обновить остатки для дневного снимка мотиваций точки %s. Используем товары из моделей.',
@@ -6388,11 +6695,15 @@ async def _calculate_manager_salary_proration(
             continue
 
         month_metrics = await _load_point_sales_metrics(point, month_start, realized_end, db)
-        month_net_sales = round(sum(_resolve_calculation_sales_base(day.get('gross_sales_amount'), day.get('net_sales_amount')) for day in month_metrics.values()), 2)
+        # Зарплата управляющего должна считаться от той же прибыли, которую видит
+        # пользователь в карточке «Прибыль до зарплаты управляющего». Раньше здесь
+        # брался net_sales_amount, а в сводке периода — gross_sales_amount/revenue_amount;
+        # из-за этого полный месяц с возвратами давал процент не от отображаемой прибыли.
+        month_revenue_amount = round(sum(float(day.get('gross_sales_amount') or 0.0) for day in month_metrics.values()), 2)
         month_cost_amount = round(sum(float(day.get('cost_amount') or 0.0) for day in month_metrics.values()), 2)
         month_employee_salary_total = await _sum_shift_salaries(point, month_start, realized_end, db)
         month_expenses_total = await _collect_period_company_expenses(point, month_start, realized_end, db)
-        month_operating_profit = round(month_net_sales - month_cost_amount - month_employee_salary_total - month_expenses_total, 2)
+        month_operating_profit = round(month_revenue_amount - month_cost_amount - month_employee_salary_total - month_expenses_total, 2)
 
         month_settings = await _get_settings_for_date(point, selected_to, db)
         month_brackets = _load_manager_salary_brackets(month_settings)

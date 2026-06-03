@@ -30,6 +30,7 @@ const payrollState = {
     recalcPollTimer: null,
     summaryLoadingPromise: null,
     setupRequestSeq: 0,
+    summaryRequestSeq: 0,
     lastViewportWidth: window.innerWidth || 0,
     expensesCollapsed: true,
 };
@@ -266,6 +267,78 @@ function hideStatus() {
     box.classList.add('hidden');
     box.textContent = '';
     box.className = 'inventory-status hidden';
+}
+
+const PAYROLL_LOADING_STEPS = [
+    { id: 'revenue', label: 'Загружаем выручку', hint: 'Продажи, возвраты и кассовые суммы' },
+    { id: 'profit', label: 'Считаем прибыль', hint: 'Себестоимость, расходы точки и зарплаты сотрудников' },
+    { id: 'shifts', label: 'Детализация по сменам', hint: 'Выходы, категории и дневные начисления' },
+    { id: 'penalties', label: 'Штрафы', hint: 'Удержания по сотрудникам' },
+    { id: 'bonuses', label: 'Премии', hint: 'Дополнительные начисления' },
+    { id: 'motivations', label: 'Мотивационные товары', hint: 'Снимки продаж и бонусы за товары' },
+    { id: 'totals', label: 'Итоговый расчёт', hint: 'Сводим сумму к выплате' },
+];
+
+function createPayrollProgressTracker(silent = false) {
+    const statusById = new Map(PAYROLL_LOADING_STEPS.map(step => [step.id, 'pending']));
+    const render = (message = 'Загружаем расчёт зарплаты...') => {
+        if (silent) return;
+        const box = qs('payroll-status');
+        if (!box) return;
+        box.className = 'inventory-status loading payroll-loading-status';
+        box.classList.remove('hidden');
+        const stepsMarkup = PAYROLL_LOADING_STEPS.map(step => {
+            const state = statusById.get(step.id) || 'pending';
+            const stateLabel = state === 'done' ? 'готово' : (state === 'active' ? 'идёт' : (state === 'error' ? 'ошибка' : 'ждёт'));
+            return `
+                <div class="payroll-loading-step ${state}">
+                    <span class="payroll-loading-dot" aria-hidden="true"></span>
+                    <div>
+                        <strong>${escapeHtml(step.label)}</strong>
+                        <span>${escapeHtml(step.hint)} · ${stateLabel}</span>
+                    </div>
+                </div>
+            `;
+        }).join('');
+        box.innerHTML = `
+            <div class="payroll-loading-head">
+                <span class="inventory-spinner" aria-hidden="true"></span>
+                <strong>${escapeHtml(message)}</strong>
+            </div>
+            <div class="payroll-loading-steps">${stepsMarkup}</div>
+            <div class="payroll-loading-note">Готовые блоки появляются на странице сразу, остальные продолжают загружаться.</div>
+        `;
+    };
+    const mark = (ids, state, message) => {
+        (Array.isArray(ids) ? ids : [ids]).forEach(id => {
+            if (statusById.has(id)) statusById.set(id, state);
+        });
+        render(message);
+    };
+    return {
+        start(message) {
+            ['revenue', 'profit', 'shifts'].forEach(id => statusById.set(id, 'active'));
+            render(message);
+        },
+        active(ids, message) { mark(ids, 'active', message); },
+        done(ids, message) { mark(ids, 'done', message); },
+        error(ids, message) { mark(ids, 'error', message); },
+        finishSuccess(message = 'Данные обновлены.') {
+            if (silent) return;
+            PAYROLL_LOADING_STEPS.forEach(step => {
+                if (statusById.get(step.id) !== 'error') statusById.set(step.id, 'done');
+            });
+            render(message);
+            const box = qs('payroll-status');
+            if (box) box.className = 'inventory-status success payroll-loading-status';
+        },
+        finishPartial(message = 'Часть данных загружена, часть не удалось обновить.') {
+            if (silent) return;
+            render(message);
+            const box = qs('payroll-status');
+            if (box) box.className = 'inventory-status error payroll-loading-status';
+        },
+    };
 }
 
 
@@ -1378,6 +1451,31 @@ function renderExpenses() {
     });
 }
 
+function upsertExpenseEntry(entry) {
+    if (!entry || !entry.id) return;
+    const entries = Array.isArray(payrollState.expenses) ? [...payrollState.expenses] : [];
+    const index = entries.findIndex(item => Number(item.id) === Number(entry.id));
+    if (index >= 0) entries[index] = { ...entries[index], ...entry };
+    else entries.unshift(entry);
+    entries.sort((left, right) => {
+        const leftDate = new Date(left.updated_at || left.created_at || 0).getTime();
+        const rightDate = new Date(right.updated_at || right.created_at || 0).getTime();
+        return rightDate - leftDate || Number(right.id || 0) - Number(left.id || 0);
+    });
+    payrollState.expenses = entries;
+    renderExpenses();
+}
+
+function removeExpenseEntry(id) {
+    payrollState.expenses = (payrollState.expenses || []).filter(item => Number(item.id) !== Number(id));
+    renderExpenses();
+}
+
+function refreshPayrollAfterExpenseChange() {
+    loadSummary({ silent: true }).catch((error) => console.error(error));
+    loadAudit().catch((error) => console.error(error));
+}
+
 
 
 function bonusEmployeeName(entry) {
@@ -1722,42 +1820,91 @@ async function loadSummary(options = {}) {
         return payrollState.summaryLoadingPromise;
     }
 
+    const requestSeq = ++payrollState.summaryRequestSeq;
     const run = (async () => {
         const location = selectedLocation();
         const dateFrom = qs('payroll-date-from').value;
         const dateTo = qs('payroll-date-to').value;
         if (!location || !dateFrom || !dateTo) return null;
         syncAllLocationsModeControls();
+
+        const isCurrentRequest = () => requestSeq === payrollState.summaryRequestSeq
+            && selectedLocation() === location
+            && qs('payroll-date-from')?.value === dateFrom
+            && qs('payroll-date-to')?.value === dateTo;
+
+        const progress = createPayrollProgressTracker(silent);
         if (!silent) {
-            showStatus('Загружаем расчёт зарплаты...', 'loading');
+            progress.start('Загружаем расчёт зарплаты по этапам...');
+            setButtonLoading(qs('payroll-load-btn'), true, 'Загружаем...');
         }
-        try {
-            const employeeId = selectedEmployeeId();
-            const employeeQuery = employeeId ? `&employee_user_id=${employeeId}` : '';
-            const summary = await api(`/api/payroll/employee-summary?location=${encodeURIComponent(location)}&date_from=${dateFrom}&date_to=${dateTo}${employeeQuery}`);
+
+        const employeeId = selectedEmployeeId();
+        const employeeQuery = employeeId ? `&employee_user_id=${employeeId}` : '';
+        const employeeUrl = `/api/payroll/employee-summary?location=${encodeURIComponent(location)}&date_from=${dateFrom}&date_to=${dateTo}${employeeQuery}`;
+        const managerUrl = `/api/payroll/manager-summary?location=${encodeURIComponent(location)}&date_from=${dateFrom}&date_to=${dateTo}`;
+
+        const employeeTask = (async () => {
+            progress.active(['shifts', 'penalties', 'bonuses', 'motivations'], 'Загружаем смены, штрафы, премии и мотивации...');
+            const summary = await api(employeeUrl);
+            if (!isCurrentRequest()) return null;
             renderSummary(summary);
-            if (isAdminRole()) {
-                const managerSummary = await api(`/api/payroll/manager-summary?location=${encodeURIComponent(location)}&date_from=${dateFrom}&date_to=${dateTo}`);
-                renderManagerSummary(managerSummary);
-            }
-            if (!silent) {
-                showStatus('Данные обновлены.', 'success');
-                setTimeout(hideStatus, 1500);
-            }
+            progress.done(['shifts', 'penalties', 'bonuses', 'motivations', 'totals'], 'Детализация зарплаты загружена, досчитываем прибыль...');
             return summary;
-        } catch (error) {
-            console.error(error);
-            if (!silent) {
-                showStatus(error.message || 'Не удалось загрузить зарплату.', 'error');
-            }
-            return null;
+        })();
+
+        const managerTask = isAdminRole()
+            ? (async () => {
+                progress.active(['revenue', 'profit'], 'Загружаем выручку и прибыль точки...');
+                const managerSummary = await api(managerUrl);
+                if (!isCurrentRequest()) return null;
+                renderManagerSummary(managerSummary);
+                progress.done(['revenue', 'profit'], 'Выручка и прибыль загружены, продолжаем детализацию...');
+                return managerSummary;
+            })()
+            : Promise.resolve(null);
+
+        const [employeeResult, managerResult] = await Promise.allSettled([employeeTask, managerTask]);
+        if (!isCurrentRequest()) return null;
+
+        const errors = [];
+        if (employeeResult.status === 'rejected') {
+            console.error(employeeResult.reason);
+            errors.push(employeeResult.reason);
+            progress.error(['shifts', 'penalties', 'bonuses', 'motivations', 'totals'], 'Не удалось загрузить детализацию зарплаты.');
         }
+        if (managerResult.status === 'rejected') {
+            console.error(managerResult.reason);
+            errors.push(managerResult.reason);
+            progress.error(['revenue', 'profit'], 'Не удалось загрузить прибыль управляющего.');
+        }
+
+        if (errors.length) {
+            if (!silent) {
+                const loadedSomething = employeeResult.status === 'fulfilled' || managerResult.status === 'fulfilled';
+                if (loadedSomething) {
+                    progress.finishPartial('Часть данных загружена. Проверьте блоки, которые не обновились.');
+                } else {
+                    showStatus(errors[0]?.message || 'Не удалось загрузить зарплату.', 'error');
+                }
+            }
+            return employeeResult.status === 'fulfilled' ? employeeResult.value : null;
+        }
+
+        if (!silent) {
+            progress.finishSuccess('Данные обновлены.');
+            setTimeout(hideStatus, 1500);
+        }
+        return employeeResult.status === 'fulfilled' ? employeeResult.value : null;
     })();
 
     payrollState.summaryLoadingPromise = run;
     try {
         return await run;
     } finally {
+        if (!silent) {
+            setButtonLoading(qs('payroll-load-btn'), false);
+        }
         if (payrollState.summaryLoadingPromise === run) {
             payrollState.summaryLoadingPromise = null;
         }
@@ -2115,11 +2262,11 @@ window.saveExpenseEntry = async function saveExpenseEntry(id) {
     showScopedStatus(`expense-status-${id}`, 'Сохраняем расход...', 'loading');
     setButtonLoading(button, true, 'Сохраняем...');
     try {
-        await api(`/api/payroll/expenses/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
-        await loadExpenseTemplatesAndEntries();
-        await loadSummary();
-        await loadAudit();
-        showStatus('Расход сохранён.', 'success');
+        const response = await api(`/api/payroll/expenses/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
+        if (response?.entry) upsertExpenseEntry(response.entry);
+        else await loadExpenseTemplatesAndEntries();
+        refreshPayrollAfterExpenseChange();
+        showStatus('Расход сохранён. Итоги пересчитываются без ожидания.', 'success');
         showScopedStatus(`expense-status-${id}`, 'Расход сохранён.', 'success');
     } catch (error) {
         showStatus(error.message || 'Не удалось сохранить расход.', 'error');
@@ -2155,7 +2302,7 @@ async function createManualExpense() {
     showScopedStatus('create-manual-expense-status', 'Сохраняем свободный расход...', 'loading');
     setButtonLoading(button, true, 'Сохраняем...');
     try {
-        await api('/api/payroll/expenses/manual', { method: 'POST', body: JSON.stringify(payload) });
+        const response = await api('/api/payroll/expenses/manual', { method: 'POST', body: JSON.stringify(payload) });
         qs('manual-expense-name').value = '';
         qs('manual-expense-amount').value = '';
         qs('manual-expense-mode').value = 'single_day';
@@ -2164,10 +2311,10 @@ async function createManualExpense() {
         qs('manual-expense-apply').checked = false;
         qs('manual-expense-comment').value = '';
         syncManualExpenseDefaults({ forceDate: true });
-        await loadExpenseTemplatesAndEntries();
-        await loadSummary();
-        await loadAudit();
-        showStatus('Свободный расход добавлен.', 'success');
+        if (response?.entry) upsertExpenseEntry(response.entry);
+        else await loadExpenseTemplatesAndEntries();
+        refreshPayrollAfterExpenseChange();
+        showStatus('Свободный расход добавлен. Итоги пересчитываются без ожидания.', 'success');
         showScopedStatus('create-manual-expense-status', 'Свободный расход сохранён.', 'success');
     } catch (error) {
         showStatus(error.message || 'Не удалось добавить свободный расход.', 'error');
@@ -2181,10 +2328,9 @@ window.deleteExpenseEntry = async function deleteExpenseEntry(id) {
     if (!confirm('Удалить этот свободный расход?')) return;
     try {
         await api(`/api/payroll/expenses/${id}`, { method: 'DELETE' });
-        await loadExpenseTemplatesAndEntries();
-        await loadSummary();
-        await loadAudit();
-        showStatus('Свободный расход удалён.', 'success');
+        removeExpenseEntry(id);
+        refreshPayrollAfterExpenseChange();
+        showStatus('Свободный расход удалён. Итоги пересчитываются без ожидания.', 'success');
     } catch (error) {
         showStatus(error.message || 'Не удалось удалить свободный расход.', 'error');
     }
@@ -2653,11 +2799,11 @@ async function loadSalesMotivationProductCatalog() {
         button.classList.add('loading');
         button.textContent = 'Загружаем...';
     }
-    showScopedStatus('sales-motivations-status', 'Подбираем товары...', 'loading');
+    showScopedStatus('sales-motivations-status', 'Подбираем товары: сначала проверяем БД-кеш, при необходимости обновляем из МойСклад...', 'loading');
     try {
         const payload = await api(`/api/payroll/sales-motivations/product-catalog?${params.toString()}`);
         renderSalesMotivationProductCatalog(payload);
-        showScopedStatus('sales-motivations-status', `Найдено товаров: ${payload.product_count || 0}`, 'success');
+        showScopedStatus('sales-motivations-status', `Найдено товаров: ${payload.product_count || 0}${payload.from_cache ? ' · из БД-кеша' : ' · кеш обновлён из МойСклад'}`, 'success');
     } catch (error) {
         showScopedStatus('sales-motivations-status', error.message || 'Не удалось подобрать товары.', 'error');
     } finally {
