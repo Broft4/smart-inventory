@@ -11,3 +11,5 @@ inventory.db-wal
 inventory.db-shm
 *.db-wal
 *.db-shm
+.env
+*.env

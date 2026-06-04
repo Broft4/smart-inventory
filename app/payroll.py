@@ -74,7 +74,7 @@ TOBACCO_KEYWORDS = ('сигарет', 'сигарилл', 'стик')
 
 SALES_METRICS_TTL_SECONDS = 90
 PAYROLL_DAILY_CACHE_RECENT_TTL_SECONDS = 900
-PAYROLL_OPEN_SHIFT_CACHE_TTL_SECONDS = 300
+PAYROLL_OPEN_SHIFT_CACHE_TTL_SECONDS = 60
 PAYROLL_ALL_LOCATIONS_VALUE = '__all__'
 PAYROLL_ALL_LOCATIONS_LABEL = 'Все точки'
 SALES_MOTIVATION_SOURCE_MANUAL = 'manual'
@@ -3583,6 +3583,37 @@ async def _get_open_shift_dates(point: LocationPoint, date_from: date, date_to: 
     return {row for row in rows if isinstance(row, date)}
 
 
+def _strip_metrics_internal_fields(metrics_by_day: dict[date, dict[str, Any]]) -> dict[date, dict[str, Any]]:
+    return {
+        day: {key: value for key, value in (metrics or {}).items() if not str(key).startswith('_')}
+        for day, metrics in metrics_by_day.items()
+    }
+
+
+async def _load_stale_point_sales_metrics_fallback(
+    point: LocationPoint,
+    date_from: date,
+    date_to: date,
+    db: AsyncSession | None,
+) -> dict[date, dict[str, Any]]:
+    result: dict[date, dict[str, Any]] = {}
+    if db is not None:
+        try:
+            result.update(_strip_metrics_internal_fields(await _get_cached_point_sales_metrics(point, date_from, date_to, db)))
+        except Exception:
+            logger.warning(
+                'Не удалось прочитать stale-cache payroll-метрик для точки %s за период %s..%s.',
+                point.name,
+                date_from.isoformat(),
+                date_to.isoformat(),
+                exc_info=True,
+            )
+    cached = _sales_metrics_cache.get((point.id, date_from.isoformat(), date_to.isoformat()))
+    if cached:
+        result.update(_strip_metrics_internal_fields(cached[1]))
+    return {day: result.get(day, _empty_day_metrics()) for day in _daterange(date_from, date_to)}
+
+
 async def _load_point_sales_metrics_unlocked(
     point: LocationPoint,
     date_from: date,
@@ -3646,12 +3677,12 @@ async def _load_point_sales_metrics_unlocked(
         return ordered
     except Exception:
         logger.exception(
-            'Не удалось загрузить продажи/выручку МоегоСклада для точки %s за период %s..%s. Возвращаем пустые метрики.',
+            'Не удалось загрузить продажи/выручку МоегоСклада для точки %s за период %s..%s. Возвращаем последний сохранённый cache, если он есть.',
             point.name,
             date_from.isoformat(),
             date_to.isoformat(),
         )
-        return {day: _empty_day_metrics() for day in _daterange(date_from, date_to)}
+        return await _load_stale_point_sales_metrics_fallback(point, date_from, date_to, db)
 
 
 
@@ -5047,6 +5078,7 @@ async def _calculate_shift_sales_motivations(
     db: AsyncSession,
     *,
     prefer_daily_snapshots: bool = True,
+    allow_live_fetch: bool = True,
 ) -> tuple[float, list[dict[str, Any]], list[dict[str, Any]]]:
     if prefer_daily_snapshots:
         daily_snapshot_rows = await _load_shift_sales_motivation_rows_from_daily_snapshots(
@@ -5059,6 +5091,14 @@ async def _calculate_shift_sales_motivations(
             total = round(sum(float(row.get('bonus_amount') or 0.0) for row in daily_snapshot_rows), 2)
             return total, _group_sales_motivation_rows(daily_snapshot_rows), daily_snapshot_rows
 
+    if not allow_live_fetch:
+        logger.info(
+            'Для смены %s за %s не запускаем live-выгрузку мотивационных товаров из МоегоСклада; используем только daily snapshots.',
+            shift.id,
+            shift.shift_date.isoformat(),
+        )
+        return 0.0, [], []
+
     models = await _get_active_sales_motivation_models(point, shift.shift_date, db)
     if not models:
         return 0.0, [], []
@@ -5067,11 +5107,19 @@ async def _calculate_shift_sales_motivations(
     if not active_item_ids:
         return 0.0, [], []
     needs_fiscalization_resolution = any(not bool(getattr(model, 'include_fiscalized_sales', True)) for model in models)
-    product_metrics = await _load_product_sales_metrics_for_day(
-        point,
-        shift.shift_date,
-        resolve_fiscalization=needs_fiscalization_resolution,
-    )
+    try:
+        product_metrics = await _load_product_sales_metrics_for_day(
+            point,
+            shift.shift_date,
+            resolve_fiscalization=needs_fiscalization_resolution,
+        )
+    except Exception:
+        logger.exception(
+            'Не удалось live-рассчитать мотивационные товары МоегоСклада для смены %s за %s. Продажи смены не блокируем.',
+            shift.id,
+            shift.shift_date.isoformat(),
+        )
+        return 0.0, [], []
     flat_rows: list[dict[str, Any]] = []
     for model in models:
         reward_type = _normalize_sales_motivation_reward(model.reward_type)
@@ -5523,7 +5571,7 @@ async def _ensure_shift_snapshots_for_point(point: LocationPoint, db: AsyncSessi
         await close_shift(shift.id, db, actor_user=None, auto=True)
 
 
-async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_refresh_metrics: bool = False) -> ShiftComputedPayroll:
+async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_refresh_metrics: bool = False, allow_live_sales_motivation: bool = True) -> ShiftComputedPayroll:
     point = await db.get(LocationPoint, shift.location_point_id)
     employee = await db.get(User, shift.employee_user_id)
     if not point or not employee:
@@ -5747,7 +5795,8 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
         shift,
         share_ratio,
         db,
-        prefer_daily_snapshots=(not force_refresh_metrics and shift.shift_date < get_moscow_today()),
+        prefer_daily_snapshots=(not force_refresh_metrics and shift.shift_date <= get_moscow_today()),
+        allow_live_fetch=allow_live_sales_motivation,
     )
     base_gross_salary_amount = round(float(settings.exit_amount or 0) + bonus + category_earnings_total, 2)
     gross_salary_amount = round(base_gross_salary_amount + employee_bonus_amount + sales_motivation_amount, 2)
@@ -6088,7 +6137,7 @@ async def _serialize_shift_lightweight(
             )
         ).all()
         if _has_legacy_uncategorized_adjustment(category_rows):
-            computed = await _build_computed_shift(shift, db)
+            computed = await _build_computed_shift(shift, db, allow_live_sales_motivation=False)
             return _pack_lightweight(
                 is_closed=bool(shift.status == 'closed' or computed.is_closed),
                 closed_at=computed.closed_at if computed.closed_at else _datetime_to_str(shift.closed_at),
@@ -6153,7 +6202,7 @@ async def _serialize_shift_lightweight(
     today = get_moscow_today()
     should_show_realized_amounts = shift.status == 'closed' or shift.shift_date <= today
     if should_show_realized_amounts:
-        computed = await _build_computed_shift(shift, db)
+        computed = await _build_computed_shift(shift, db, allow_live_sales_motivation=False)
         return _pack_lightweight(
             is_closed=bool(shift.status == 'closed' or computed.is_closed),
             closed_at=_datetime_to_str(shift.closed_at) if shift.status == 'closed' else computed.closed_at,
@@ -6575,7 +6624,7 @@ async def get_employee_payroll_summary(location: str, date_from: date, date_to: 
     category_totals: dict[str, dict[str, Any]] = {}
     employee_ids_in_result: set[int] = set()
     for shift in shifts:
-        computed = await _build_computed_shift(shift, db)
+        computed = await _build_computed_shift(shift, db, allow_live_sales_motivation=False)
         serialized = _serialize_computed_shift(computed)
         days.append(serialized)
         employee_ids_in_result.add(int(serialized['employee_user_id']))
@@ -6668,7 +6717,7 @@ async def _sum_shift_salaries(point: LocationPoint, date_from: date, date_to: da
     ).all()
     total = 0.0
     for shift in shifts:
-        computed = await _build_computed_shift(shift, db)
+        computed = await _build_computed_shift(shift, db, allow_live_sales_motivation=False)
         total += computed.net_salary_amount
     return round(total, 2)
 

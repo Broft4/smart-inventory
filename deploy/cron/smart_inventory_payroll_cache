@@ -1,6 +1,7 @@
 # /etc/cron.d/smart_inventory_payroll_cache
-# Каждый час обновляем БД-кеш каталога товаров для мотиваций продавцов,
-# чтобы страница зарплаты не ждала живую выгрузку МойСклад при подборе товаров.
+# Каждый час обновляем БД-кеш каталога товаров и дневные снимки продаж
+# мотивационных товаров за текущий день, чтобы страницы смен/зарплаты
+# не запускали тяжёлую live-выгрузку мотиваций из МойСклад из GET-запросов.
 # Ежедневно в 23:55 по московскому времени:
 # выгружаем payroll-метрики из МойСклад, закрываем текущие незакрытые смены,
 # пересобираем snapshots и сохраняем дневные снимки мотиваций.
@@ -8,5 +9,5 @@ SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CRON_TZ=Europe/Moscow
 
-10 * * * * root cd /opt/smart-inventory && source .venv/bin/activate && python -m app.refresh_payroll_metrics_cache --only-sales-motivation-catalog --heartbeat-seconds 15 >> /var/log/smart_inventory_motivation_catalog_refresh.log 2>&1
+10 * * * * root cd /opt/smart-inventory && source .venv/bin/activate && python -m app.refresh_payroll_metrics_cache --refresh-sales-motivation-catalog --refresh-sales-motivation-snapshots --sales-motivation-days 1 --heartbeat-seconds 15 >> /var/log/smart_inventory_motivation_catalog_refresh.log 2>&1
 55 23 * * * root cd /opt/smart-inventory && source .venv/bin/activate && python -m app.refresh_payroll_metrics_cache --days 35 --force-refresh --refresh-sales-motivation-catalog --auto-close-due-shifts --rebuild-closed-shifts --refresh-sales-motivation-snapshots --sales-motivation-days 2 --heartbeat-seconds 15 >> /var/log/smart_inventory_payroll_refresh.log 2>&1
