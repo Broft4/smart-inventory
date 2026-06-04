@@ -5529,6 +5529,13 @@ async def build_problem_items_checklist_excel(location: str, date_from: date, da
         'Наименование',
         'Подсчёт',
         'Остаток актуальный',
+    ])
+
+    details_ws = workbook.create_sheet('Детали')
+    _init_export_sheet(details_ws, 'Детали', [
+        'Наименование',
+        'Подсчёт',
+        'Остаток актуальный',
         'Категория',
         'Подкатегория',
         'Сотрудник',
@@ -5547,10 +5554,19 @@ async def build_problem_items_checklist_excel(location: str, date_from: date, da
         current_stock = current_row.get('expected_qty')
         actual_qty = float(row.actual_qty or 0.0)
         diff = float(row.diff or 0.0)
+        item_name = _safe_excel_text(row.target_name or current_row.get('name') or item_id)
+        counted_text = f'{_format_problem_qty(actual_qty)} ({_format_signed_problem_qty(diff)})'
+        current_stock_value = current_stock if current_stock is not None else 'не найден в текущих остатках'
+
         ws.append([
-            _safe_excel_text(row.target_name or current_row.get('name') or item_id),
-            f'{_format_problem_qty(actual_qty)} ({_format_signed_problem_qty(diff)})',
-            current_stock if current_stock is not None else 'не найден в текущих остатках',
+            item_name,
+            counted_text,
+            current_stock_value,
+        ])
+        details_ws.append([
+            item_name,
+            counted_text,
+            current_stock_value,
             _safe_excel_text(row.category_name or current_row.get('category_name')),
             _safe_excel_text(row.subcategory_name or current_row.get('subcategory_name')),
             _safe_excel_text(row.checked_by_name_snapshot),
@@ -5562,14 +5578,21 @@ async def build_problem_items_checklist_excel(location: str, date_from: date, da
         rows_added += 1
 
     if rows_added == 0:
+        empty_text = 'За выбранный период проблемных товаров не найдено'
+        period_text = f'{date_from.strftime("%d.%m.%Y")} — {date_to.strftime("%d.%m.%Y")}'
         ws.append([
-            'За выбранный период проблемных товаров не найдено',
+            empty_text,
+            '—',
+            '—',
+        ])
+        details_ws.append([
+            empty_text,
             '—',
             '—',
             '—',
             '—',
             '—',
-            f'{date_from.strftime("%d.%m.%Y")} — {date_to.strftime("%d.%m.%Y")}',
+            period_text,
             '—',
             '—',
             _safe_excel_text(normalized),
@@ -5577,6 +5600,16 @@ async def build_problem_items_checklist_excel(location: str, date_from: date, da
 
     _finalize_export_sheet(
         ws,
+        quantity_columns={3},
+        left_align_columns={1, 2},
+        width_overrides={'A': 48, 'B': 20, 'C': 22},
+        max_width=48,
+        default_horizontal='center',
+        default_vertical='top',
+    )
+
+    _finalize_export_sheet(
+        details_ws,
         quantity_columns={3, 8, 9},
         left_align_columns={1, 2, 4, 5, 6, 7, 10},
         width_overrides={'A': 44, 'B': 18, 'C': 18, 'D': 26, 'E': 30, 'F': 24, 'G': 16, 'H': 22, 'I': 14, 'J': 16},
