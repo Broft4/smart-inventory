@@ -644,7 +644,6 @@ function setDefaultDates() {
     if (qs('shift-month-input')) qs('shift-month-input').value = monthIso();
     if (qs('expenses-month-input')) qs('expenses-month-input').value = monthIso();
     if (qs('employee-bonuses-month-input')) qs('employee-bonuses-month-input').value = monthIso();
-    renderPayrollMonthYearPicker('employee-bonuses-month-input', qs('employee-bonuses-month-input')?.value || monthIso());
     if (qs('employee-penalties-month-input')) qs('employee-penalties-month-input').value = monthIso();
     if (qs('shift-date-input')) qs('shift-date-input').value = todayIso();
     syncManualExpenseDefaults({ forceDate: true });
@@ -3278,12 +3277,7 @@ qs('expenses-month-input')?.addEventListener('change', async () => {
     syncManualExpenseDefaults({ forceDate: true });
     await loadExpenseTemplatesAndEntries();
 });
-initPayrollMonthYearPicker('employee-bonuses-month-input', async () => {
-    syncEmployeeBonusDefaults({ forceDate: true });
-    await loadEmployeeBonuses();
-});
 qs('employee-bonuses-month-input')?.addEventListener('change', async () => {
-    renderPayrollMonthYearPicker('employee-bonuses-month-input', qs('employee-bonuses-month-input')?.value || monthIso());
     syncEmployeeBonusDefaults({ forceDate: true });
     await loadEmployeeBonuses();
 });
