@@ -24,9 +24,14 @@ class Settings(BaseSettings):
     ms_request_timeout_seconds: int = 30
     ms_retry_attempts: int = 4
     ms_max_concurrent_requests: int = 2
-    ms_rate_limit_window_requests: int = 45
-    ms_rate_limit_window_seconds: float = 5.0
+    # Safe defaults for user Bearer-token integrations. Published/private solution tokens can
+    # have a higher API budget, but user tokens are stricter; keep defaults conservative.
+    ms_rate_limit_window_requests: int = 20
+    ms_rate_limit_window_seconds: float = 3.0
     ms_rate_limit_remaining_threshold: int = 3
+    # GET /report/stock/all and /report/stock/bystore consume more rate-limit units than
+    # a regular JSON API request, so the client accounts for them with a higher weight.
+    ms_stock_report_rate_limit_weight: int = 5
     ms_financial_cache_ttl_seconds: int = 900
     app_log_level: str = "INFO"
 
