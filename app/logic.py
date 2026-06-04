@@ -5451,6 +5451,153 @@ def _style_summary_sheet(ws) -> None:
             value_cell.font = Font(bold=True, color='102A43')
 
 
+
+def _format_problem_qty(value: Any) -> str:
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError):
+        return '0'
+    if abs(number - round(number)) < 1e-9:
+        return str(int(round(number)))
+    return f'{number:.3f}'.rstrip('0').rstrip('.')
+
+
+def _format_signed_problem_qty(value: Any) -> str:
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError):
+        return '0'
+    prefix = '+' if number > 0 else ''
+    return f'{prefix}{_format_problem_qty(number)}'
+
+
+def _current_inventory_stock_index(inventory: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    index: dict[str, dict[str, Any]] = {}
+    for category in inventory.get('categories', []):
+        category_name = str(category.get('name') or '').strip()
+        for subcategory in category.get('subcategories', []):
+            subcategory_name = str(subcategory.get('name') or '').strip()
+            for item in subcategory.get('items', []):
+                item_id = str(item.get('id') or '').strip()
+                if not item_id:
+                    continue
+                index[item_id] = {
+                    'name': str(item.get('name') or '').strip() or item_id,
+                    'expected_qty': float(item.get('expected_qty') or 0.0),
+                    'category_name': category_name,
+                    'subcategory_name': subcategory_name,
+                }
+    return index
+
+
+async def build_problem_items_checklist_excel(location: str, date_from: date, date_to: date, db: AsyncSession) -> tuple[str, bytes]:
+    """Build a manager checklist: latest discrepancy items in a period + current MoySklad stock."""
+    normalized = _normalize_location(location)
+    if date_from > date_to:
+        raise HTTPException(status_code=400, detail='Дата начала периода не может быть позже даты окончания.')
+
+    query_result = await db.execute(
+        select(CheckResult, Report.report_date)
+        .join(Report, CheckResult.report_id == Report.id)
+        .where(Report.location == normalized)
+        .where(Report.report_type == DAILY_REPORT_TYPE)
+        .where(Report.report_date >= date_from)
+        .where(Report.report_date <= date_to)
+        .where(CheckResult.target_type == 'item')
+        .where(CheckResult.status == 'red')
+        .where(CheckResult.category_name != DEFAULT_CATEGORY_NAME)
+        .where(or_(CheckResult.subcategory_name.is_(None), CheckResult.subcategory_name != DEFAULT_SUBCATEGORY_NAME))
+        .order_by(Report.report_date.asc(), CheckResult.id.asc())
+    )
+
+    latest_by_item_id: dict[str, tuple[CheckResult, date]] = {}
+    for result_row, report_date in query_result.all():
+        item_id = str(result_row.target_id or '').strip()
+        if not item_id:
+            continue
+        latest_by_item_id[item_id] = (result_row, report_date)
+
+    # Для этой выгрузки нужен именно текущий остаток, а не старый runtime-кеш.
+    ms_client.invalidate_inventory(normalized)
+    _invalidate_runtime_inventory_cache(normalized)
+    current_inventory = await _get_inventory_for(normalized, db=db)
+    current_stock_by_id = _current_inventory_stock_index(current_inventory)
+
+    workbook = Workbook()
+    ws = workbook.active
+    _init_export_sheet(ws, 'Проблемные товары', [
+        'Наименование',
+        'Подсчёт',
+        'Остаток актуальный',
+        'Категория',
+        'Подкатегория',
+        'Сотрудник',
+        'Дата ревизии',
+        'Остаток на момент ревизии',
+        'Разница',
+        'Точка',
+    ])
+
+    rows_added = 0
+    for item_id, (row, report_date) in sorted(
+        latest_by_item_id.items(),
+        key=lambda pair: (str(pair[1][0].category_name or '').lower(), str(pair[1][0].subcategory_name or '').lower(), str(pair[1][0].target_name or '').lower()),
+    ):
+        current_row = current_stock_by_id.get(item_id, {})
+        current_stock = current_row.get('expected_qty')
+        actual_qty = float(row.actual_qty or 0.0)
+        diff = float(row.diff or 0.0)
+        ws.append([
+            _safe_excel_text(row.target_name or current_row.get('name') or item_id),
+            f'{_format_problem_qty(actual_qty)} ({_format_signed_problem_qty(diff)})',
+            current_stock if current_stock is not None else 'не найден в текущих остатках',
+            _safe_excel_text(row.category_name or current_row.get('category_name')),
+            _safe_excel_text(row.subcategory_name or current_row.get('subcategory_name')),
+            _safe_excel_text(row.checked_by_name_snapshot),
+            report_date.strftime('%d.%m.%Y'),
+            float(row.expected_qty or 0.0),
+            diff,
+            _safe_excel_text(normalized),
+        ])
+        rows_added += 1
+
+    if rows_added == 0:
+        ws.append([
+            'За выбранный период проблемных товаров не найдено',
+            '—',
+            '—',
+            '—',
+            '—',
+            '—',
+            f'{date_from.strftime("%d.%m.%Y")} — {date_to.strftime("%d.%m.%Y")}',
+            '—',
+            '—',
+            _safe_excel_text(normalized),
+        ])
+
+    _finalize_export_sheet(
+        ws,
+        quantity_columns={3, 8, 9},
+        left_align_columns={1, 2, 4, 5, 6, 7, 10},
+        width_overrides={'A': 44, 'B': 18, 'C': 18, 'D': 26, 'E': 30, 'F': 24, 'G': 16, 'H': 22, 'I': 14, 'J': 16},
+        max_width=44,
+        default_horizontal='center',
+        default_vertical='top',
+    )
+
+    info_ws = workbook.create_sheet('Инфо')
+    _init_export_sheet(info_ws, 'Инфо', ['Показатель', 'Значение'])
+    info_ws.append(['Точка', normalized])
+    info_ws.append(['Период', f'{date_from.strftime("%d.%m.%Y")} — {date_to.strftime("%d.%m.%Y")}'])
+    info_ws.append(['Строк проблемных товаров', rows_added])
+    info_ws.append(['Принцип отбора', 'По каждому товару берётся последняя красная проверка за выбранный период. Остаток актуальный берётся из текущих остатков МойСклад на момент выгрузки.'])
+    _finalize_export_sheet(info_ws, left_align_columns={1, 2}, width_overrides={'A': 28, 'B': 90}, max_width=90, default_horizontal='left', default_vertical='top')
+
+    payload = BytesIO()
+    workbook.save(payload)
+    filename = f"{_safe_filename_part(normalized, 'Точка')} проблемные товары {date_from.isoformat()}—{date_to.isoformat()}.xlsx"
+    return filename, payload.getvalue()
+
 def build_admin_report_excel(report: AdminReport) -> tuple[str, bytes]:
     if report.report_type != PERIOD_REPORT_TYPE and not report.report_id:
         raise HTTPException(status_code=404, detail='Ревизия для выгрузки не найдена.')

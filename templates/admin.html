@@ -75,6 +75,33 @@
                 <button id="reset-period-report-btn" type="button" class="btn secondary btn-inline">Вернуться к ревизии</button>
             </div>
         </div>
+
+        <div class="admin-problem-export-toolbar">
+            <div>
+                <strong>Выгрузка проблемных товаров</strong>
+                <p class="muted-text">Файл для быстрой проверки точки: товар с расхождением, подсчёт сотрудника и актуальный остаток из МойСклад.</p>
+            </div>
+            <label>
+                Период
+                <select id="problem-export-preset">
+                    <option value="cycle_first_7">1–7 день цикла</option>
+                    <option value="cycle_to_today">1 день цикла — сегодня</option>
+                    <option value="custom">Свои даты</option>
+                </select>
+            </label>
+            <label>
+                с
+                <input type="date" id="problem-export-date-from">
+            </label>
+            <label>
+                по
+                <input type="date" id="problem-export-date-to">
+            </label>
+            <div class="admin-period-actions">
+                <button id="export-problem-items-xlsx-btn" type="button" class="btn primary btn-inline">Скачать проблемные товары</button>
+            </div>
+            <div id="problem-export-status" class="inventory-status hidden"></div>
+        </div>
     </section>
 
     <div id="admin-report-loading"></div>

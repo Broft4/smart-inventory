@@ -1,5 +1,19 @@
 const PAYROLL_ALL_LOCATIONS_VALUE = '__all__';
 const PAYROLL_ALL_LOCATIONS_LABEL = 'Все точки';
+const PAYROLL_MONTHS = [
+    { value: '01', label: 'Январь' },
+    { value: '02', label: 'Февраль' },
+    { value: '03', label: 'Март' },
+    { value: '04', label: 'Апрель' },
+    { value: '05', label: 'Май' },
+    { value: '06', label: 'Июнь' },
+    { value: '07', label: 'Июль' },
+    { value: '08', label: 'Август' },
+    { value: '09', label: 'Сентябрь' },
+    { value: '10', label: 'Октябрь' },
+    { value: '11', label: 'Ноябрь' },
+    { value: '12', label: 'Декабрь' },
+];
 const payrollState = {
     user: window.currentUser || {},
     locations: [],
@@ -517,6 +531,79 @@ function monthIso() {
     return todayIso().slice(0, 7);
 }
 
+function normalizePayrollMonthValue(value) {
+    const raw = String(value || '').trim();
+    if (/^\d{4}-\d{2}$/.test(raw)) return raw;
+    return monthIso();
+}
+
+function renderPayrollMonthYearPicker(inputId, selectedValue = '') {
+    const input = qs(inputId);
+    const prefix = String(inputId || '').replace(/-month-input$/, '');
+    const monthSelect = qs(`${prefix}-month-select`);
+    const yearSelect = qs(`${prefix}-year-select`);
+    if (!input || !monthSelect || !yearSelect) return;
+
+    const normalized = normalizePayrollMonthValue(selectedValue || input.value || monthIso());
+    const selectedYear = Number(normalized.slice(0, 4));
+    const selectedMonth = normalized.slice(5, 7);
+    const currentYear = Number(monthIso().slice(0, 4));
+    const maxYear = Math.max(currentYear + 1, selectedYear);
+    const minYear = Math.min(2024, selectedYear, currentYear - 5);
+
+    monthSelect.innerHTML = PAYROLL_MONTHS
+        .map(month => `<option value="${month.value}">${month.label}</option>`)
+        .join('');
+    yearSelect.innerHTML = Array.from({ length: maxYear - minYear + 1 }, (_, index) => maxYear - index)
+        .map(year => `<option value="${year}">${year}</option>`)
+        .join('');
+
+    monthSelect.value = selectedMonth;
+    yearSelect.value = String(selectedYear);
+    input.value = `${yearSelect.value}-${monthSelect.value}`;
+}
+
+function syncPayrollMonthYearPicker(inputId, { emitChange = false } = {}) {
+    const input = qs(inputId);
+    const prefix = String(inputId || '').replace(/-month-input$/, '');
+    const monthSelect = qs(`${prefix}-month-select`);
+    const yearSelect = qs(`${prefix}-year-select`);
+    if (!input || !monthSelect || !yearSelect) return '';
+    const nextValue = `${yearSelect.value || monthIso().slice(0, 4)}-${monthSelect.value || monthIso().slice(5, 7)}`;
+    const changed = input.value !== nextValue;
+    input.value = nextValue;
+    if (emitChange && changed) {
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    return nextValue;
+}
+
+function initPayrollMonthYearPicker(inputId, onChange) {
+    const prefix = String(inputId || '').replace(/-month-input$/, '');
+    const monthSelect = qs(`${prefix}-month-select`);
+    const yearSelect = qs(`${prefix}-year-select`);
+    if (!monthSelect || !yearSelect) return;
+    const handler = async () => {
+        syncPayrollMonthYearPicker(inputId, { emitChange: false });
+        if (typeof onChange === 'function') {
+            await onChange();
+        }
+    };
+    monthSelect.addEventListener('change', handler);
+    yearSelect.addEventListener('change', handler);
+}
+
+function selectedPayrollMonthValue(inputId) {
+    const input = qs(inputId);
+    const prefix = String(inputId || '').replace(/-month-input$/, '');
+    const monthSelect = qs(`${prefix}-month-select`);
+    const yearSelect = qs(`${prefix}-year-select`);
+    if (monthSelect && yearSelect) {
+        return normalizePayrollMonthValue(`${yearSelect.value || monthIso().slice(0, 4)}-${monthSelect.value || monthIso().slice(5, 7)}`);
+    }
+    return normalizePayrollMonthValue(input?.value || monthIso());
+}
+
 function payrollSettingsDateStorageKey(location) {
     const normalizedLocation = String(location || '').trim() || '__default__';
     return `payroll-settings-effective-from:${normalizedLocation}`;
@@ -557,6 +644,7 @@ function setDefaultDates() {
     if (qs('shift-month-input')) qs('shift-month-input').value = monthIso();
     if (qs('expenses-month-input')) qs('expenses-month-input').value = monthIso();
     if (qs('employee-bonuses-month-input')) qs('employee-bonuses-month-input').value = monthIso();
+    renderPayrollMonthYearPicker('employee-bonuses-month-input', qs('employee-bonuses-month-input')?.value || monthIso());
     if (qs('employee-penalties-month-input')) qs('employee-penalties-month-input').value = monthIso();
     if (qs('shift-date-input')) qs('shift-date-input').value = todayIso();
     syncManualExpenseDefaults({ forceDate: true });
@@ -583,7 +671,7 @@ function selectedEmployeeId() {
 }
 
 function selectedMonthStart(inputId) {
-    const raw = qs(inputId).value || monthIso();
+    const raw = selectedPayrollMonthValue(inputId);
     return `${raw}-01`;
 }
 
@@ -3190,7 +3278,12 @@ qs('expenses-month-input')?.addEventListener('change', async () => {
     syncManualExpenseDefaults({ forceDate: true });
     await loadExpenseTemplatesAndEntries();
 });
+initPayrollMonthYearPicker('employee-bonuses-month-input', async () => {
+    syncEmployeeBonusDefaults({ forceDate: true });
+    await loadEmployeeBonuses();
+});
 qs('employee-bonuses-month-input')?.addEventListener('change', async () => {
+    renderPayrollMonthYearPicker('employee-bonuses-month-input', qs('employee-bonuses-month-input')?.value || monthIso());
     syncEmployeeBonusDefaults({ forceDate: true });
     await loadEmployeeBonuses();
 });

@@ -695,6 +695,145 @@ async function downloadCurrentReportExcel(triggerButton = null) {
     }
 }
 
+
+function parseIsoDateLocal(value) {
+    const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) return null;
+    const [, year, month, day] = match;
+    const date = new Date(Number(year), Number(month) - 1, Number(day));
+    return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function formatIsoDateLocal(date) {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '';
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+function addDaysIso(value, days) {
+    const date = parseIsoDateLocal(value);
+    if (!date) return '';
+    date.setDate(date.getDate() + Number(days || 0));
+    return formatIsoDateLocal(date);
+}
+
+function minIsoDate(...values) {
+    const dates = values.map(parseIsoDateLocal).filter(Boolean);
+    if (!dates.length) return '';
+    return formatIsoDateLocal(new Date(Math.min(...dates.map(date => date.getTime()))));
+}
+
+function currentCycleBoundsIso(referenceIso = getTodayIsoDate()) {
+    const reference = parseIsoDateLocal(referenceIso) || parseIsoDateLocal(getTodayIsoDate());
+    const year = reference.getFullYear();
+    const month = reference.getMonth();
+    const day = reference.getDate();
+    const start = new Date(year, month, day <= 15 ? 1 : 16);
+    const end = day <= 15 ? new Date(year, month, 15) : new Date(year, month + 1, 0);
+    return { start: formatIsoDateLocal(start), end: formatIsoDateLocal(end) };
+}
+
+function syncProblemExportDates(forcePreset = false) {
+    const presetSelect = document.getElementById('problem-export-preset');
+    const fromInput = document.getElementById('problem-export-date-from');
+    const toInput = document.getElementById('problem-export-date-to');
+    if (!presetSelect || !fromInput || !toInput) return;
+
+    const preset = presetSelect.value || 'cycle_first_7';
+    const today = getTodayIsoDate();
+    const cycle = currentCycleBoundsIso(today);
+    let dateFrom = fromInput.value || cycle.start;
+    let dateTo = toInput.value || today;
+
+    if (preset === 'cycle_first_7') {
+        dateFrom = cycle.start;
+        dateTo = minIsoDate(addDaysIso(cycle.start, 6), cycle.end);
+    } else if (preset === 'cycle_to_today') {
+        dateFrom = cycle.start;
+        dateTo = minIsoDate(today, cycle.end);
+    } else if (forcePreset && (!dateFrom || !dateTo)) {
+        dateFrom = cycle.start;
+        dateTo = minIsoDate(today, cycle.end);
+    }
+
+    fromInput.value = dateFrom;
+    toInput.value = dateTo;
+    const isCustom = preset === 'custom';
+    fromInput.disabled = !isCustom;
+    toInput.disabled = !isCustom;
+}
+
+function setProblemExportStatus(message = '', type = 'loading') {
+    const box = document.getElementById('problem-export-status');
+    if (!box) return;
+    if (!message) {
+        box.className = 'inventory-status hidden';
+        box.textContent = '';
+        return;
+    }
+    box.className = `inventory-status ${escapeHtml(type)}`;
+    box.classList.remove('hidden');
+    box.textContent = message;
+}
+
+async function downloadProblemItemsChecklistExcel(triggerButton = null) {
+    const location = getSelectedAdminLocation();
+    const dateFrom = document.getElementById('problem-export-date-from')?.value || '';
+    const dateTo = document.getElementById('problem-export-date-to')?.value || '';
+    if (!location || !dateFrom || !dateTo) {
+        setProblemExportStatus('Выберите точку и период для выгрузки.', 'error');
+        return;
+    }
+    if (dateFrom > dateTo) {
+        setProblemExportStatus('Дата начала периода не может быть позже даты окончания.', 'error');
+        return;
+    }
+
+    const button = triggerButton || document.getElementById('export-problem-items-xlsx-btn');
+    const originalText = button?.textContent || 'Скачать проблемные товары';
+    if (button) {
+        button.disabled = true;
+        button.textContent = 'Готовим файл...';
+    }
+    setProblemExportStatus('Собираем проблемные товары и актуальные остатки из МойСклад...', 'loading');
+
+    try {
+        const params = new URLSearchParams({ location, date_from: dateFrom, date_to: dateTo });
+        const response = await fetch(`/api/report-problem-items/export-xlsx?${params.toString()}`);
+        if (!response.ok) {
+            const text = await readErrorMessage(response, 'Не удалось выгрузить проблемные товары.');
+            throw new Error(text || 'Не удалось выгрузить проблемные товары.');
+        }
+        const blob = await response.blob();
+        const disposition = response.headers.get('Content-Disposition') || '';
+        const utfMatch = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+        const asciiMatch = disposition.match(/filename="?([^";]+)"?/i);
+        const filename = utfMatch
+            ? decodeURIComponent(utfMatch[1])
+            : (asciiMatch?.[1] || 'problem_items_checklist.xlsx');
+
+        const objectUrl = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(objectUrl);
+        setProblemExportStatus('Файл с проблемными товарами скачан.', 'success');
+    } catch (error) {
+        console.error(error);
+        setProblemExportStatus(error?.message || 'Не удалось скачать файл.', 'error');
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = originalText;
+        }
+    }
+}
+
 function resetSummary() {
     document.getElementById('report-location').textContent = '-';
     document.getElementById('report-date').textContent = '-';
@@ -3221,6 +3360,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('export-report-xlsx-btn')?.addEventListener('click', async () => {
         await downloadCurrentReportExcel(document.getElementById('export-report-xlsx-btn'));
     });
+    syncProblemExportDates(true);
+    document.getElementById('problem-export-preset')?.addEventListener('change', () => syncProblemExportDates(true));
+    document.getElementById('problem-export-date-from')?.addEventListener('change', () => {
+        const preset = document.getElementById('problem-export-preset');
+        if (preset) preset.value = 'custom';
+        syncProblemExportDates(false);
+    });
+    document.getElementById('problem-export-date-to')?.addEventListener('change', () => {
+        const preset = document.getElementById('problem-export-preset');
+        if (preset) preset.value = 'custom';
+        syncProblemExportDates(false);
+    });
+    document.getElementById('export-problem-items-xlsx-btn')?.addEventListener('click', async () => {
+        await downloadProblemItemsChecklistExcel(document.getElementById('export-problem-items-xlsx-btn'));
+    });
     document.getElementById('load-period-report-btn')?.addEventListener('click', async () => {
         const fromInput = document.getElementById('admin-period-date-from');
         const toInput = document.getElementById('admin-period-date-to');
@@ -3337,6 +3491,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         const nextLocation = locationSelect.value;
         adminState.selectedLocation = nextLocation;
         adminState.selectedReportId = null;
+        setProblemExportStatus('');
+        syncProblemExportDates(true);
         persistAdminUiState();
         await reloadReportsSection(nextLocation);
     });

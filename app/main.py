@@ -35,6 +35,7 @@ from app.logic import (
     delete_user,
     ensure_default_admin,
     build_admin_report_excel,
+    build_problem_items_checklist_excel,
     ensure_user_can_access_location,
     finish_report,
     get_admin_report,
@@ -765,6 +766,35 @@ async def api_export_period_report_xlsx(location: str | None = None, date_from: 
             'Content-Disposition': f"attachment; filename=\"{fallback_filename}\"; filename*=UTF-8''{quoted_filename}",
             'X-Export-Period-From': date_from.isoformat(),
             'X-Export-Period-To': date_to.isoformat(),
+        },
+    )
+
+
+@app.get('/api/report-problem-items/export-xlsx')
+async def api_export_problem_items_checklist_xlsx(
+    location: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    admin: User = Depends(require_admin_or_superadmin),
+    db: AsyncSession = Depends(get_db),
+):
+    if not location:
+        raise HTTPException(status_code=400, detail='Нужно указать точку.')
+    if date_from is None or date_to is None:
+        raise HTTPException(status_code=400, detail='Нужно указать даты периода.')
+
+    await ensure_user_can_access_location(admin, location, db)
+    filename, payload = await build_problem_items_checklist_excel(location, date_from, date_to, db)
+    fallback_filename = 'problem_items_checklist.xlsx'
+    quoted_filename = quote(filename)
+
+    return StreamingResponse(
+        iter([payload]),
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={
+            'Content-Disposition': f"attachment; filename=\"{fallback_filename}\"; filename*=UTF-8''{quoted_filename}",
+            'X-Export-Problem-Items-From': date_from.isoformat(),
+            'X-Export-Problem-Items-To': date_to.isoformat(),
         },
     )
 
