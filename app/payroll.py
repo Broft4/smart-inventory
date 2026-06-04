@@ -75,7 +75,6 @@ TOBACCO_KEYWORDS = ('сигарет', 'сигарилл', 'стик')
 SALES_METRICS_TTL_SECONDS = 90
 PAYROLL_DAILY_CACHE_RECENT_TTL_SECONDS = 900
 PAYROLL_OPEN_SHIFT_CACHE_TTL_SECONDS = 60
-PAYROLL_SUMMARY_LIVE_TIMEOUT_SECONDS = 25.0
 PAYROLL_ALL_LOCATIONS_VALUE = '__all__'
 PAYROLL_ALL_LOCATIONS_LABEL = 'Все точки'
 SALES_MOTIVATION_SOURCE_MANUAL = 'manual'
@@ -87,8 +86,7 @@ SALES_MOTIVATION_FISCAL_ONLY_NOT_FISCALIZED = 'only_not_fiscalized'
 SALES_MOTIVATION_POS_API_BASE_URL = 'https://online.moysklad.ru/api/posap/1.0'
 SALES_MOTIVATION_CATALOG_CACHE_TTL_SECONDS = 3600
 _sales_metrics_cache: dict[tuple[int, str, str], tuple[float, dict[date, dict[str, Any]]]] = {}
-_sales_metrics_refresh_locks: dict[tuple[int, str, str], asyncio.Lock] = {}
-_sales_metrics_background_refresh_tasks: dict[tuple[int, str, str], asyncio.Task[Any]] = {}
+_sales_metrics_refresh_locks: dict[tuple[int, str, str, bool], asyncio.Lock] = {}
 _shift_close_locks: dict[int, asyncio.Lock] = {}
 _category_lookup_cache: dict[str, tuple[float, dict[str, dict[str, str]]]] = {}
 _payroll_recalc_tasks: dict[int, asyncio.Task[Any]] = {}
@@ -194,25 +192,11 @@ async def _backfill_category_costs_from_day_metrics(
     total_cost_amount: float,
     share_ratio: float,
     db: AsyncSession,
-    *,
-    live_timeout_seconds: float | None = None,
-    stale_if_refresh_locked: bool = False,
-    schedule_background_on_timeout: bool = False,
 ) -> list[dict[str, Any]]:
     if not _should_backfill_category_costs(categories, total_cost_amount):
         return categories
 
-    day_metrics = (
-        await _load_point_sales_metrics(
-            point,
-            shift_date,
-            shift_date,
-            db,
-            live_timeout_seconds=live_timeout_seconds,
-            stale_if_refresh_locked=stale_if_refresh_locked,
-            schedule_background_on_timeout=schedule_background_on_timeout,
-        )
-    ).get(shift_date, _empty_day_metrics())
+    day_metrics = (await _load_point_sales_metrics(point, shift_date, shift_date, db)).get(shift_date, _empty_day_metrics())
     source_rows = day_metrics.get('categories') or []
     by_id = {str(row.get('category_id') or '').strip(): row for row in source_rows if str(row.get('category_id') or '').strip()}
     by_name = {_normalize_category_name_key(row.get('category_name')): row for row in source_rows if _normalize_category_name_key(row.get('category_name'))}
@@ -3606,87 +3590,6 @@ def _strip_metrics_internal_fields(metrics_by_day: dict[date, dict[str, Any]]) -
     }
 
 
-def _payroll_summary_live_timeout_seconds() -> float:
-    try:
-        configured = float(getattr(settings, 'payroll_summary_live_timeout_seconds', PAYROLL_SUMMARY_LIVE_TIMEOUT_SECONDS) or PAYROLL_SUMMARY_LIVE_TIMEOUT_SECONDS)
-    except (TypeError, ValueError):
-        configured = PAYROLL_SUMMARY_LIVE_TIMEOUT_SECONDS
-    # Значение должно быть заметно меньше таймаута nginx/gunicorn, иначе UI снова получит 502.
-    return max(5.0, min(45.0, configured))
-
-
-def _sales_metrics_key(point_or_id: LocationPoint | int, date_from: date, date_to: date) -> tuple[int, str, str]:
-    point_id = int(point_or_id if isinstance(point_or_id, int) else point_or_id.id or 0)
-    return (point_id, date_from.isoformat(), date_to.isoformat())
-
-
-def _schedule_point_sales_metrics_background_refresh(
-    point_id: int,
-    date_from: date,
-    date_to: date,
-    *,
-    reason: str,
-) -> None:
-    if point_id <= 0 or date_to < date_from:
-        return
-    key = _sales_metrics_key(point_id, date_from, date_to)
-    existing = _sales_metrics_background_refresh_tasks.get(key)
-    if existing and not existing.done():
-        return
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return
-    task = loop.create_task(_refresh_point_sales_metrics_background(point_id, date_from, date_to, reason=reason))
-    _sales_metrics_background_refresh_tasks[key] = task
-
-    def _cleanup(done_task: asyncio.Task[Any]) -> None:
-        _sales_metrics_background_refresh_tasks.pop(key, None)
-        try:
-            done_task.result()
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            logger.exception(
-                'Фоновая выгрузка payroll-метрик МоегоСклада завершилась ошибкой для point_id=%s за период %s..%s.',
-                point_id,
-                date_from.isoformat(),
-                date_to.isoformat(),
-            )
-
-    task.add_done_callback(_cleanup)
-
-
-async def _refresh_point_sales_metrics_background(
-    point_id: int,
-    date_from: date,
-    date_to: date,
-    *,
-    reason: str,
-) -> None:
-    logger.info(
-        'Запускаем фоновую выгрузку payroll-метрик МоегоСклада для point_id=%s за период %s..%s. Причина: %s',
-        point_id,
-        date_from.isoformat(),
-        date_to.isoformat(),
-        reason,
-    )
-    async with AsyncSessionLocal() as bg_db:
-        point = await bg_db.get(LocationPoint, point_id)
-        if point is None:
-            return
-        await _load_point_sales_metrics(
-            point,
-            date_from,
-            date_to,
-            bg_db,
-            force_refresh=True,
-            live_timeout_seconds=None,
-            stale_if_refresh_locked=False,
-            schedule_background_on_timeout=False,
-        )
-
-
 async def _load_stale_point_sales_metrics_fallback(
     point: LocationPoint,
     date_from: date,
@@ -3718,10 +3621,8 @@ async def _load_point_sales_metrics_unlocked(
     db: AsyncSession | None = None,
     *,
     force_refresh: bool = False,
-    live_timeout_seconds: float | None = None,
-    schedule_background_on_timeout: bool = False,
 ) -> dict[date, dict[str, Any]]:
-    cache_key = _sales_metrics_key(point, date_from, date_to)
+    cache_key = (point.id, date_from.isoformat(), date_to.isoformat())
     today = get_moscow_today()
     includes_today = date_from <= today <= date_to
     open_shift_days_for_cache: set[date] = set()
@@ -3745,7 +3646,7 @@ async def _load_point_sales_metrics_unlocked(
             for day in _daterange(date_from, date_to):
                 metrics = cached_days.get(day)
                 if _is_cached_day_fresh(day, metrics, open_shift_days=open_shift_days):
-                    result[day] = {key: value for key, value in metrics.items() if not str(key).startswith('_')}
+                    result[day] = {key: value for key, value in metrics.items() if not key.startswith('_')}
                 else:
                     missing_days.append(day)
 
@@ -3761,42 +3662,9 @@ async def _load_point_sales_metrics_unlocked(
                 range_start = previous_day = day
             live_ranges.append((range_start, previous_day))
 
-            async def _refresh_missing_ranges() -> dict[date, dict[str, Any]]:
-                refreshed: dict[date, dict[str, Any]] = {}
-                for range_from, range_to in live_ranges:
-                    refreshed.update(await _load_point_sales_metrics_live(point, range_from, range_to))
-                return refreshed
-
-            try:
-                if live_timeout_seconds is not None and live_timeout_seconds > 0:
-                    refreshed_by_day = await asyncio.wait_for(
-                        _refresh_missing_ranges(),
-                        timeout=live_timeout_seconds,
-                    )
-                else:
-                    refreshed_by_day = await _refresh_missing_ranges()
-            except asyncio.TimeoutError:
-                logger.warning(
-                    'Live-выгрузка payroll-метрик МоегоСклада для точки %s за период %s..%s не уложилась в %.1f сек. Возвращаем кеш и продолжаем фоновое обновление.',
-                    point.name,
-                    date_from.isoformat(),
-                    date_to.isoformat(),
-                    float(live_timeout_seconds or 0),
-                )
-                if schedule_background_on_timeout:
-                    _schedule_point_sales_metrics_background_refresh(
-                        int(point.id or 0),
-                        date_from,
-                        date_to,
-                        reason='live_timeout',
-                    )
-                fallback = await _load_stale_point_sales_metrics_fallback(point, date_from, date_to, db)
-                for day, metrics in result.items():
-                    fallback[day] = metrics
-                ordered = {day: fallback.get(day, _empty_day_metrics()) for day in _daterange(date_from, date_to)}
-                _sales_metrics_cache[cache_key] = (asyncio.get_running_loop().time(), ordered)
-                return ordered
-
+            refreshed_by_day: dict[date, dict[str, Any]] = {}
+            for range_from, range_to in live_ranges:
+                refreshed_by_day.update(await _load_point_sales_metrics_live(point, range_from, range_to))
             for day in missing_days:
                 refreshed_by_day.setdefault(day, _empty_day_metrics())
                 result[day] = refreshed_by_day[day]
@@ -3814,13 +3682,6 @@ async def _load_point_sales_metrics_unlocked(
             date_from.isoformat(),
             date_to.isoformat(),
         )
-        if schedule_background_on_timeout:
-            _schedule_point_sales_metrics_background_refresh(
-                int(point.id or 0),
-                date_from,
-                date_to,
-                reason='live_exception',
-            )
         return await _load_stale_point_sales_metrics_fallback(point, date_from, date_to, db)
 
 
@@ -3832,28 +3693,10 @@ async def _load_point_sales_metrics(
     db: AsyncSession | None = None,
     *,
     force_refresh: bool = False,
-    live_timeout_seconds: float | None = None,
-    stale_if_refresh_locked: bool = False,
-    schedule_background_on_timeout: bool = False,
 ) -> dict[date, dict[str, Any]]:
-    lock_key = _sales_metrics_key(point, date_from, date_to)
+    lock_key = (int(point.id or 0), date_from.isoformat(), date_to.isoformat(), bool(force_refresh))
     lock = _sales_metrics_refresh_locks.setdefault(lock_key, asyncio.Lock())
     if lock.locked():
-        if stale_if_refresh_locked:
-            logger.info(
-                'Payroll-метрики уже обновляются для точки %s за период %s..%s. Отдаём текущий кеш, чтобы не получить 502 по таймауту UI.',
-                point.name,
-                date_from.isoformat(),
-                date_to.isoformat(),
-            )
-            if schedule_background_on_timeout:
-                _schedule_point_sales_metrics_background_refresh(
-                    int(point.id or 0),
-                    date_from,
-                    date_to,
-                    reason='locked_live_refresh',
-                )
-            return await _load_stale_point_sales_metrics_fallback(point, date_from, date_to, db)
         logger.info(
             'Payroll-метрики уже обновляются для точки %s за период %s..%s. Ожидаем текущую выгрузку.',
             point.name,
@@ -3867,8 +3710,6 @@ async def _load_point_sales_metrics(
             date_to,
             db,
             force_refresh=force_refresh,
-            live_timeout_seconds=live_timeout_seconds,
-            schedule_background_on_timeout=schedule_background_on_timeout,
         )
 
 
@@ -5712,38 +5553,25 @@ async def _get_active_shift_count(point: LocationPoint, shift_date: date, db: As
     return max(int(count or 0), 1)
 
 
-async def _ensure_shift_snapshots_for_point(
-    point: LocationPoint,
-    db: AsyncSession,
-    date_from: date | None = None,
-    date_to: date | None = None,
-) -> None:
+async def _ensure_shift_snapshots_for_point(point: LocationPoint, db: AsyncSession) -> None:
     today = get_moscow_today()
-    query = select(WorkShift).where(
-        WorkShift.location_point_id == point.id,
-        WorkShift.is_deleted.is_(False),
-        WorkShift.status != 'closed',
-        WorkShift.shift_date < today,
-    )
-    if date_from is not None:
-        query = query.where(WorkShift.shift_date >= date_from)
-    if date_to is not None:
-        query = query.where(WorkShift.shift_date <= min(date_to, today - timedelta(days=1)))
-    due_shifts = (await db.scalars(query.order_by(WorkShift.shift_date.asc(), WorkShift.id.asc()))).all()
+    due_shifts = (
+        await db.scalars(
+            select(WorkShift)
+            .where(
+                WorkShift.location_point_id == point.id,
+                WorkShift.is_deleted.is_(False),
+                WorkShift.status != 'closed',
+                WorkShift.shift_date < today,
+            )
+            .order_by(WorkShift.shift_date.asc(), WorkShift.id.asc())
+        )
+    ).all()
     for shift in due_shifts:
         await close_shift(shift.id, db, actor_user=None, auto=True)
 
 
-async def _build_computed_shift(
-    shift: WorkShift,
-    db: AsyncSession,
-    *,
-    force_refresh_metrics: bool = False,
-    allow_live_sales_motivation: bool = True,
-    live_timeout_seconds: float | None = None,
-    stale_if_refresh_locked: bool = False,
-    schedule_background_on_timeout: bool = False,
-) -> ShiftComputedPayroll:
+async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_refresh_metrics: bool = False, allow_live_sales_motivation: bool = True) -> ShiftComputedPayroll:
     point = await db.get(LocationPoint, shift.location_point_id)
     employee = await db.get(User, shift.employee_user_id)
     if not point or not employee:
@@ -5798,9 +5626,6 @@ async def _build_computed_shift(
                 round(float(snapshot.cost_amount or 0), 2),
                 float(snapshot.share_ratio or 0),
                 db,
-                live_timeout_seconds=live_timeout_seconds,
-                stale_if_refresh_locked=stale_if_refresh_locked,
-                schedule_background_on_timeout=schedule_background_on_timeout,
             )
             snapshot_category_earnings_total = round(sum(float(item.get('earning_amount') or 0) for item in snapshot_categories), 2)
             snapshot_bonus_base = round(max(float(snapshot.non_tobacco_net_sales_for_bonus or 0), 0.0), 2)
@@ -5887,16 +5712,7 @@ async def _build_computed_shift(
     bonus_category_ids = _load_bonus_category_ids(settings)
     rate_map = await _get_settings_rates(settings.id, db)
     rate_name_map = _build_category_rate_name_map(rate_map)
-    day_metrics_by_date = await _load_point_sales_metrics(
-        point,
-        shift.shift_date,
-        shift.shift_date,
-        db,
-        force_refresh=force_refresh_metrics,
-        live_timeout_seconds=live_timeout_seconds,
-        stale_if_refresh_locked=stale_if_refresh_locked,
-        schedule_background_on_timeout=schedule_background_on_timeout,
-    )
+    day_metrics_by_date = await _load_point_sales_metrics(point, shift.shift_date, shift.shift_date, db, force_refresh=force_refresh_metrics)
     day_metrics = day_metrics_by_date.get(shift.shift_date, {
         'categories': [],
         'gross_sales_amount': 0.0,
@@ -6306,8 +6122,6 @@ async def _serialize_shift_lightweight(
             'net_salary_amount': net_salary_amount,
         }
 
-    summary_live_timeout = _payroll_summary_live_timeout_seconds()
-
     snapshot = await db.scalar(
         select(ShiftPayrollSnapshot)
         .where(ShiftPayrollSnapshot.shift_id == shift.id)
@@ -6323,14 +6137,7 @@ async def _serialize_shift_lightweight(
             )
         ).all()
         if _has_legacy_uncategorized_adjustment(category_rows):
-            computed = await _build_computed_shift(
-                shift,
-                db,
-                allow_live_sales_motivation=False,
-                live_timeout_seconds=summary_live_timeout,
-                stale_if_refresh_locked=True,
-                schedule_background_on_timeout=True,
-            )
+            computed = await _build_computed_shift(shift, db, allow_live_sales_motivation=False)
             return _pack_lightweight(
                 is_closed=bool(shift.status == 'closed' or computed.is_closed),
                 closed_at=computed.closed_at if computed.closed_at else _datetime_to_str(shift.closed_at),
@@ -6395,14 +6202,7 @@ async def _serialize_shift_lightweight(
     today = get_moscow_today()
     should_show_realized_amounts = shift.status == 'closed' or shift.shift_date <= today
     if should_show_realized_amounts:
-        computed = await _build_computed_shift(
-            shift,
-            db,
-            allow_live_sales_motivation=False,
-            live_timeout_seconds=summary_live_timeout,
-            stale_if_refresh_locked=True,
-            schedule_background_on_timeout=True,
-        )
+        computed = await _build_computed_shift(shift, db, allow_live_sales_motivation=False)
         return _pack_lightweight(
             is_closed=bool(shift.status == 'closed' or computed.is_closed),
             closed_at=_datetime_to_str(shift.closed_at) if shift.status == 'closed' else computed.closed_at,
@@ -6491,7 +6291,7 @@ async def list_work_shifts(location: str, date_from: date, date_to: date, db: As
         }
 
     point = points[0]
-    await _ensure_shift_snapshots_for_point(point, db, date_from, date_to)
+    await _ensure_shift_snapshots_for_point(point, db)
     query = select(WorkShift).where(
         WorkShift.location_point_id == point.id,
         WorkShift.shift_date >= date_from,
@@ -6548,7 +6348,7 @@ async def list_work_shift_day_summary(location: str, date_from: date, date_to: d
         }
 
     point = points[0]
-    await _ensure_shift_snapshots_for_point(point, db, date_from, date_to)
+    await _ensure_shift_snapshots_for_point(point, db)
     query = select(WorkShift).where(
         WorkShift.location_point_id == point.id,
         WorkShift.shift_date >= date_from,
@@ -6781,7 +6581,7 @@ async def get_employee_payroll_summary(location: str, date_from: date, date_to: 
 
     await ensure_user_can_access_location(current_user, location, db)
     point = await _get_location_point_by_name(location, db)
-    await _ensure_shift_snapshots_for_point(point, db, date_from, date_to)
+    await _ensure_shift_snapshots_for_point(point, db)
 
     target_employee_id = employee_user_id if employee_user_id is not None else (current_user.id if current_user.role == 'employee' else None)
     if current_user.role == 'employee' and target_employee_id != current_user.id:
@@ -6807,8 +6607,6 @@ async def get_employee_payroll_summary(location: str, date_from: date, date_to: 
     if current_user.role == 'employee':
         shifts = [shift for shift in shifts if shift.employee_user_id == current_user.id]
 
-    summary_live_timeout = _payroll_summary_live_timeout_seconds()
-
     days: list[dict[str, Any]] = []
     totals = {
         'gross_sales_amount': 0.0,
@@ -6826,14 +6624,7 @@ async def get_employee_payroll_summary(location: str, date_from: date, date_to: 
     category_totals: dict[str, dict[str, Any]] = {}
     employee_ids_in_result: set[int] = set()
     for shift in shifts:
-        computed = await _build_computed_shift(
-            shift,
-            db,
-            allow_live_sales_motivation=False,
-            live_timeout_seconds=summary_live_timeout,
-            stale_if_refresh_locked=True,
-            schedule_background_on_timeout=True,
-        )
+        computed = await _build_computed_shift(shift, db, allow_live_sales_motivation=False)
         serialized = _serialize_computed_shift(computed)
         days.append(serialized)
         employee_ids_in_result.add(int(serialized['employee_user_id']))
@@ -6909,16 +6700,7 @@ async def get_employee_payroll_summary(location: str, date_from: date, date_to: 
 
 
 
-async def _sum_shift_salaries(
-    point: LocationPoint,
-    date_from: date,
-    date_to: date,
-    db: AsyncSession,
-    *,
-    live_timeout_seconds: float | None = None,
-    stale_if_refresh_locked: bool = False,
-    schedule_background_on_timeout: bool = False,
-) -> float:
+async def _sum_shift_salaries(point: LocationPoint, date_from: date, date_to: date, db: AsyncSession) -> float:
     if date_to < date_from:
         return 0.0
     shifts = (
@@ -6935,14 +6717,7 @@ async def _sum_shift_salaries(
     ).all()
     total = 0.0
     for shift in shifts:
-        computed = await _build_computed_shift(
-            shift,
-            db,
-            allow_live_sales_motivation=False,
-            live_timeout_seconds=live_timeout_seconds,
-            stale_if_refresh_locked=stale_if_refresh_locked,
-            schedule_background_on_timeout=schedule_background_on_timeout,
-        )
+        computed = await _build_computed_shift(shift, db, allow_live_sales_motivation=False)
         total += computed.net_salary_amount
     return round(total, 2)
 
@@ -6952,10 +6727,6 @@ async def _calculate_manager_salary_proration(
     date_from: date,
     date_to: date,
     db: AsyncSession,
-    *,
-    live_timeout_seconds: float | None = None,
-    stale_if_refresh_locked: bool = False,
-    schedule_background_on_timeout: bool = False,
 ) -> tuple[float, float, list[dict[str, Any]]]:
     today = get_moscow_today()
     details: list[dict[str, Any]] = []
@@ -6972,30 +6743,14 @@ async def _calculate_manager_salary_proration(
         if selected_to < selected_from:
             continue
 
-        month_metrics = await _load_point_sales_metrics(
-            point,
-            month_start,
-            realized_end,
-            db,
-            live_timeout_seconds=live_timeout_seconds,
-            stale_if_refresh_locked=stale_if_refresh_locked,
-            schedule_background_on_timeout=schedule_background_on_timeout,
-        )
+        month_metrics = await _load_point_sales_metrics(point, month_start, realized_end, db)
         # Зарплата управляющего должна считаться от той же прибыли, которую видит
         # пользователь в карточке «Прибыль до зарплаты управляющего». Раньше здесь
         # брался net_sales_amount, а в сводке периода — gross_sales_amount/revenue_amount;
         # из-за этого полный месяц с возвратами давал процент не от отображаемой прибыли.
         month_revenue_amount = round(sum(float(day.get('gross_sales_amount') or 0.0) for day in month_metrics.values()), 2)
         month_cost_amount = round(sum(float(day.get('cost_amount') or 0.0) for day in month_metrics.values()), 2)
-        month_employee_salary_total = await _sum_shift_salaries(
-            point,
-            month_start,
-            realized_end,
-            db,
-            live_timeout_seconds=live_timeout_seconds,
-            stale_if_refresh_locked=stale_if_refresh_locked,
-            schedule_background_on_timeout=schedule_background_on_timeout,
-        )
+        month_employee_salary_total = await _sum_shift_salaries(point, month_start, realized_end, db)
         month_expenses_total = await _collect_period_company_expenses(point, month_start, realized_end, db)
         month_operating_profit = round(month_revenue_amount - month_cost_amount - month_employee_salary_total - month_expenses_total, 2)
 
@@ -7097,41 +6852,16 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
 
     await ensure_user_can_access_location(current_user, location, db)
     point = await _get_location_point_by_name(location, db)
-    await _ensure_shift_snapshots_for_point(point, db, date_from, date_to)
+    await _ensure_shift_snapshots_for_point(point, db)
     today = get_moscow_today()
     effective_date_to = min(date_to, today)
-    summary_live_timeout = _payroll_summary_live_timeout_seconds()
-    day_metrics = (
-        await _load_point_sales_metrics(
-            point,
-            date_from,
-            effective_date_to,
-            db,
-            live_timeout_seconds=summary_live_timeout,
-            stale_if_refresh_locked=True,
-            schedule_background_on_timeout=True,
-        )
-        if effective_date_to >= date_from
-        else {}
-    )
+    day_metrics = await _load_point_sales_metrics(point, date_from, effective_date_to, db) if effective_date_to >= date_from else {}
     gross_sales_amount = sum(day['gross_sales_amount'] for day in day_metrics.values())
     return_amount = sum(day['return_amount'] for day in day_metrics.values())
     net_sales_amount = sum(day['net_sales_amount'] for day in day_metrics.values())
     cost_amount = sum(day['cost_amount'] for day in day_metrics.values())
 
-    employee_salary_total = (
-        await _sum_shift_salaries(
-            point,
-            date_from,
-            effective_date_to,
-            db,
-            live_timeout_seconds=summary_live_timeout,
-            stale_if_refresh_locked=True,
-            schedule_background_on_timeout=True,
-        )
-        if effective_date_to >= date_from
-        else 0.0
-    )
+    employee_salary_total = await _sum_shift_salaries(point, date_from, effective_date_to, db) if effective_date_to >= date_from else 0.0
 
     settings_effective_date = effective_date_to if effective_date_to >= date_from else date_from
     current_settings = await _get_settings_for_date(point, settings_effective_date, db)
@@ -7183,15 +6913,7 @@ async def get_manager_payroll_summary(location: str, date_from: date, date_to: d
         else 0.0
     )
     operating_profit = round(gross_sales_amount - cost_amount - employee_salary_total - expenses_total, 2)
-    manager_salary_amount, manager_rate_percent, manager_salary_proration = await _calculate_manager_salary_proration(
-        point,
-        date_from,
-        date_to,
-        db,
-        live_timeout_seconds=summary_live_timeout,
-        stale_if_refresh_locked=True,
-        schedule_background_on_timeout=True,
-    )
+    manager_salary_amount, manager_rate_percent, manager_salary_proration = await _calculate_manager_salary_proration(point, date_from, date_to, db)
     net_profit_after_manager_salary = round(operating_profit - manager_salary_amount, 2)
     responsible_admin = await db.get(User, current_settings.responsible_admin_user_id) if current_settings.responsible_admin_user_id else None
     return {

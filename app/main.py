@@ -222,7 +222,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260604-payroll-live-timeout-v1'
+templates.env.globals['asset_version'] = '20260517-password-reset-email-not-found-v1'
 
 
 @app.middleware('http')

@@ -33,7 +33,6 @@ class Settings(BaseSettings):
     # a regular JSON API request, so the client accounts for them with a higher weight.
     ms_stock_report_rate_limit_weight: int = 5
     ms_financial_cache_ttl_seconds: int = 900
-    payroll_summary_live_timeout_seconds: float = 25.0
     app_log_level: str = "INFO"
 
     smtp_host: Optional[str] = None
