@@ -91,24 +91,9 @@ class MoySkladClient:
         self._assortment_search_locks: dict[str, asyncio.Lock] = {}
 
         self.max_concurrent_requests = max(1, min(4, int(settings.ms_max_concurrent_requests or 2)))
-
-        configured_rate_limit_requests = max(1, int(settings.ms_rate_limit_window_requests or 20))
-        configured_rate_limit_seconds = max(1.0, float(settings.ms_rate_limit_window_seconds or 3.0))
-        # Older deployments of this project often had 45/5 configured in .env. That was
-        # acceptable for published solution-token integrations, but is too aggressive for
-        # user Bearer-token integrations after the MoySklad 2026 rate-limit changes.
-        # Treat that legacy value as "use the safe default" instead of letting one stale
-        # .env line overload live payroll/revision exports.
-        if configured_rate_limit_requests >= 45 and configured_rate_limit_seconds >= 5.0:
-            configured_rate_limit_requests = 20
-            configured_rate_limit_seconds = 3.0
-        self.rate_limit_window_requests = max(1, min(45, configured_rate_limit_requests))
-        self.rate_limit_window_seconds = max(1.0, configured_rate_limit_seconds)
+        self.rate_limit_window_requests = max(1, min(95, int(settings.ms_rate_limit_window_requests or 45)))
+        self.rate_limit_window_seconds = max(1.0, float(settings.ms_rate_limit_window_seconds or 5.0))
         self.rate_limit_remaining_threshold = max(1, int(settings.ms_rate_limit_remaining_threshold or 3))
-        self.stock_report_rate_limit_weight = max(1, min(
-            self.rate_limit_window_requests,
-            int(getattr(settings, 'ms_stock_report_rate_limit_weight', 5) or 5),
-        ))
         self.financial_cache_ttl = max(120, int(settings.ms_financial_cache_ttl_seconds or 900))
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
@@ -269,14 +254,6 @@ class MoySkladClient:
     def _get_exception_retry_delay(self, attempt: int) -> float:
         return min(1.5 * attempt, 6.0)
 
-    def _get_request_rate_limit_weight(self, url_or_endpoint: str, *, absolute: bool = False) -> int:
-        raw = str(url_or_endpoint or '').split('?', 1)[0].rstrip('/').lower()
-        if raw.endswith('/report/stock/all') or raw.endswith('/report/stock/bystore'):
-            return self.stock_report_rate_limit_weight
-        if '/report/stock/all' in raw or '/report/stock/bystore' in raw:
-            return self.stock_report_rate_limit_weight
-        return 1
-
     async def _register_server_cooldown(self, delay_seconds: float, reason: str, *, url: str | None = None) -> None:
         delay = max(float(delay_seconds or 0.0), 0.0)
         if delay <= 0:
@@ -292,8 +269,7 @@ class MoySkladClient:
             f' url={url}' if url else '',
         )
 
-    async def _wait_for_rate_limit_slot(self, cost: int = 1) -> None:
-        request_cost = max(1, min(self.rate_limit_window_requests, int(cost or 1)))
+    async def _wait_for_rate_limit_slot(self) -> None:
         while True:
             sleep_for = 0.0
             async with self._rate_limit_lock:
@@ -303,11 +279,11 @@ class MoySkladClient:
 
                 if self._cooldown_until > now:
                     sleep_for = max(self._cooldown_until - now, 0.05)
-                elif len(self._request_timestamps) + request_cost > self.rate_limit_window_requests:
+                elif len(self._request_timestamps) >= self.rate_limit_window_requests:
                     oldest = self._request_timestamps[0]
                     sleep_for = max(self.rate_limit_window_seconds - (now - oldest), 0.05)
                 else:
-                    self._request_timestamps.extend(now for _ in range(request_cost))
+                    self._request_timestamps.append(now)
                     return
 
             await asyncio.sleep(sleep_for)
@@ -345,13 +321,12 @@ class MoySkladClient:
     ) -> dict[str, Any]:
         url = url_or_endpoint if absolute else f"{self.base_url}/{url_or_endpoint.lstrip('/')}"
         client = await self._get_client()
-        request_cost = self._get_request_rate_limit_weight(url_or_endpoint, absolute=absolute)
 
         last_error: Exception | None = None
 
         for attempt in range(1, self.retry_attempts + 1):
             try:
-                await self._wait_for_rate_limit_slot(request_cost)
+                await self._wait_for_rate_limit_slot()
                 async with self._request_semaphore:
                     response = await client.get(url, headers=self.headers(token, location=location), params=params)
 
