@@ -195,14 +195,31 @@ configure_logging()
 logger = logging.getLogger(__name__)
 
 
+async def _resume_pending_payroll_recalc_jobs_safely() -> None:
+    try:
+        # Не блокируем запуск приложения: тяжелый пересчет зарплаты может выполняться долго
+        # или упираться в МойСклад/БД. Запускаем его только после того, как FastAPI уже поднялся.
+        await asyncio.sleep(5)
+        logger.info('Startup: resume pending payroll recalculation jobs started')
+        await resume_pending_payroll_recalc_jobs()
+        logger.info('Startup: resume pending payroll recalculation jobs scheduled')
+    except Exception:
+        logger.exception('Startup: failed to resume pending payroll recalculation jobs')
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logger.info('Startup: bootstrap main schema started')
     async with engine.begin() as conn:
         await conn.run_sync(bootstrap_schema_and_admin)
+        logger.info('Startup: bootstrap payroll schema started')
         await conn.run_sync(bootstrap_payroll_schema)
+    logger.info('Startup: database schema bootstrap completed')
     async with AsyncSession(bind=engine, expire_on_commit=False) as session:
+        logger.info('Startup: ensure default admin started')
         await ensure_default_admin(session)
-    await resume_pending_payroll_recalc_jobs()
+    logger.info('Startup: ensure default admin completed')
+    asyncio.create_task(_resume_pending_payroll_recalc_jobs_safely())
     try:
         yield
     finally:
