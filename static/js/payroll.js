@@ -1931,27 +1931,33 @@ async function loadSummary(options = {}) {
         const employeeUrl = `/api/payroll/employee-summary?location=${encodeURIComponent(location)}&date_from=${dateFrom}&date_to=${dateTo}${employeeQuery}`;
         const managerUrl = `/api/payroll/manager-summary?location=${encodeURIComponent(location)}&date_from=${dateFrom}&date_to=${dateTo}`;
 
-        const employeeTask = (async () => {
+        let employeeResult = { status: 'fulfilled', value: null };
+        let managerResult = { status: 'fulfilled', value: null };
+
+        try {
             progress.active(['shifts', 'penalties', 'bonuses', 'motivations'], 'Загружаем смены, штрафы, премии и мотивации...');
             const summary = await api(employeeUrl);
             if (!isCurrentRequest()) return null;
             renderSummary(summary);
             progress.done(['shifts', 'penalties', 'bonuses', 'motivations', 'totals'], 'Детализация зарплаты загружена, досчитываем прибыль...');
-            return summary;
-        })();
+            employeeResult = { status: 'fulfilled', value: summary };
+        } catch (error) {
+            employeeResult = { status: 'rejected', reason: error };
+        }
 
-        const managerTask = isAdminRole()
-            ? (async () => {
+        if (isAdminRole() && isCurrentRequest()) {
+            try {
                 progress.active(['revenue', 'profit'], 'Загружаем выручку и прибыль точки...');
                 const managerSummary = await api(managerUrl);
                 if (!isCurrentRequest()) return null;
                 renderManagerSummary(managerSummary);
-                progress.done(['revenue', 'profit'], 'Выручка и прибыль загружены, продолжаем детализацию...');
-                return managerSummary;
-            })()
-            : Promise.resolve(null);
+                progress.done(['revenue', 'profit'], 'Выручка и прибыль загружены.');
+                managerResult = { status: 'fulfilled', value: managerSummary };
+            } catch (error) {
+                managerResult = { status: 'rejected', reason: error };
+            }
+        }
 
-        const [employeeResult, managerResult] = await Promise.allSettled([employeeTask, managerTask]);
         if (!isCurrentRequest()) return null;
 
         const errors = [];
