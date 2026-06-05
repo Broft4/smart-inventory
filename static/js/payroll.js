@@ -416,7 +416,7 @@ async function refreshAfterRecalcFinished() {
     ]);
 }
 
-async function pollRecalcStatus(jobId) {
+async function pollRecalcStatus(jobId, scopedStatusId = 'settings-status') {
     const location = selectedLocation();
     if (!location || !jobId) return;
     stopRecalcPolling();
@@ -427,19 +427,30 @@ async function pollRecalcStatus(jobId) {
         if (!job) return;
         if (job.status === 'done') {
             const processed = Number(job?.result?.updated || job?.result?.processed || 0);
-            const message = processed > 0
-                ? `Настройки сохранены. Пересчёт завершён, обновлено смен: ${processed}.`
-                : 'Настройки сохранены. Пересчёт завершён.';
+            const salesMotivationAmount = Number(job?.result?.sales_motivation_amount || 0);
+            const isManualClosedShiftRecalc = scopedStatusId === 'closed-shifts-recalc-status';
+            const message = isManualClosedShiftRecalc
+                ? `Пересчёт завершён. Обновлено закрытых смен: ${processed}. Мотиваций начислено: ${formatMoney(salesMotivationAmount)}.`
+                : (processed > 0
+                    ? `Настройки сохранены. Пересчёт завершён, обновлено смен: ${processed}.`
+                    : 'Настройки сохранены. Пересчёт завершён.');
             showStatus(message, 'success');
-            showScopedStatus('settings-status', message, 'success');
+            showScopedStatus(scopedStatusId, message, 'success');
+            if (isManualClosedShiftRecalc) {
+                renderClosedShiftsRecalcResult(job);
+                setButtonLoading(qs('closed-shifts-recalc-btn'), false);
+            }
             await refreshAfterRecalcFinished();
             stopRecalcPolling();
             return;
         }
         if (job.status === 'failed') {
-            const message = job.error_text || job.message || 'Не удалось пересчитать смены по новым правилам.';
+            const message = job.error_text || job.message || 'Не удалось пересчитать закрытые смены.';
             showStatus(message, 'error');
-            showScopedStatus('settings-status', message, 'error');
+            showScopedStatus(scopedStatusId, message, 'error');
+            if (scopedStatusId === 'closed-shifts-recalc-status') {
+                setButtonLoading(qs('closed-shifts-recalc-btn'), false);
+            }
             stopRecalcPolling();
             return;
         }
@@ -449,14 +460,14 @@ async function pollRecalcStatus(jobId) {
             ? `Идёт пересчёт закрытых смен: ${progressCurrent} из ${progressTotal}.`
             : (job.message || 'Идёт пересчёт закрытых смен...');
         showStatus(progressText, 'loading');
-        showScopedStatus('settings-status', progressText, 'loading');
+        showScopedStatus(scopedStatusId, progressText, 'loading');
         payrollState.recalcPollTimer = setTimeout(() => {
-            pollRecalcStatus(jobId).catch((error) => console.error(error));
+            pollRecalcStatus(jobId, scopedStatusId).catch((error) => console.error(error));
         }, 2500);
     } catch (error) {
         console.error(error);
         payrollState.recalcPollTimer = setTimeout(() => {
-            pollRecalcStatus(jobId).catch((pollError) => console.error(pollError));
+            pollRecalcStatus(jobId, scopedStatusId).catch((pollError) => console.error(pollError));
         }, 4000);
     }
 }
@@ -649,6 +660,8 @@ function selectedSettingsEffectiveFrom() {
 function setDefaultDates() {
     if (qs('payroll-date-from')) qs('payroll-date-from').value = todayIso();
     if (qs('payroll-date-to')) qs('payroll-date-to').value = todayIso();
+    if (qs('closed-shifts-recalc-date-from')) qs('closed-shifts-recalc-date-from').value = qs('payroll-date-from')?.value || todayIso();
+    if (qs('closed-shifts-recalc-date-to')) qs('closed-shifts-recalc-date-to').value = qs('payroll-date-to')?.value || todayIso();
     if (qs('settings-effective-from')) qs('settings-effective-from').value = todayIso();
     if (qs('shift-month-input')) qs('shift-month-input').value = monthIso();
     if (qs('expenses-month-input')) qs('expenses-month-input').value = monthIso();
@@ -3285,6 +3298,108 @@ window.deleteSalesMotivation = async function deleteSalesMotivation(id) {
 };
 
 
+function renderClosedShiftsRecalcResult(job) {
+    const container = qs('closed-shifts-recalc-result');
+    if (!container) return;
+    const result = job?.result || {};
+    if (!result || !Object.keys(result).length) {
+        container.innerHTML = '';
+        return;
+    }
+    const processed = Number(result.processed || 0);
+    const updated = Number(result.updated || 0);
+    const salesMotivationAmount = Number(result.sales_motivation_amount || 0);
+    const daily = result.sales_motivation_daily_snapshots || {};
+    const soldRows = Number(daily.sold_rows || 0);
+    const soldAmount = Number(daily.sold_sales_amount || 0);
+    const details = Array.isArray(result.details) ? result.details : [];
+    const detailRows = details.slice(0, 20).map((item) => `
+        <tr>
+            <td>${escapeHtml(formatDateRu(item.shift_date))}</td>
+            <td>${escapeHtml(item.location || '')}</td>
+            <td>${formatMoney(item.gross_sales_amount)}</td>
+            <td>${formatMoney(item.sales_motivation_amount)}</td>
+            <td>${Number(item.sales_motivation_rows || 0).toLocaleString('ru-RU')}</td>
+        </tr>
+    `).join('');
+    container.innerHTML = `
+        <div class="payroll-day-card">
+            <div class="payroll-day-head">
+                <div>
+                    <strong>Итог пересчёта</strong>
+                    <span class="muted-text">${escapeHtml(result.date_from || '')} — ${escapeHtml(result.date_to || '')}</span>
+                </div>
+            </div>
+            <div class="summary-kpi-grid payroll-kpi-grid">
+                <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Закрытых смен найдено</span><strong>${processed.toLocaleString('ru-RU')}</strong></div>
+                <div class="summary-kpi-card neutral"><span class="summary-kpi-label">Смен обновлено</span><strong>${updated.toLocaleString('ru-RU')}</strong></div>
+                <div class="summary-kpi-card plus"><span class="summary-kpi-label">Продажи мотивационных товаров</span><strong>${formatMoney(soldAmount)}</strong></div>
+                <div class="summary-kpi-card plus"><span class="summary-kpi-label">Начислено мотиваций</span><strong>${formatMoney(salesMotivationAmount)}</strong></div>
+            </div>
+            <p class="muted-text">Обновлено строк проданных мотивационных товаров: ${soldRows.toLocaleString('ru-RU')}. Каталог мотивационных товаров не обновлялся, пересчитаны продажи по уже настроенным мотивациям.</p>
+            ${detailRows ? `
+                <div class="table-wrap payroll-table-wrap">
+                    <table class="table payroll-table">
+                        <thead><tr><th>Дата</th><th>Точка</th><th>Выручка смены</th><th>Мотивации</th><th>Строк</th></tr></thead>
+                        <tbody>${detailRows}</tbody>
+                    </table>
+                </div>
+                ${details.length > 20 ? `<p class="muted-text">Показаны первые 20 смен из ${details.length.toLocaleString('ru-RU')}.</p>` : ''}
+            ` : ''}
+        </div>
+    `;
+}
+
+async function recalculateClosedShifts() {
+    if (!isAdminRole()) return;
+    const location = selectedLocation();
+    const dateFrom = String(qs('closed-shifts-recalc-date-from')?.value || '').trim();
+    const dateTo = String(qs('closed-shifts-recalc-date-to')?.value || '').trim();
+    const button = qs('closed-shifts-recalc-btn');
+    if (!location || isAllLocationsSelected(location)) {
+        showScopedStatus('closed-shifts-recalc-status', 'Выберите одну конкретную точку сверху. Для всех точек пересчёт не запускаем, чтобы не перегрузить МойСклад.', 'error');
+        return;
+    }
+    if (!dateFrom || !dateTo) {
+        showScopedStatus('closed-shifts-recalc-status', 'Выберите период пересчёта.', 'error');
+        return;
+    }
+    if (dateFrom > dateTo) {
+        showScopedStatus('closed-shifts-recalc-status', 'Дата начала не может быть позже даты окончания.', 'error');
+        return;
+    }
+    const confirmed = confirm(`Пересчитать закрытые смены на точке «${location}» за период ${dateFrom} — ${dateTo}? Будут обновлены продажи, зарплатные snapshots и мотивационные товары.`);
+    if (!confirmed) return;
+    setButtonLoading(button, true, 'Ставим в очередь...');
+    qs('closed-shifts-recalc-result').innerHTML = '';
+    showScopedStatus('closed-shifts-recalc-status', 'Ставим пересчёт закрытых смен в очередь...', 'loading');
+    try {
+        const response = await api('/api/payroll/closed-shifts/recalculate', {
+            method: 'POST',
+            body: JSON.stringify({
+                location,
+                date_from: dateFrom,
+                date_to: dateTo,
+                refresh_sales_motivations: true,
+                refresh_sales_motivation_catalog: false,
+            }),
+        });
+        const jobId = response?.recalc_job?.job_id;
+        if (!jobId) {
+            showScopedStatus('closed-shifts-recalc-status', response?.message || 'Пересчёт запущен.', 'success');
+            setButtonLoading(button, false);
+            return;
+        }
+        payrollState.activeRecalcJob = response.recalc_job;
+        showScopedStatus('closed-shifts-recalc-status', 'Задача запущена. Обновляем мотивационные продажи и закрытые смены в фоне...', 'loading');
+        pollRecalcStatus(jobId, 'closed-shifts-recalc-status').catch((error) => console.error(error));
+    } catch (error) {
+        showScopedStatus('closed-shifts-recalc-status', error.message || 'Не удалось запустить пересчёт закрытых смен.', 'error');
+        setButtonLoading(button, false);
+    }
+}
+
+
 function toggleExpenseTemplates() {
     const list = qs('expense-template-tbody');
     const button = qs('expense-templates-toggle-btn');
@@ -3407,6 +3522,7 @@ qs('audit-toggle-btn')?.addEventListener('click', () => {
 qs('audit-date-filter')?.addEventListener('change', renderAudit);
 qs('audit-employee-filter')?.addEventListener('change', renderAudit);
 qs('audit-clear-filters-btn')?.addEventListener('click', clearAuditFilters);
+qs('closed-shifts-recalc-btn')?.addEventListener('click', recalculateClosedShifts);
 document.querySelectorAll('[data-payroll-view]')?.forEach((button) => {
     button.addEventListener('click', () => setEmployeePayrollView(button.dataset.payrollView));
 });

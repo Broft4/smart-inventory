@@ -77,6 +77,7 @@ from app.payroll import (
     ManualMonthlyExpenseCreateRequest,
     MonthlyExpenseEntryUpdateRequest,
     PayrollSettingsUpdateRequest,
+    PayrollClosedShiftRecalculateRequest,
     SalesMotivationCreateRequest,
     SalesMotivationDailySnapshotRefreshRequest,
     SalesMotivationClosedShiftBackfillRequest,
@@ -106,6 +107,7 @@ from app.payroll import (
     get_sales_motivation_product_catalog,
     list_sales_motivation_daily_snapshots,
     get_payroll_recalc_status,
+    enqueue_closed_shift_recalculation,
     get_user_accessible_locations as get_payroll_accessible_locations,
     list_employee_bonuses,
     list_employee_penalties,
@@ -857,6 +859,11 @@ async def api_payroll_settings_update(payload: PayrollSettingsUpdateRequest, use
 @app.get('/api/payroll/recalc-status')
 async def api_payroll_recalc_status(location: str, job_id: int | None = None, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
     return await get_payroll_recalc_status(location, db, user, job_id=job_id)
+
+
+@app.post('/api/payroll/closed-shifts/recalculate')
+async def api_payroll_closed_shifts_recalculate(payload: PayrollClosedShiftRecalculateRequest, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await enqueue_closed_shift_recalculation(payload, db, user)
 
 @app.get('/api/payroll/shifts')
 async def api_payroll_shifts(location: str, date_from: date, date_to: date, employee_user_id: int | None = None, user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):

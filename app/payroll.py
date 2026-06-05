@@ -85,7 +85,7 @@ SALES_MOTIVATION_FISCAL_ANY = 'any'
 SALES_MOTIVATION_FISCAL_ONLY_NOT_FISCALIZED = 'only_not_fiscalized'
 SALES_MOTIVATION_POS_API_BASE_URL = 'https://online.moysklad.ru/api/posap/1.0'
 SALES_MOTIVATION_CATALOG_CACHE_TTL_SECONDS = 3600
-SALES_MOTIVATION_CURRENT_SHIFT_REFRESH_TTL_SECONDS = 300
+SALES_MOTIVATION_CURRENT_SHIFT_REFRESH_TTL_SECONDS = 60 * 60
 SALES_MOTIVATION_CURRENT_SHIFT_POLL_SECONDS = 12
 SALES_MOTIVATION_BACKGROUND_RETRY_SECONDS = 60
 _sales_metrics_cache: dict[tuple[int, str, str], tuple[float, dict[date, dict[str, Any]]]] = {}
@@ -476,6 +476,14 @@ class SalesMotivationClosedShiftBackfillRequest(BaseModel):
     refresh_catalog: bool = False
 
 
+class PayrollClosedShiftRecalculateRequest(BaseModel):
+    location: str
+    date_from: date
+    date_to: date
+    refresh_sales_motivations: bool = True
+    refresh_sales_motivation_catalog: bool = False
+
+
 class EmployeeBonusCreateRequest(BaseModel):
     location: str
     month_start: date
@@ -658,6 +666,20 @@ async def _run_payroll_recalc_job(job_id: int) -> None:
             async def progress(current: int, total: int) -> None:
                 await _update_recalc_job_progress(job_id, current=current, total=total, message=f'Пересчитываем смены: {current} из {total}.')
 
+            try:
+                job_options = json.loads(job.result_json or '{}')
+                if not isinstance(job_options, dict):
+                    job_options = {}
+            except Exception:
+                job_options = {}
+            refresh_sales_motivations = bool(job_options.get('refresh_sales_motivations'))
+            refresh_sales_motivation_catalog = bool(job_options.get('refresh_sales_motivation_catalog'))
+            if refresh_sales_motivations:
+                await _update_recalc_job_progress(
+                    job_id,
+                    message='Обновляем продажи мотивационных товаров за выбранный период...',
+                )
+
             result = await rebuild_closed_shift_snapshots(
                 job.date_from,
                 job.date_to,
@@ -665,6 +687,10 @@ async def _run_payroll_recalc_job(job_id: int) -> None:
                 location=point.name,
                 force_refresh_metrics=True,
                 progress_callback=progress,
+                refresh_sales_motivation_snapshots=refresh_sales_motivations,
+                refresh_sales_motivation_catalog=refresh_sales_motivation_catalog,
+                prefer_sales_motivation_daily_snapshots=refresh_sales_motivations,
+                allow_live_sales_motivation=not refresh_sales_motivations,
             )
             await _update_recalc_job_progress(
                 job_id,
@@ -681,7 +707,17 @@ async def _run_payroll_recalc_job(job_id: int) -> None:
         _payroll_recalc_tasks.pop(job_id, None)
 
 
-async def _enqueue_payroll_recalc_job(point: LocationPoint, settings_version_id: int | None, date_from: date, date_to: date, requested_by_user_id: int | None) -> PayrollRecalcJob:
+async def _enqueue_payroll_recalc_job(
+    point: LocationPoint,
+    settings_version_id: int | None,
+    date_from: date,
+    date_to: date,
+    requested_by_user_id: int | None,
+    *,
+    message: str = 'Задача поставлена в очередь на пересчёт.',
+    result_metadata: dict[str, Any] | None = None,
+) -> PayrollRecalcJob:
+    initial_result_json = json.dumps(result_metadata or {}, ensure_ascii=False)
     async with AsyncSessionLocal() as db:
         active_job = await db.scalar(
             select(PayrollRecalcJob)
@@ -704,8 +740,8 @@ async def _enqueue_payroll_recalc_job(point: LocationPoint, settings_version_id:
                 status='queued',
                 progress_current=0,
                 progress_total=0,
-                message='Задача поставлена в очередь на пересчёт.',
-                result_json='{}',
+                message=message,
+                result_json=initial_result_json,
                 updated_at=datetime.utcnow(),
             )
             db.add(active_job)
@@ -713,6 +749,12 @@ async def _enqueue_payroll_recalc_job(point: LocationPoint, settings_version_id:
             await db.refresh(active_job)
         elif settings_version_id and active_job.settings_version_id != settings_version_id:
             active_job.settings_version_id = settings_version_id
+            active_job.updated_at = datetime.utcnow()
+            await db.commit()
+            await db.refresh(active_job)
+        elif result_metadata is not None:
+            active_job.result_json = initial_result_json
+            active_job.message = message or active_job.message
             active_job.updated_at = datetime.utcnow()
             await db.commit()
             await db.refresh(active_job)
@@ -747,6 +789,55 @@ async def get_payroll_recalc_status(location: str, db: AsyncSession, current_use
     if job is None:
         return {'location': point.name, 'job': None}
     return {'location': point.name, 'job': _serialize_recalc_job(job, point)}
+
+
+async def enqueue_closed_shift_recalculation(
+    payload: PayrollClosedShiftRecalculateRequest,
+    db: AsyncSession,
+    current_user: User,
+) -> dict[str, Any]:
+    if current_user.role not in {'admin', 'superadmin'}:
+        raise HTTPException(status_code=403, detail='Пересчитывать закрытые смены может только управляющий.')
+    if payload.date_from > payload.date_to:
+        raise HTTPException(status_code=400, detail='Дата начала не может быть позже даты окончания.')
+    if _is_all_locations_scope(payload.location):
+        raise HTTPException(status_code=400, detail='Выберите одну точку для пересчёта закрытых смен.')
+
+    await ensure_user_can_access_location(current_user, payload.location, db)
+    point = await _get_location_point_by_name(payload.location, db)
+    job = await _enqueue_payroll_recalc_job(
+        point,
+        None,
+        payload.date_from,
+        payload.date_to,
+        current_user.id,
+        message='Ручной пересчёт закрытых смен поставлен в очередь.',
+        result_metadata={
+            'job_type': 'manual_closed_shift_recalculation',
+            'refresh_sales_motivations': bool(payload.refresh_sales_motivations),
+            'refresh_sales_motivation_catalog': bool(payload.refresh_sales_motivation_catalog),
+        },
+    )
+    await _log_payroll_action(
+        db,
+        actor_user_id=current_user.id,
+        location_point_id=point.id,
+        entity_type='payroll_recalc_job',
+        entity_id=str(job.id),
+        action_type='manual_closed_shift_recalculation',
+        details={
+            'date_from': payload.date_from.isoformat(),
+            'date_to': payload.date_to.isoformat(),
+            'refresh_sales_motivations': bool(payload.refresh_sales_motivations),
+            'refresh_sales_motivation_catalog': bool(payload.refresh_sales_motivation_catalog),
+        },
+    )
+    await db.commit()
+    return {
+        'success': True,
+        'message': 'Пересчёт закрытых смен поставлен в очередь.',
+        'recalc_job': _serialize_recalc_job(job, point),
+    }
 
 def _normalize_location(location: str) -> str:
     return location.strip().title()
@@ -6025,7 +6116,14 @@ async def _ensure_shift_snapshots_for_point(point: LocationPoint, db: AsyncSessi
         await close_shift(shift.id, db, actor_user=None, auto=True)
 
 
-async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_refresh_metrics: bool = False, allow_live_sales_motivation: bool = True) -> ShiftComputedPayroll:
+async def _build_computed_shift(
+    shift: WorkShift,
+    db: AsyncSession,
+    *,
+    force_refresh_metrics: bool = False,
+    allow_live_sales_motivation: bool = True,
+    prefer_sales_motivation_daily_snapshots: bool | None = None,
+) -> ShiftComputedPayroll:
     point = await db.get(LocationPoint, shift.location_point_id)
     employee = await db.get(User, shift.employee_user_id)
     if not point or not employee:
@@ -6244,12 +6342,14 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
         shift.shift_date,
         db,
     )
+    if prefer_sales_motivation_daily_snapshots is None:
+        prefer_sales_motivation_daily_snapshots = not force_refresh_metrics and shift.shift_date <= get_moscow_today()
     sales_motivation_amount, sales_motivations, sales_motivation_rows = await _calculate_shift_sales_motivations(
         point,
         shift,
         share_ratio,
         db,
-        prefer_daily_snapshots=(not force_refresh_metrics and shift.shift_date <= get_moscow_today()),
+        prefer_daily_snapshots=bool(prefer_sales_motivation_daily_snapshots),
         allow_live_fetch=allow_live_sales_motivation,
     )
     base_gross_salary_amount = round(float(settings.exit_amount or 0) + bonus + category_earnings_total, 2)
@@ -7607,6 +7707,10 @@ async def rebuild_closed_shift_snapshots(
     *,
     force_refresh_metrics: bool = False,
     progress_callback: Any | None = None,
+    refresh_sales_motivation_snapshots: bool = False,
+    refresh_sales_motivation_catalog: bool = False,
+    prefer_sales_motivation_daily_snapshots: bool | None = None,
+    allow_live_sales_motivation: bool = True,
 ) -> dict[str, Any]:
     query = (
         select(WorkShift)
@@ -7632,6 +7736,17 @@ async def rebuild_closed_shift_snapshots(
             }
         query = query.where(WorkShift.location_point_id == point.id)
 
+    sales_motivation_daily_result: dict[str, Any] | None = None
+    if refresh_sales_motivation_snapshots:
+        sales_motivation_daily_result = await refresh_sales_motivation_daily_snapshots(
+            date_from,
+            date_to,
+            db,
+            location=location,
+            current_user=None,
+            refresh_catalog=refresh_sales_motivation_catalog,
+        )
+
     shifts = (await db.scalars(query)).all()
     details: list[dict[str, Any]] = []
     updated = 0
@@ -7648,7 +7763,13 @@ async def rebuild_closed_shift_snapshots(
             await db.delete(snapshot)
             await db.flush()
 
-        computed = await _build_computed_shift(shift, db, force_refresh_metrics=force_refresh_metrics)
+        computed = await _build_computed_shift(
+            shift,
+            db,
+            force_refresh_metrics=force_refresh_metrics,
+            allow_live_sales_motivation=allow_live_sales_motivation,
+            prefer_sales_motivation_daily_snapshots=prefer_sales_motivation_daily_snapshots,
+        )
         new_snapshot = ShiftPayrollSnapshot(
             shift_id=shift.id,
             location_point_id=shift.location_point_id,
@@ -7709,6 +7830,8 @@ async def rebuild_closed_shift_snapshots(
             'return_amount': computed.return_amount,
             'cost_amount': computed.cost_amount,
             'gross_profit_amount': computed.gross_profit_amount,
+            'sales_motivation_amount': computed.sales_motivation_amount,
+            'sales_motivation_rows': len(computed.sales_motivation_rows or []),
         })
         if progress_callback is not None:
             callback_result = progress_callback(updated, len(shifts))
@@ -7722,6 +7845,10 @@ async def rebuild_closed_shift_snapshots(
         'location': _normalize_location(location) if location else None,
         'processed': len(shifts),
         'updated': updated,
+        'refresh_sales_motivation_snapshots': bool(refresh_sales_motivation_snapshots),
+        'refresh_sales_motivation_catalog': bool(refresh_sales_motivation_catalog),
+        'sales_motivation_daily_snapshots': sales_motivation_daily_result,
+        'sales_motivation_amount': round(sum(float(item.get('sales_motivation_amount') or 0.0) for item in details), 2),
         'details': details,
     }
 
