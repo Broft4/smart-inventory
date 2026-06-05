@@ -79,6 +79,7 @@ from app.payroll import (
     PayrollSettingsUpdateRequest,
     SalesMotivationCreateRequest,
     SalesMotivationDailySnapshotRefreshRequest,
+    SalesMotivationClosedShiftBackfillRequest,
     SalesMotivationUpdateRequest,
     WorkShiftUpsertRequest,
     close_shift,
@@ -122,6 +123,7 @@ from app.payroll import (
     update_sales_motivation_model,
     upsert_work_shift,
     refresh_sales_motivation_daily_snapshots,
+    backfill_closed_shift_sales_motivation_snapshots,
     resume_pending_payroll_recalc_jobs,
 )
 from app.schemas import (
@@ -915,6 +917,20 @@ async def api_payroll_sales_motivation_daily_snapshots(location: str, date_from:
 async def api_payroll_sales_motivation_daily_snapshots_refresh(payload: SalesMotivationDailySnapshotRefreshRequest, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
     date_to = payload.date_to or payload.date_from
     return await refresh_sales_motivation_daily_snapshots(payload.date_from, date_to, db, location=payload.location, current_user=user)
+
+
+@app.post('/api/payroll/sales-motivations/closed-shifts/backfill')
+async def api_payroll_sales_motivation_closed_shift_backfill(payload: SalesMotivationClosedShiftBackfillRequest, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    date_to = payload.date_to or payload.date_from
+    return await backfill_closed_shift_sales_motivation_snapshots(
+        payload.date_from,
+        date_to,
+        db,
+        location=payload.location,
+        current_user=user,
+        refresh_daily_snapshots=payload.refresh_daily_snapshots,
+        refresh_catalog=payload.refresh_catalog,
+    )
 
 
 @app.post('/api/payroll/sales-motivations')

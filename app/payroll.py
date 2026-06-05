@@ -84,12 +84,17 @@ SALES_MOTIVATION_REWARD_FIXED = 'fixed'
 SALES_MOTIVATION_FISCAL_ANY = 'any'
 SALES_MOTIVATION_FISCAL_ONLY_NOT_FISCALIZED = 'only_not_fiscalized'
 SALES_MOTIVATION_POS_API_BASE_URL = 'https://online.moysklad.ru/api/posap/1.0'
-SALES_MOTIVATION_CATALOG_CACHE_TTL_SECONDS = 60 * 60 * 26
+SALES_MOTIVATION_CATALOG_CACHE_TTL_SECONDS = 3600
+SALES_MOTIVATION_CURRENT_SHIFT_REFRESH_TTL_SECONDS = 300
+SALES_MOTIVATION_CURRENT_SHIFT_POLL_SECONDS = 12
+SALES_MOTIVATION_BACKGROUND_RETRY_SECONDS = 60
 _sales_metrics_cache: dict[tuple[int, str, str], tuple[float, dict[date, dict[str, Any]]]] = {}
 _sales_metrics_refresh_locks: dict[tuple[int, str, str, bool], asyncio.Lock] = {}
 _shift_close_locks: dict[int, asyncio.Lock] = {}
 _category_lookup_cache: dict[str, tuple[float, dict[str, dict[str, str]]]] = {}
 _payroll_recalc_tasks: dict[int, asyncio.Task[Any]] = {}
+_sales_motivation_daily_refresh_tasks: dict[tuple[int, str], asyncio.Task[Any]] = {}
+_sales_motivation_daily_refresh_status: dict[tuple[int, str], dict[str, Any]] = {}
 _pos_fiscalization_cache: dict[tuple[str, str, str], tuple[float, bool | None]] = {}
 POS_FISCALIZATION_CACHE_TTL_SECONDS = 600
 
@@ -462,6 +467,15 @@ class SalesMotivationDailySnapshotRefreshRequest(BaseModel):
     date_from: date
     date_to: date | None = None
 
+
+class SalesMotivationClosedShiftBackfillRequest(BaseModel):
+    location: str
+    date_from: date
+    date_to: date | None = None
+    refresh_daily_snapshots: bool = True
+    refresh_catalog: bool = False
+
+
 class EmployeeBonusCreateRequest(BaseModel):
     location: str
     month_start: date
@@ -564,14 +578,6 @@ def get_moscow_today() -> date:
 
 def get_payroll_operational_today() -> date:
     return get_moscow_today()
-
-
-def _is_current_open_shift(shift: WorkShift) -> bool:
-    return (
-        shift.status != 'closed'
-        and not bool(getattr(shift, 'is_deleted', False))
-        and shift.shift_date == get_payroll_operational_today()
-    )
 
 
 
@@ -5277,6 +5283,7 @@ async def refresh_sales_motivation_daily_snapshots(
     location: str | None = None,
     current_user: User | None = None,
     progress_callback: Any | None = None,
+    refresh_catalog: bool = True,
 ) -> dict[str, Any]:
     if date_from > date_to:
         raise HTTPException(status_code=400, detail='Дата начала не может быть позже даты окончания.')
@@ -5298,14 +5305,20 @@ async def refresh_sales_motivation_daily_snapshots(
 
     for point_index, point in enumerate(points, start=1):
         inventory_by_id: dict[str, dict[str, Any]] = {}
-        try:
-            inventory_products, _inventory_from_cache, _inventory_refreshed_at = await _get_or_refresh_sales_motivation_catalog_products(point, db, no_sales_days=0, force_refresh=False, commit=False)
-            inventory_by_id = {row['item_id']: row for row in inventory_products if row.get('item_id')}
-        except Exception:
-            logger.warning(
-                'Не удалось обновить остатки для дневного снимка мотиваций точки %s. Используем товары из моделей.',
+        if refresh_catalog:
+            try:
+                inventory_products, _inventory_from_cache, _inventory_refreshed_at = await _get_or_refresh_sales_motivation_catalog_products(point, db, no_sales_days=0, force_refresh=True, commit=False)
+                inventory_by_id = {row['item_id']: row for row in inventory_products if row.get('item_id')}
+            except Exception:
+                logger.warning(
+                    'Не удалось обновить остатки для дневного снимка мотиваций точки %s. Используем товары из моделей.',
+                    point.name,
+                    exc_info=True,
+                )
+        else:
+            logger.info(
+                'Обновление каталога/остатков для дневного снимка мотиваций точки %s пропущено; используем товары из моделей.',
                 point.name,
-                exc_info=True,
             )
         for day in days:
             processed_steps += 1
@@ -5422,9 +5435,442 @@ async def refresh_sales_motivation_daily_snapshots(
         'sold_rows': sold_rows,
         'unsold_rows': unsold_rows,
         'bonus_total': round(float(bonus_total or 0.0), 2),
+        'catalog_refreshed': bool(refresh_catalog),
     }
     if progress_callback:
         await progress_callback('done', result)
+    return result
+
+
+
+def _sales_motivation_refresh_key(point_id: int, day: date) -> tuple[int, str]:
+    return (int(point_id or 0), day.isoformat())
+
+
+def _coerce_sales_motivation_status_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return datetime.fromisoformat(value.replace('Z', '+00:00')).replace(tzinfo=None)
+        except ValueError:
+            return None
+    return None
+
+
+def _sales_motivation_status_datetime(value: Any) -> str | None:
+    parsed = _coerce_sales_motivation_status_datetime(value)
+    return parsed.isoformat() if parsed else None
+
+
+def _sales_motivation_status_age_seconds(value: Any) -> int | None:
+    parsed = _coerce_sales_motivation_status_datetime(value)
+    if parsed is None:
+        return None
+    return max(int((datetime.utcnow() - parsed).total_seconds()), 0)
+
+
+def _current_background_sales_motivation_status(key: tuple[int, str]) -> dict[str, Any] | None:
+    task = _sales_motivation_daily_refresh_tasks.get(key)
+    raw = dict(_sales_motivation_daily_refresh_status.get(key) or {})
+    if task is not None and not task.done():
+        raw['status'] = raw.get('status') or 'running'
+        raw['is_running'] = True
+        return raw
+    if raw:
+        raw['is_running'] = False
+        return raw
+    return None
+
+
+async def _run_current_shift_sales_motivation_refresh(
+    point_id: int,
+    point_name: str,
+    day: date,
+    *,
+    refresh_catalog: bool = False,
+) -> None:
+    key = _sales_motivation_refresh_key(point_id, day)
+    _sales_motivation_daily_refresh_status[key] = {
+        'status': 'running',
+        'started_at': datetime.utcnow(),
+        'finished_at': None,
+        'error_text': None,
+        'result': None,
+    }
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await refresh_sales_motivation_daily_snapshots(
+                day,
+                day,
+                db,
+                location=point_name,
+                current_user=None,
+                refresh_catalog=refresh_catalog,
+            )
+        _sales_motivation_daily_refresh_status[key] = {
+            'status': 'done',
+            'started_at': _sales_motivation_daily_refresh_status.get(key, {}).get('started_at'),
+            'finished_at': datetime.utcnow(),
+            'error_text': None,
+            'result': result,
+        }
+    except Exception as exc:
+        logger.exception(
+            'Фоновое обновление мотивационных продаж текущей смены завершилось ошибкой. point=%s date=%s',
+            point_name,
+            day.isoformat(),
+        )
+        _sales_motivation_daily_refresh_status[key] = {
+            'status': 'failed',
+            'started_at': _sales_motivation_daily_refresh_status.get(key, {}).get('started_at'),
+            'finished_at': datetime.utcnow(),
+            'error_text': str(exc),
+            'result': None,
+        }
+    finally:
+        _sales_motivation_daily_refresh_tasks.pop(key, None)
+
+
+def _enqueue_current_shift_sales_motivation_refresh(
+    point: LocationPoint,
+    day: date,
+    *,
+    refresh_catalog: bool = False,
+) -> bool:
+    key = _sales_motivation_refresh_key(int(point.id or 0), day)
+    task = _sales_motivation_daily_refresh_tasks.get(key)
+    if task is not None and not task.done():
+        return False
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        logger.warning(
+            'Не удалось поставить фоновое обновление мотивационных продаж: нет активного event loop. point=%s date=%s',
+            point.name,
+            day.isoformat(),
+        )
+        return False
+    _sales_motivation_daily_refresh_status[key] = {
+        'status': 'queued',
+        'started_at': datetime.utcnow(),
+        'finished_at': None,
+        'error_text': None,
+        'result': None,
+    }
+    _sales_motivation_daily_refresh_tasks[key] = loop.create_task(
+        _run_current_shift_sales_motivation_refresh(
+            int(point.id or 0),
+            point.name,
+            day,
+            refresh_catalog=refresh_catalog,
+        )
+    )
+    return True
+
+
+async def _get_current_shift_sales_motivation_refresh_state(
+    point: LocationPoint,
+    day: date,
+    db: AsyncSession,
+    *,
+    auto_enqueue: bool = True,
+    force_enqueue: bool = False,
+) -> dict[str, Any]:
+    key = _sales_motivation_refresh_key(int(point.id or 0), day)
+    models = await _get_active_sales_motivation_models(point, day, db)
+    if not models:
+        return {
+            'status': 'disabled',
+            'message': 'Активных мотиваций на эту дату нет.',
+            'is_fresh': True,
+            'should_poll': False,
+            'updated_at': None,
+            'age_seconds': None,
+            'rows_count': 0,
+            'product_count': 0,
+            'next_poll_seconds': SALES_MOTIVATION_CURRENT_SHIFT_POLL_SECONDS,
+        }
+
+    model_ids = [int(model.id) for model in models if model.id is not None]
+    products_by_model = await _get_sales_motivation_products_by_model(model_ids, db)
+    product_count = sum(len(rows or []) for rows in products_by_model.values())
+    if product_count <= 0:
+        return {
+            'status': 'disabled',
+            'message': 'В активных мотивациях пока нет выбранных товаров.',
+            'is_fresh': True,
+            'should_poll': False,
+            'updated_at': None,
+            'age_seconds': None,
+            'rows_count': 0,
+            'product_count': 0,
+            'next_poll_seconds': SALES_MOTIVATION_CURRENT_SHIFT_POLL_SECONDS,
+        }
+
+    rows_count = int((await db.scalar(
+        select(func.count(SalesMotivationDailySnapshot.id)).where(
+            SalesMotivationDailySnapshot.location_point_id == point.id,
+            SalesMotivationDailySnapshot.snapshot_date == day,
+            SalesMotivationDailySnapshot.model_id.in_(model_ids),
+        )
+    )) or 0)
+    sold_rows_count = int((await db.scalar(
+        select(func.count(SalesMotivationDailySnapshot.id)).where(
+            SalesMotivationDailySnapshot.location_point_id == point.id,
+            SalesMotivationDailySnapshot.snapshot_date == day,
+            SalesMotivationDailySnapshot.model_id.in_(model_ids),
+            SalesMotivationDailySnapshot.is_sold.is_(True),
+        )
+    )) or 0)
+    max_updated_at = await db.scalar(
+        select(func.max(SalesMotivationDailySnapshot.updated_at)).where(
+            SalesMotivationDailySnapshot.location_point_id == point.id,
+            SalesMotivationDailySnapshot.snapshot_date == day,
+            SalesMotivationDailySnapshot.model_id.in_(model_ids),
+        )
+    )
+    max_updated_at = _coerce_sales_motivation_status_datetime(max_updated_at)
+    age_seconds = _sales_motivation_status_age_seconds(max_updated_at)
+    has_complete_snapshot = rows_count >= product_count and max_updated_at is not None
+    is_fresh = bool(
+        has_complete_snapshot
+        and age_seconds is not None
+        and age_seconds <= SALES_MOTIVATION_CURRENT_SHIFT_REFRESH_TTL_SECONDS
+    )
+
+    background = _current_background_sales_motivation_status(key)
+    if background and background.get('status') in {'queued', 'running'}:
+        status = str(background.get('status') or 'running')
+        return {
+            'status': status,
+            'message': 'Мотивационные продажи обновляются в фоне. Основная смена уже загружена.',
+            'is_fresh': is_fresh,
+            'should_poll': True,
+            'updated_at': _sales_motivation_status_datetime(max_updated_at),
+            'age_seconds': age_seconds,
+            'rows_count': rows_count,
+            'sold_rows_count': sold_rows_count,
+            'product_count': product_count,
+            'next_poll_seconds': SALES_MOTIVATION_CURRENT_SHIFT_POLL_SECONDS,
+            'started_at': _sales_motivation_status_datetime(background.get('started_at')),
+        }
+
+    if is_fresh and not force_enqueue:
+        return {
+            'status': 'fresh',
+            'message': 'Мотивационные продажи актуальны.',
+            'is_fresh': True,
+            'should_poll': False,
+            'updated_at': _sales_motivation_status_datetime(max_updated_at),
+            'age_seconds': age_seconds,
+            'rows_count': rows_count,
+            'sold_rows_count': sold_rows_count,
+            'product_count': product_count,
+            'next_poll_seconds': SALES_MOTIVATION_CURRENT_SHIFT_POLL_SECONDS,
+        }
+
+    if background and background.get('status') == 'failed':
+        finished_age = _sales_motivation_status_age_seconds(background.get('finished_at'))
+        if finished_age is not None and finished_age < SALES_MOTIVATION_BACKGROUND_RETRY_SECONDS and not force_enqueue:
+            return {
+                'status': 'failed',
+                'message': 'Не удалось обновить мотивационные продажи в фоне. Повторите чуть позже или обновите страницу.',
+                'is_fresh': is_fresh,
+                'should_poll': False,
+                'updated_at': _sales_motivation_status_datetime(max_updated_at),
+                'age_seconds': age_seconds,
+                'rows_count': rows_count,
+                'sold_rows_count': sold_rows_count,
+                'product_count': product_count,
+                'next_poll_seconds': SALES_MOTIVATION_CURRENT_SHIFT_POLL_SECONDS,
+                'error_text': background.get('error_text'),
+            }
+
+    if auto_enqueue or force_enqueue:
+        _enqueue_current_shift_sales_motivation_refresh(point, day, refresh_catalog=False)
+        return {
+            'status': 'queued',
+            'message': 'Мотивационные продажи поставлены на фоновое обновление. Основная смена не ждёт эту выгрузку.',
+            'is_fresh': is_fresh,
+            'should_poll': True,
+            'updated_at': _sales_motivation_status_datetime(max_updated_at),
+            'age_seconds': age_seconds,
+            'rows_count': rows_count,
+            'sold_rows_count': sold_rows_count,
+            'product_count': product_count,
+            'next_poll_seconds': SALES_MOTIVATION_CURRENT_SHIFT_POLL_SECONDS,
+        }
+
+    return {
+        'status': 'stale' if rows_count else 'empty',
+        'message': 'Мотивационные продажи требуют обновления.',
+        'is_fresh': False,
+        'should_poll': False,
+        'updated_at': _sales_motivation_status_datetime(max_updated_at),
+        'age_seconds': age_seconds,
+        'rows_count': rows_count,
+        'sold_rows_count': sold_rows_count,
+        'product_count': product_count,
+        'next_poll_seconds': SALES_MOTIVATION_CURRENT_SHIFT_POLL_SECONDS,
+    }
+
+
+async def backfill_closed_shift_sales_motivation_snapshots(
+    date_from: date,
+    date_to: date,
+    db: AsyncSession,
+    *,
+    location: str | None = None,
+    current_user: User | None = None,
+    refresh_daily_snapshots: bool = True,
+    refresh_catalog: bool = False,
+    progress_callback: Any | None = None,
+) -> dict[str, Any]:
+    """Backfill seller motivation rows for already closed shifts only.
+
+    Это безопасный ручной путь восстановления мотиваций: он не пересобирает весь
+    payroll-кеш и не трогает категории/выручку/себестоимость закрытой смены.
+    При необходимости сначала обновляет дневные снимки мотиваций за указанный
+    период, а затем переносит их в snapshot закрытых смен с учётом share_ratio.
+    """
+    if date_from > date_to:
+        raise HTTPException(status_code=400, detail='Дата начала не может быть позже даты окончания.')
+    if current_user is not None and current_user.role not in {'admin', 'superadmin'}:
+        raise HTTPException(status_code=403, detail='Обновлять мотивации закрытых смен может только управляющий.')
+
+    points = await _resolve_sales_motivation_snapshot_points(db, location=location, current_user=current_user)
+    point_by_id = {int(point.id): point for point in points}
+    point_ids = sorted(point_by_id.keys())
+    if not point_ids:
+        return {
+            'date_from': date_from.isoformat(),
+            'date_to': date_to.isoformat(),
+            'location': location,
+            'refresh_daily_snapshots': bool(refresh_daily_snapshots),
+            'refresh_catalog': bool(refresh_catalog),
+            'processed': 0,
+            'updated': 0,
+            'skipped': 0,
+            'sales_motivation_amount': 0.0,
+            'details': [],
+            'daily_snapshots': [],
+        }
+
+    async def _notify(event: str, payload: dict[str, Any]) -> None:
+        if progress_callback is None:
+            return
+        result = progress_callback(event, payload)
+        if asyncio.iscoroutine(result):
+            await result
+
+    await _notify('start', {
+        'date_from': date_from.isoformat(),
+        'date_to': date_to.isoformat(),
+        'location': location,
+        'locations': [point.name for point in points],
+        'refresh_daily_snapshots': bool(refresh_daily_snapshots),
+        'refresh_catalog': bool(refresh_catalog),
+    })
+
+    daily_results: list[dict[str, Any]] = []
+    if refresh_daily_snapshots:
+        for point in points:
+            await _notify('daily_snapshot_start', {'location': point.name})
+            daily_result = await refresh_sales_motivation_daily_snapshots(
+                date_from,
+                date_to,
+                db,
+                location=point.name,
+                current_user=None,
+                progress_callback=None,
+                refresh_catalog=refresh_catalog,
+            )
+            daily_results.append(daily_result)
+            await _notify('daily_snapshot_done', daily_result)
+
+    shifts = (
+        await db.scalars(
+            select(WorkShift)
+            .where(
+                WorkShift.location_point_id.in_(point_ids),
+                WorkShift.shift_date >= date_from,
+                WorkShift.shift_date <= date_to,
+                WorkShift.status == 'closed',
+                WorkShift.is_deleted.is_(False),
+            )
+            .order_by(WorkShift.shift_date.asc(), WorkShift.location_point_id.asc(), WorkShift.id.asc())
+        )
+    ).all()
+
+    details: list[dict[str, Any]] = []
+    updated = 0
+    skipped = 0
+    total_sales_motivation_amount = 0.0
+
+    for shift in shifts:
+        point = point_by_id.get(int(shift.location_point_id)) or await db.get(LocationPoint, shift.location_point_id)
+        snapshot = await db.scalar(
+            select(ShiftPayrollSnapshot)
+            .where(ShiftPayrollSnapshot.shift_id == shift.id)
+            .limit(1)
+        )
+        if point is None or snapshot is None:
+            skipped += 1
+            details.append({
+                'shift_id': shift.id,
+                'shift_date': shift.shift_date.isoformat(),
+                'location': point.name if point else None,
+                'updated': False,
+                'reason': 'snapshot_not_found' if snapshot is None else 'location_not_found',
+            })
+            continue
+
+        share_ratio = float(snapshot.share_ratio or 0.0)
+        if share_ratio <= 0:
+            share_ratio = round(1.0 / await _get_active_shift_count(point, shift.shift_date, db), 4)
+
+        rows = await _load_shift_sales_motivation_rows_from_daily_snapshots(point, shift, share_ratio, db)
+        rows = rows or []
+        await db.execute(delete(ShiftSalesMotivationSnapshot).where(ShiftSalesMotivationSnapshot.snapshot_id == snapshot.id))
+        _add_shift_sales_motivation_snapshot_rows(
+            db,
+            snapshot=snapshot,
+            shift=shift,
+            point=point,
+            rows=rows,
+        )
+        amount = round(sum(float(row.get('bonus_amount') or 0.0) for row in rows), 2)
+        total_sales_motivation_amount += amount
+        updated += 1
+        details.append({
+            'shift_id': shift.id,
+            'shift_date': shift.shift_date.isoformat(),
+            'location': point.name,
+            'employee_user_id': shift.employee_user_id,
+            'snapshot_id': snapshot.id,
+            'share_ratio': round(share_ratio, 4),
+            'row_count': len(rows),
+            'sales_motivation_amount': amount,
+            'updated': True,
+        })
+        await _notify('shift_done', details[-1])
+
+    await db.commit()
+    result = {
+        'date_from': date_from.isoformat(),
+        'date_to': date_to.isoformat(),
+        'location': location,
+        'refresh_daily_snapshots': bool(refresh_daily_snapshots),
+        'refresh_catalog': bool(refresh_catalog),
+        'processed': len(shifts),
+        'updated': updated,
+        'skipped': skipped,
+        'sales_motivation_amount': round(total_sales_motivation_amount, 2),
+        'details': details,
+        'daily_snapshots': daily_results,
+    }
+    await _notify('done', result)
     return result
 
 
@@ -5803,9 +6249,7 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
         shift,
         share_ratio,
         db,
-        # Живое обновление текущей смены не должно запускать live-выгрузку мотивационных товаров.
-        # Мотивации берём только из дневных snapshots, которые обновляются отдельным cron в 23:00 МСК.
-        prefer_daily_snapshots=(shift.shift_date <= get_moscow_today()),
+        prefer_daily_snapshots=(not force_refresh_metrics and shift.shift_date <= get_moscow_today()),
         allow_live_fetch=allow_live_sales_motivation,
     )
     base_gross_salary_amount = round(float(settings.exit_amount or 0) + bonus + category_earnings_total, 2)
@@ -6080,7 +6524,6 @@ async def _serialize_shift_lightweight(
     db: AsyncSession,
     *,
     employee_name: str | None = None,
-    force_refresh_metrics: bool = False,
 ) -> dict[str, Any]:
     point = await db.get(LocationPoint, shift.location_point_id)
     if not point:
@@ -6213,12 +6656,7 @@ async def _serialize_shift_lightweight(
     today = get_moscow_today()
     should_show_realized_amounts = shift.status == 'closed' or shift.shift_date <= today
     if should_show_realized_amounts:
-        computed = await _build_computed_shift(
-            shift,
-            db,
-            force_refresh_metrics=force_refresh_metrics,
-            allow_live_sales_motivation=False,
-        )
+        computed = await _build_computed_shift(shift, db, allow_live_sales_motivation=False)
         return _pack_lightweight(
             is_closed=bool(shift.status == 'closed' or computed.is_closed),
             closed_at=_datetime_to_str(shift.closed_at) if shift.status == 'closed' else computed.closed_at,
@@ -6329,17 +6767,12 @@ async def list_work_shifts(location: str, date_from: date, date_to: date, db: As
         employee_names = {item.id: item.full_name for item in employees}
 
     by_day: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    live_metrics_refreshed_for_today = False
     for shift in rows:
-        force_live_metrics = _is_current_open_shift(shift) and not live_metrics_refreshed_for_today
         serialized = await _serialize_shift_lightweight(
             shift,
             db,
             employee_name=employee_names.get(shift.employee_user_id),
-            force_refresh_metrics=force_live_metrics,
         )
-        if force_live_metrics:
-            live_metrics_refreshed_for_today = True
         by_day[shift.shift_date.isoformat()].append(serialized)
     return {
         'location': point.name,
@@ -6391,19 +6824,14 @@ async def list_work_shift_day_summary(location: str, date_from: date, date_to: d
         employee_names = {item.id: item.full_name for item in employees}
 
     days: list[dict[str, Any]] = []
-    live_metrics_refreshed_for_today = False
     for shift in rows:
-        force_live_metrics = _is_current_open_shift(shift) and not live_metrics_refreshed_for_today
         days.append(
             await _serialize_shift_lightweight(
                 shift,
                 db,
                 employee_name=employee_names.get(shift.employee_user_id),
-                force_refresh_metrics=force_live_metrics,
             )
         )
-        if force_live_metrics:
-            live_metrics_refreshed_for_today = True
     return {
         'location': point.name,
         'date_from': date_from.isoformat(),
@@ -6633,6 +7061,9 @@ async def get_employee_payroll_summary(location: str, date_from: date, date_to: 
     if current_user.role == 'employee':
         shifts = [shift for shift in shifts if shift.employee_user_id == current_user.id]
 
+    if any(shift.shift_date == today and shift.status != 'closed' for shift in shifts):
+        await _load_point_sales_metrics(point, today, today, db, force_refresh=True)
+
     days: list[dict[str, Any]] = []
     totals = {
         'gross_sales_amount': 0.0,
@@ -6652,6 +7083,13 @@ async def get_employee_payroll_summary(location: str, date_from: date, date_to: 
     for shift in shifts:
         computed = await _build_computed_shift(shift, db, allow_live_sales_motivation=False)
         serialized = _serialize_computed_shift(computed)
+        if shift.shift_date == today and shift.status != 'closed' and not computed.is_closed:
+            serialized['sales_motivation_refresh'] = await _get_current_shift_sales_motivation_refresh_state(
+                point,
+                shift.shift_date,
+                db,
+                auto_enqueue=True,
+            )
         days.append(serialized)
         employee_ids_in_result.add(int(serialized['employee_user_id']))
         for key in totals:

@@ -42,6 +42,7 @@ const payrollState = {
     employeeView: 'salary',
     activeRecalcJob: null,
     recalcPollTimer: null,
+    salesMotivationRefreshPollTimer: null,
     summaryLoadingPromise: null,
     setupRequestSeq: 0,
     summaryRequestSeq: 0,
@@ -123,6 +124,14 @@ function formatTimeRu(dateTimeValue) {
     const date = new Date(normalized);
     if (Number.isNaN(date.getTime())) return String(dateTimeValue);
     return new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit' }).format(date);
+}
+
+function formatDateTime(value) {
+    if (!value) return '';
+    const normalized = String(value).replace(' ', 'T');
+    const date = new Date(normalized);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return new Intl.DateTimeFormat('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date);
 }
 
 function expenseModeLabel(mode) {
@@ -1006,6 +1015,7 @@ function renderShiftDetailsInto(containerId, summary, { audience = 'admin' } = {
 
 function renderSummary(summary) {
     payrollState.summary = summary;
+    scheduleSalesMotivationRefreshPoll(summary);
     mergeCategoryCatalog(
         payrollState.categoryCatalog || [],
         payrollState.settings?.category_rates || [],
@@ -2627,14 +2637,85 @@ function salesMotivationFiscalizationText(model) {
     return 'только без фискализации';
 }
 
+
+function isCurrentOpenShiftDay(day) {
+    return Boolean(day && !day.is_closed && String(day.shift_date || '') === todayIso());
+}
+
+function salesMotivationRefreshState(day) {
+    return day && typeof day.sales_motivation_refresh === 'object' && day.sales_motivation_refresh
+        ? day.sales_motivation_refresh
+        : null;
+}
+
+function renderSalesMotivationRefreshNotice(day) {
+    if (!isCurrentOpenShiftDay(day)) return '';
+    const state = salesMotivationRefreshState(day);
+    if (!state) return '';
+    const status = String(state.status || '').toLowerCase();
+    const updatedText = state.updated_at ? ` Последнее обновление: ${escapeHtml(formatDateTime(state.updated_at))}.` : '';
+    if (status === 'queued' || status === 'running') {
+        return `
+            <div class="muted-text payroll-shift-motivation-refresh-note">
+                Мотивационные продажи обновляются в фоне. Основные данные текущей смены уже загружены live.${updatedText}
+            </div>
+        `;
+    }
+    if (status === 'failed') {
+        return `
+            <div class="muted-text payroll-shift-motivation-refresh-note">
+                Мотивационные продажи не удалось обновить в фоне. Основная смена не заблокирована; попробуйте обновить страницу позже.${updatedText}
+            </div>
+        `;
+    }
+    if ((status === 'stale' || status === 'empty') && state.message) {
+        return `
+            <div class="muted-text payroll-shift-motivation-refresh-note">
+                ${escapeHtml(state.message)}${updatedText}
+            </div>
+        `;
+    }
+    return '';
+}
+
+function clearSalesMotivationRefreshPoll() {
+    if (payrollState.salesMotivationRefreshPollTimer) {
+        clearTimeout(payrollState.salesMotivationRefreshPollTimer);
+        payrollState.salesMotivationRefreshPollTimer = null;
+    }
+}
+
+function scheduleSalesMotivationRefreshPoll(summary) {
+    const days = Array.isArray(summary?.days) ? summary.days : [];
+    const activeRefresh = days.find((day) => {
+        const state = salesMotivationRefreshState(day);
+        return isCurrentOpenShiftDay(day) && state && state.should_poll;
+    });
+    if (!activeRefresh) {
+        clearSalesMotivationRefreshPoll();
+        return;
+    }
+    const state = salesMotivationRefreshState(activeRefresh) || {};
+    const seconds = Math.max(5, Math.min(60, Number(state.next_poll_seconds || 12)));
+    clearSalesMotivationRefreshPoll();
+    payrollState.salesMotivationRefreshPollTimer = setTimeout(() => {
+        payrollState.salesMotivationRefreshPollTimer = null;
+        loadSummary({ silent: true }).catch((error) => console.error(error));
+    }, seconds * 1000);
+}
+
 function renderShiftSalesMotivations(day) {
     const motivations = Array.isArray(day?.sales_motivations) ? day.sales_motivations : [];
-    if (!motivations.length) return '';
+    const refreshNotice = renderSalesMotivationRefreshNotice(day);
+    if (!motivations.length) {
+        return refreshNotice;
+    }
     return `
         <div class="payroll-shift-section-head">
             <h3>Мотивации продавца</h3>
             <p class="muted-text">Дополнительные начисления за продажу горящих товаров. Суммируются поверх обычных процентов.</p>
         </div>
+        ${refreshNotice}
         <div class="expense-entry-grid payroll-shift-bonus-list">
             ${motivations.map((model) => `
                 <article class="expense-entry-card">
