@@ -1,13 +1,14 @@
 # /etc/cron.d/smart_inventory_payroll_cache
-# Каждый час обновляем БД-кеш каталога товаров и дневные снимки продаж
-# мотивационных товаров за текущий день, чтобы страницы смен/зарплаты
-# не запускали тяжёлую live-выгрузку мотиваций из МойСклад из GET-запросов.
-# Ежедневно в 23:55 по московскому времени:
-# выгружаем payroll-метрики из МойСклад, закрываем текущие незакрытые смены,
-# пересобираем snapshots и сохраняем дневные снимки мотиваций.
+# МойСклад имеет жёсткие лимиты API, поэтому фоновые тяжёлые задачи разведены:
+# 1) Мотивационные товары и дневные снимки мотиваций — один раз в день в 23:00 МСК.
+# 2) Payroll-кеш, автозакрытие и snapshots закрытых смен — отдельно в 23:55 МСК.
+#
+# Почасовой прогрев мотиваций отключён: он запускал лишние выгрузки из МойСклад
+# и мог мешать живому просмотру текущей/вчерашней смены. Общий flock не даёт
+# двум тяжёлым задачам одновременно расходовать лимиты МоегоСклада.
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CRON_TZ=Europe/Moscow
 
-10 * * * * root cd /opt/smart-inventory && source .venv/bin/activate && python -m app.refresh_payroll_metrics_cache --refresh-sales-motivation-catalog --refresh-sales-motivation-snapshots --sales-motivation-days 1 --heartbeat-seconds 15 >> /var/log/smart_inventory_motivation_catalog_refresh.log 2>&1
-55 23 * * * root cd /opt/smart-inventory && source .venv/bin/activate && python -m app.refresh_payroll_metrics_cache --days 35 --force-refresh --refresh-sales-motivation-catalog --auto-close-due-shifts --rebuild-closed-shifts --refresh-sales-motivation-snapshots --sales-motivation-days 2 --heartbeat-seconds 15 >> /var/log/smart_inventory_payroll_refresh.log 2>&1
+0 23 * * * root flock -w 1800 /tmp/smart_inventory_moysklad_api.lock bash -lc 'cd /opt/smart-inventory && source .venv/bin/activate && python -m app.refresh_payroll_metrics_cache --only-sales-motivation --sales-motivation-days 2 --heartbeat-seconds 15' >> /var/log/smart_inventory_motivation_refresh.log 2>&1
+55 23 * * * root flock -w 1800 /tmp/smart_inventory_moysklad_api.lock bash -lc 'cd /opt/smart-inventory && source .venv/bin/activate && python -m app.refresh_payroll_metrics_cache --days 35 --force-refresh --auto-close-due-shifts --rebuild-closed-shifts --heartbeat-seconds 15' >> /var/log/smart_inventory_payroll_refresh.log 2>&1

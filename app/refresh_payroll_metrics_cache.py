@@ -78,6 +78,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help='Запустить только обновление каталога товаров для мотиваций без пересчёта payroll-метрик.',
     )
     parser.add_argument(
+        '--skip-payroll-cache',
+        action='store_true',
+        help='Не обновлять payroll-метрики продаж/возвратов; выполнить только выбранные дополнительные операции.',
+    )
+    parser.add_argument(
+        '--only-sales-motivation',
+        action='store_true',
+        help='Обновить только каталог и дневные снимки мотивационных товаров без пересчёта payroll-метрик.',
+    )
+    parser.add_argument(
         '--sales-motivation-days',
         type=int,
         default=2,
@@ -161,6 +171,11 @@ async def _run() -> None:
         )
 
         async with AsyncSessionLocal() as db:
+            if args.only_sales_motivation:
+                args.refresh_sales_motivation_catalog = True
+                args.refresh_sales_motivation_snapshots = True
+                args.skip_payroll_cache = True
+
             if args.only_sales_motivation_catalog:
                 args.refresh_sales_motivation_catalog = True
 
@@ -224,14 +239,18 @@ async def _run() -> None:
                     stage['message'] = 'обновление payroll-кеша завершено'
                     _log(f'Payroll-кеш обновлён. Всего дней в результате: {data.get("total_days")}.')
 
-            payload['cache_refresh'] = await refresh_payroll_metrics_cache(
-                date_from,
-                date_to,
-                db,
-                location=args.location,
-                force_refresh=bool(args.force_refresh),
-                progress_callback=cache_progress,
-            )
+            if args.skip_payroll_cache:
+                stage['message'] = 'payroll-кеш пропущен'
+                _log('Payroll-кеш продаж/возвратов пропущен по флагу --skip-payroll-cache.')
+            else:
+                payload['cache_refresh'] = await refresh_payroll_metrics_cache(
+                    date_from,
+                    date_to,
+                    db,
+                    location=args.location,
+                    force_refresh=bool(args.force_refresh),
+                    progress_callback=cache_progress,
+                )
 
             if args.refresh_sales_motivation_snapshots:
                 explicit_start = bool(args.date_from)

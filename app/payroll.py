@@ -84,7 +84,7 @@ SALES_MOTIVATION_REWARD_FIXED = 'fixed'
 SALES_MOTIVATION_FISCAL_ANY = 'any'
 SALES_MOTIVATION_FISCAL_ONLY_NOT_FISCALIZED = 'only_not_fiscalized'
 SALES_MOTIVATION_POS_API_BASE_URL = 'https://online.moysklad.ru/api/posap/1.0'
-SALES_MOTIVATION_CATALOG_CACHE_TTL_SECONDS = 3600
+SALES_MOTIVATION_CATALOG_CACHE_TTL_SECONDS = 60 * 60 * 26
 _sales_metrics_cache: dict[tuple[int, str, str], tuple[float, dict[date, dict[str, Any]]]] = {}
 _sales_metrics_refresh_locks: dict[tuple[int, str, str, bool], asyncio.Lock] = {}
 _shift_close_locks: dict[int, asyncio.Lock] = {}
@@ -564,6 +564,14 @@ def get_moscow_today() -> date:
 
 def get_payroll_operational_today() -> date:
     return get_moscow_today()
+
+
+def _is_current_open_shift(shift: WorkShift) -> bool:
+    return (
+        shift.status != 'closed'
+        and not bool(getattr(shift, 'is_deleted', False))
+        and shift.shift_date == get_payroll_operational_today()
+    )
 
 
 
@@ -5291,7 +5299,7 @@ async def refresh_sales_motivation_daily_snapshots(
     for point_index, point in enumerate(points, start=1):
         inventory_by_id: dict[str, dict[str, Any]] = {}
         try:
-            inventory_products, _inventory_from_cache, _inventory_refreshed_at = await _get_or_refresh_sales_motivation_catalog_products(point, db, no_sales_days=0, force_refresh=True, commit=False)
+            inventory_products, _inventory_from_cache, _inventory_refreshed_at = await _get_or_refresh_sales_motivation_catalog_products(point, db, no_sales_days=0, force_refresh=False, commit=False)
             inventory_by_id = {row['item_id']: row for row in inventory_products if row.get('item_id')}
         except Exception:
             logger.warning(
@@ -5795,7 +5803,9 @@ async def _build_computed_shift(shift: WorkShift, db: AsyncSession, *, force_ref
         shift,
         share_ratio,
         db,
-        prefer_daily_snapshots=(not force_refresh_metrics and shift.shift_date <= get_moscow_today()),
+        # Живое обновление текущей смены не должно запускать live-выгрузку мотивационных товаров.
+        # Мотивации берём только из дневных snapshots, которые обновляются отдельным cron в 23:00 МСК.
+        prefer_daily_snapshots=(shift.shift_date <= get_moscow_today()),
         allow_live_fetch=allow_live_sales_motivation,
     )
     base_gross_salary_amount = round(float(settings.exit_amount or 0) + bonus + category_earnings_total, 2)
@@ -6070,6 +6080,7 @@ async def _serialize_shift_lightweight(
     db: AsyncSession,
     *,
     employee_name: str | None = None,
+    force_refresh_metrics: bool = False,
 ) -> dict[str, Any]:
     point = await db.get(LocationPoint, shift.location_point_id)
     if not point:
@@ -6202,7 +6213,12 @@ async def _serialize_shift_lightweight(
     today = get_moscow_today()
     should_show_realized_amounts = shift.status == 'closed' or shift.shift_date <= today
     if should_show_realized_amounts:
-        computed = await _build_computed_shift(shift, db, allow_live_sales_motivation=False)
+        computed = await _build_computed_shift(
+            shift,
+            db,
+            force_refresh_metrics=force_refresh_metrics,
+            allow_live_sales_motivation=False,
+        )
         return _pack_lightweight(
             is_closed=bool(shift.status == 'closed' or computed.is_closed),
             closed_at=_datetime_to_str(shift.closed_at) if shift.status == 'closed' else computed.closed_at,
@@ -6313,12 +6329,17 @@ async def list_work_shifts(location: str, date_from: date, date_to: date, db: As
         employee_names = {item.id: item.full_name for item in employees}
 
     by_day: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    live_metrics_refreshed_for_today = False
     for shift in rows:
+        force_live_metrics = _is_current_open_shift(shift) and not live_metrics_refreshed_for_today
         serialized = await _serialize_shift_lightweight(
             shift,
             db,
             employee_name=employee_names.get(shift.employee_user_id),
+            force_refresh_metrics=force_live_metrics,
         )
+        if force_live_metrics:
+            live_metrics_refreshed_for_today = True
         by_day[shift.shift_date.isoformat()].append(serialized)
     return {
         'location': point.name,
@@ -6370,14 +6391,19 @@ async def list_work_shift_day_summary(location: str, date_from: date, date_to: d
         employee_names = {item.id: item.full_name for item in employees}
 
     days: list[dict[str, Any]] = []
+    live_metrics_refreshed_for_today = False
     for shift in rows:
+        force_live_metrics = _is_current_open_shift(shift) and not live_metrics_refreshed_for_today
         days.append(
             await _serialize_shift_lightweight(
                 shift,
                 db,
                 employee_name=employee_names.get(shift.employee_user_id),
+                force_refresh_metrics=force_live_metrics,
             )
         )
+        if force_live_metrics:
+            live_metrics_refreshed_for_today = True
     return {
         'location': point.name,
         'date_from': date_from.isoformat(),
