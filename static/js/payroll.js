@@ -551,6 +551,77 @@ function monthIso() {
     return todayIso().slice(0, 7);
 }
 
+function parseIsoDateParts(value) {
+    const match = String(value || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) return null;
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const date = new Date(year, month - 1, day);
+    if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) {
+        return null;
+    }
+    return { year, month, day, date };
+}
+
+function payrollMonthForPeriod(dateFrom, dateTo) {
+    const startParts = parseIsoDateParts(dateFrom);
+    const endParts = parseIsoDateParts(dateTo);
+    if (!startParts || !endParts) return '';
+
+    let start = new Date(startParts.year, startParts.month - 1, startParts.day);
+    let end = new Date(endParts.year, endParts.month - 1, endParts.day);
+    if (start > end) {
+        [start, end] = [end, start];
+    }
+
+    const daysByMonth = new Map();
+    const cursor = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+    while (cursor <= end) {
+        const key = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}`;
+        daysByMonth.set(key, (daysByMonth.get(key) || 0) + 1);
+        cursor.setDate(cursor.getDate() + 1);
+    }
+
+    let selectedMonth = '';
+    let selectedDays = -1;
+    for (const [month, days] of daysByMonth.entries()) {
+        if (days > selectedDays || (days === selectedDays && month > selectedMonth)) {
+            selectedMonth = month;
+            selectedDays = days;
+        }
+    }
+    return selectedMonth;
+}
+
+function setPayrollMonthValue(inputId, value) {
+    const normalized = normalizePayrollMonthValue(value);
+    const input = qs(inputId);
+    if (input) input.value = normalized;
+
+    const prefix = String(inputId || '').replace(/-month-input$/, '');
+    const monthSelect = qs(`${prefix}-month-select`);
+    const yearSelect = qs(`${prefix}-year-select`);
+    if (monthSelect) monthSelect.value = normalized.slice(5, 7);
+    if (yearSelect) yearSelect.value = normalized.slice(0, 4);
+    return normalized;
+}
+
+function syncAccountingMonthsFromPeriod({ forceDate = false } = {}) {
+    if (!isAdminRole()) return '';
+    const periodMonth = payrollMonthForPeriod(qs('payroll-date-from')?.value, qs('payroll-date-to')?.value);
+    if (!periodMonth) return '';
+
+    setPayrollMonthValue('expenses-month-input', periodMonth);
+    setPayrollMonthValue('employee-bonuses-month-input', periodMonth);
+    setPayrollMonthValue('employee-penalties-month-input', periodMonth);
+
+    syncManualExpenseDefaults({ forceDate });
+    syncEmployeeBonusDefaults({ forceDate });
+    syncEmployeePenaltyDefaults({ forceDate });
+    return periodMonth;
+}
+
 function normalizePayrollMonthValue(value) {
     const raw = String(value || '').trim();
     if (/^\d{4}-\d{2}$/.test(raw)) return raw;
@@ -2021,7 +2092,19 @@ async function loadSummary(options = {}) {
     }
 }
 
-window.payrollLoadSummary = loadSummary;
+async function loadPayrollAccountingByButton() {
+    syncAccountingMonthsFromPeriod({ forceDate: true });
+    if (isAdminRole() && !isAllLocationsSelected()) {
+        await Promise.allSettled([
+            loadExpenseTemplatesAndEntries(),
+            loadEmployeeBonuses(),
+            loadEmployeePenalties(),
+        ]);
+    }
+    return loadSummary();
+}
+
+window.payrollLoadSummary = loadPayrollAccountingByButton;
 
 async function loadShiftCalendar(expectedLocation = selectedLocation()) {
     if (!isAdminRole() || !qs('shift-month-input') || !qs('shift-calendar-grid')) return;
@@ -3427,7 +3510,11 @@ async function bootstrap() {
         payrollState.locations = normalizeLocationList(access.locations || []);
         renderLocations();
         await loadSetupForLocation();
-        await loadSummary();
+        if (!isAdminRole()) {
+            await loadSummary();
+        } else {
+            syncAccountingMonthsFromPeriod({ forceDate: true });
+        }
     } catch (error) {
         console.error(error);
         payrollState.locations = fallbackLocations();
@@ -3435,7 +3522,11 @@ async function bootstrap() {
         if (selectedLocation()) {
             try {
                 await loadSetupForLocation();
-                await loadSummary();
+                if (!isAdminRole()) {
+                    await loadSummary();
+                } else {
+                    syncAccountingMonthsFromPeriod({ forceDate: true });
+                }
                         showStatus('Список точек из API не загрузился, показана базовая точка.', 'warning');
                 return;
             } catch (fallbackError) {
@@ -3450,9 +3541,12 @@ qs('payroll-location-select').addEventListener('change', async () => {
     resetSalesMotivationForm();
     const location = selectedLocation();
     payrollState.requestedSettingsEffectiveFrom = getStoredSettingsEffectiveFrom(location) || '';
+    syncAccountingMonthsFromPeriod({ forceDate: true });
     syncAllLocationsModeControls();
     await loadSetupForLocation();
-    await loadSummary();
+    if (!isAdminRole()) {
+        await loadSummary();
+    }
 });
 qs('settings-effective-from')?.addEventListener('change', async (event) => {
     const nextValue = String(event?.target?.value || '').trim();
@@ -3465,7 +3559,9 @@ qs('settings-effective-from')?.addEventListener('change', async (event) => {
         showScopedStatus('settings-status', error.message || 'Не удалось загрузить правила на выбранную дату.', 'error');
     }
 });
-qs('payroll-employee-select')?.addEventListener('change', loadSummary);
+qs('payroll-date-from')?.addEventListener('change', () => syncAccountingMonthsFromPeriod({ forceDate: true }));
+qs('payroll-date-to')?.addEventListener('change', () => syncAccountingMonthsFromPeriod({ forceDate: true }));
+qs('payroll-employee-select')?.addEventListener('change', () => syncAllLocationsModeControls());
 qs('settings-add-manager-bracket-btn')?.addEventListener('click', () => window.addManagerBracket());
 qs('add-shift-btn')?.addEventListener('click', addShift);
 qs('shift-month-input')?.addEventListener('change', loadShiftCalendar);
