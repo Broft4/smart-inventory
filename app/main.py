@@ -67,6 +67,12 @@ from app.password_reset import (
     request_password_reset,
     verify_password_reset_code,
 )
+from app.registration import (
+    approve_registration_request,
+    create_registration_request,
+    list_registration_requests,
+    reject_registration_request,
+)
 from app.payroll import (
     EmployeeBonusCreateRequest,
     EmployeeBonusUpdateRequest,
@@ -142,6 +148,11 @@ from app.schemas import (
     LocationListResponse,
     LoginRequest,
     LoginResponse,
+    RegistrationActionResponse,
+    RegistrationCreateRequest,
+    RegistrationCreateResponse,
+    RegistrationListResponse,
+    RegistrationRejectRequest,
     LogoutResponse,
     MeResponse,
     PasswordResetCompleteRequest,
@@ -385,6 +396,26 @@ async def api_login(payload: LoginRequest, request: Request, db: AsyncSession = 
     )
 
 
+@app.post('/api/register', response_model=RegistrationCreateResponse)
+async def api_register(payload: RegistrationCreateRequest, db: AsyncSession = Depends(get_db)):
+    return await create_registration_request(payload, db)
+
+
+@app.get('/api/registration-requests', response_model=RegistrationListResponse)
+async def api_list_registration_requests(status: str | None = 'pending', admin: User = Depends(require_superadmin), db: AsyncSession = Depends(get_db)):
+    return await list_registration_requests(db, status=status)
+
+
+@app.post('/api/registration-requests/{request_id}/approve', response_model=RegistrationActionResponse)
+async def api_approve_registration_request(request_id: int, admin: User = Depends(require_superadmin), db: AsyncSession = Depends(get_db)):
+    return await approve_registration_request(request_id, db, admin)
+
+
+@app.post('/api/registration-requests/{request_id}/reject', response_model=RegistrationActionResponse)
+async def api_reject_registration_request(request_id: int, payload: RegistrationRejectRequest, admin: User = Depends(require_superadmin), db: AsyncSession = Depends(get_db)):
+    return await reject_registration_request(request_id, payload, db, admin)
+
+
 @app.post('/api/auth/password-reset/request', response_model=PasswordResetRequestResponse)
 async def api_password_reset_request(payload: PasswordResetRequestRequest, db: AsyncSession = Depends(get_db)):
     return await request_password_reset(payload, db)
@@ -428,7 +459,7 @@ async def api_list_locations(admin: User = Depends(require_admin_or_superadmin),
 
 
 @app.post('/api/locations/stores', response_model=StoreListResponse)
-async def api_list_location_stores(payload: dict, admin: User = Depends(require_superadmin)):
+async def api_list_location_stores(payload: dict, admin: User = Depends(require_admin_or_superadmin)):
     token = str(payload.get('ms_token') or '').strip()
     if not token:
         raise HTTPException(status_code=400, detail='Нужно передать токен МойСклад.')
@@ -436,18 +467,18 @@ async def api_list_location_stores(payload: dict, admin: User = Depends(require_
 
 
 @app.post('/api/locations', response_model=CreateLocationResponse)
-async def api_create_location(payload: CreateLocationRequest, admin: User = Depends(require_superadmin), db: AsyncSession = Depends(get_db)):
-    return await create_location_point(payload, db)
+async def api_create_location(payload: CreateLocationRequest, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await create_location_point(payload, db, current_user=admin)
 
 
 @app.patch('/api/locations/{location_id}', response_model=UpdateLocationResponse)
-async def api_update_location(location_id: int, payload: UpdateLocationRequest, admin: User = Depends(require_superadmin), db: AsyncSession = Depends(get_db)):
-    return await update_location_point(location_id, payload, db)
+async def api_update_location(location_id: int, payload: UpdateLocationRequest, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await update_location_point(location_id, payload, db, current_user=admin)
 
 
 @app.delete('/api/locations/{location_id}', response_model=DeleteResponse)
-async def api_delete_location(location_id: int, admin: User = Depends(require_superadmin), db: AsyncSession = Depends(get_db)):
-    return await delete_location_point(location_id, db)
+async def api_delete_location(location_id: int, admin: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await delete_location_point(location_id, db, current_user=admin)
 
 
 @app.get('/api/cycle-targets', response_model=AdminCycleTargetsResponse)

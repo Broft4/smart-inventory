@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from enum import Enum
 from typing import Optional
 
@@ -31,6 +31,58 @@ class UserInfo(BaseModel):
     is_active: bool
     admin_location_ids: list[int] = Field(default_factory=list)
     admin_locations: list[str] = Field(default_factory=list)
+
+
+class RegistrationCreateRequest(BaseModel):
+    full_name: str = Field(..., min_length=3, max_length=255)
+    organization_name: str = Field(..., min_length=2, max_length=255)
+    location_name: str = Field(..., min_length=2, max_length=100)
+    username: str = Field(..., min_length=3, max_length=100)
+    email: str = Field(..., min_length=5, max_length=255)
+    phone: Optional[str] = Field(default=None, max_length=50)
+    password: str = Field(..., min_length=6, max_length=255)
+    password_confirm: str = Field(..., min_length=6, max_length=255)
+    comment: Optional[str] = Field(default=None, max_length=1000)
+
+
+class RegistrationCreateResponse(BaseModel):
+    success: bool = True
+    message: str
+    request_id: Optional[int] = None
+
+
+class RegistrationApplicationModel(BaseModel):
+    id: int
+    full_name: str
+    organization_name: str
+    location_name: str
+    username: str
+    email: str
+    phone: Optional[str] = None
+    comment: Optional[str] = None
+    status: str
+    rejection_reason: Optional[str] = None
+    created_at: datetime
+    decided_at: Optional[datetime] = None
+    approved_by_user_id: Optional[int] = None
+    created_user_id: Optional[int] = None
+    created_location_point_id: Optional[int] = None
+
+    model_config = {'from_attributes': True}
+
+
+class RegistrationListResponse(BaseModel):
+    requests: list[RegistrationApplicationModel]
+
+
+class RegistrationRejectRequest(BaseModel):
+    reason: Optional[str] = Field(default=None, max_length=1000)
+
+
+class RegistrationActionResponse(BaseModel):
+    success: bool
+    message: str
+    request: Optional[RegistrationApplicationModel] = None
 
 
 class LoginRequest(BaseModel):

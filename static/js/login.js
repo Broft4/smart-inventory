@@ -11,6 +11,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const resetCompleteForm = document.getElementById('password-reset-complete-form');
     const resetBackButton = document.getElementById('password-reset-back-btn');
     const resetMessage = document.getElementById('password-reset-message');
+    const registrationModal = document.getElementById('registration-modal');
+    const openRegistrationButton = document.getElementById('open-registration-btn');
+    const closeRegistrationButton = document.getElementById('close-registration-modal-btn');
+    const registrationForm = document.getElementById('registration-form');
+    const registrationMessage = document.getElementById('registration-message');
 
     const resetState = {
         requestId: '',
@@ -26,6 +31,13 @@ document.addEventListener('DOMContentLoaded', () => {
     function setResetMessage(text, success = false) {
         resetMessage.textContent = text || '';
         resetMessage.style.color = success ? '#1f9d55' : '#dc3545';
+    }
+
+
+    function setRegistrationMessage(text, success = false) {
+        if (!registrationMessage) return;
+        registrationMessage.textContent = text || '';
+        registrationMessage.style.color = success ? '#1f9d55' : '#dc3545';
     }
 
     function showResetStep(step) {
@@ -51,6 +63,22 @@ document.addEventListener('DOMContentLoaded', () => {
     function closeResetModal() {
         resetModal.classList.add('hidden');
         resetModal.setAttribute('aria-hidden', 'true');
+        document.body.classList.remove('modal-open');
+    }
+
+
+    function openRegistrationModal() {
+        registrationForm?.reset();
+        setRegistrationMessage('');
+        registrationModal?.classList.remove('hidden');
+        registrationModal?.setAttribute('aria-hidden', 'false');
+        document.body.classList.add('modal-open');
+        setTimeout(() => document.getElementById('registration-full-name')?.focus(), 50);
+    }
+
+    function closeRegistrationModal() {
+        registrationModal?.classList.add('hidden');
+        registrationModal?.setAttribute('aria-hidden', 'true');
         document.body.classList.remove('modal-open');
     }
 
@@ -117,6 +145,57 @@ document.addEventListener('DOMContentLoaded', () => {
 
     resetModal?.addEventListener('click', (event) => {
         if (event.target === resetModal) closeResetModal();
+    });
+
+
+    openRegistrationButton?.addEventListener('click', openRegistrationModal);
+    closeRegistrationButton?.addEventListener('click', closeRegistrationModal);
+    registrationModal?.addEventListener('click', (event) => {
+        if (event.target === registrationModal) closeRegistrationModal();
+    });
+
+    registrationForm?.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const password = document.getElementById('registration-password').value;
+        const passwordConfirm = document.getElementById('registration-password-confirm').value;
+        if (password !== passwordConfirm) {
+            setRegistrationMessage('Пароли не совпадают.');
+            return;
+        }
+
+        const button = registrationForm.querySelector('button[type="submit"]');
+        setButtonLoading(button, true, 'Отправляем...', 'Отправить заявку');
+        setRegistrationMessage('');
+
+        try {
+            const response = await fetch('/api/register', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    full_name: document.getElementById('registration-full-name').value.trim(),
+                    organization_name: document.getElementById('registration-organization').value.trim(),
+                    location_name: document.getElementById('registration-location').value.trim(),
+                    email: document.getElementById('registration-email').value.trim(),
+                    phone: document.getElementById('registration-phone').value.trim() || null,
+                    username: document.getElementById('registration-username').value.trim(),
+                    password,
+                    password_confirm: passwordConfirm,
+                    comment: document.getElementById('registration-comment').value.trim() || null,
+                }),
+            });
+            const result = await parseResponse(response, 'Не удалось отправить заявку.');
+            if (!result.ok) {
+                setRegistrationMessage(result.message);
+                return;
+            }
+            setRegistrationMessage(result.data.message || 'Заявка отправлена.', true);
+            registrationForm.reset();
+        } catch (error) {
+            console.error(error);
+            setRegistrationMessage('Ошибка сервера при отправке заявки.');
+        } finally {
+            setButtonLoading(button, false, 'Отправляем...', 'Отправить заявку');
+        }
     });
 
     resetRequestForm?.addEventListener('submit', async (event) => {

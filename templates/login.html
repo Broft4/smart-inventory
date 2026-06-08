@@ -27,6 +27,7 @@
             <div class="auth-actions">
                 <button type="submit" class="btn primary auth-submit-btn">Войти</button>
                 <button type="button" id="open-password-reset-btn" class="btn secondary auth-secondary-action">Забыли пароль?</button>
+                <button type="button" id="open-registration-btn" class="btn secondary auth-secondary-action">Регистрация</button>
             </div>
             <div id="login-message" class="message auth-message"></div>
         </form>
@@ -75,6 +76,53 @@
         </form>
 
         <div id="password-reset-message" class="message auth-message"></div>
+    </div>
+</div>
+
+
+<div id="registration-modal" class="modal-overlay hidden" aria-hidden="true">
+    <div class="modal-card form-modal-card">
+        <div class="modal-header">
+            <div>
+                <h2>Заявка на доступ</h2>
+                <p class="muted-text">Заполните форму. Доступ откроется после ручного подтверждения главным управляющим.</p>
+            </div>
+            <button id="close-registration-modal-btn" class="btn secondary btn-inline" type="button">Закрыть</button>
+        </div>
+
+        <form id="registration-form" class="auth-form" novalidate>
+            <label>ФИО управляющего
+                <input type="text" id="registration-full-name" autocomplete="name" required>
+            </label>
+            <label>Название организации
+                <input type="text" id="registration-organization" required>
+            </label>
+            <label>Название первой точки
+                <input type="text" id="registration-location" placeholder="Например: Основной склад" required>
+            </label>
+            <label>Email
+                <input type="email" id="registration-email" autocomplete="email" required>
+            </label>
+            <label>Телефон
+                <input type="tel" id="registration-phone" autocomplete="tel" placeholder="Необязательно">
+            </label>
+            <label>Логин
+                <input type="text" id="registration-username" autocomplete="username" required>
+            </label>
+            <label>Пароль
+                <input type="password" id="registration-password" autocomplete="new-password" required>
+            </label>
+            <label>Повторите пароль
+                <input type="password" id="registration-password-confirm" autocomplete="new-password" required>
+            </label>
+            <label>Комментарий
+                <textarea id="registration-comment" rows="3" placeholder="Можно указать город, количество точек или удобный способ связи"></textarea>
+            </label>
+            <div class="form-actions">
+                <button type="submit" class="btn primary">Отправить заявку</button>
+            </div>
+            <div id="registration-message" class="message auth-message"></div>
+        </form>
     </div>
 </div>
 

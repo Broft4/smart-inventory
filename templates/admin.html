@@ -23,8 +23,9 @@
         </div>
         <div class="header-actions">
             <button id="open-cycle-targets-btn" class="btn secondary btn-inline" type="button" data-open-modal-action="cycle-targets">Категории цикла</button>
-            {% if user.role == 'superadmin' %}
             <button id="open-create-location-btn" class="btn secondary btn-inline" type="button" data-open-modal-action="location">Точки</button>
+            {% if user.role == 'superadmin' %}
+            <button id="open-registration-requests-btn" class="btn secondary btn-inline" type="button">Заявки</button>
             {% endif %}
             <a href="/shifts" class="btn secondary btn-inline">Смены</a>
             <a href="/payroll" class="btn secondary btn-inline">Бухгалтерия</a>
@@ -278,6 +279,25 @@
         </div>
         <div id="users-list" class="users-list modal-users-list">
             <p>Загрузка пользователей...</p>
+        </div>
+    </div>
+</div>
+
+
+<div id="registration-requests-modal" class="modal-overlay hidden">
+    <div class="modal-card users-modal-card">
+        <div class="modal-header">
+            <div>
+                <h2>Заявки на регистрацию</h2>
+                <p class="muted-text">Новые участники получают доступ только после ручного подтверждения.</p>
+            </div>
+            <div class="modal-header-actions">
+                <button id="refresh-registration-requests-btn" class="btn secondary btn-inline" type="button">Обновить</button>
+                <button id="close-registration-requests-modal-btn" class="btn secondary btn-inline" type="button">Закрыть</button>
+            </div>
+        </div>
+        <div id="registration-requests-list" class="users-list modal-users-list">
+            <p>Загрузка заявок...</p>
         </div>
     </div>
 </div>

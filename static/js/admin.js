@@ -1085,6 +1085,101 @@ function setMessage(messageEl, text = '', color = '#dc3545') {
     messageEl.textContent = text;
 }
 
+
+function formatRegistrationDate(value) {
+    if (!value) return '—';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' });
+}
+
+function registrationStatusLabel(status) {
+    if (status === 'approved') return 'одобрена';
+    if (status === 'rejected') return 'отклонена';
+    return 'ожидает подтверждения';
+}
+
+async function loadRegistrationRequests() {
+    const container = document.getElementById('registration-requests-list');
+    if (!container) return;
+    container.innerHTML = '<p>Загрузка заявок...</p>';
+    try {
+        const response = await fetch('/api/registration-requests?status=pending');
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.detail || data.message || 'Не удалось загрузить заявки.');
+        }
+        renderRegistrationRequests(data.requests || []);
+    } catch (error) {
+        console.error(error);
+        container.innerHTML = `<p class="empty-text error-text">${escapeHtml(error?.message || 'Не удалось загрузить заявки.')}</p>`;
+    }
+}
+
+function renderRegistrationRequests(requests) {
+    const container = document.getElementById('registration-requests-list');
+    if (!container) return;
+    if (!requests.length) {
+        container.innerHTML = '<p>Новых заявок пока нет.</p>';
+        return;
+    }
+
+    container.innerHTML = requests.map(request => `
+        <div class="user-row registration-request-row">
+            <div>
+                <strong>${escapeHtml(request.full_name || 'Без имени')}</strong>
+                <div class="muted-text">${escapeHtml(request.organization_name || 'Без организации')} · первая точка: ${escapeHtml(request.location_name || '—')}</div>
+                <div class="muted-text">Логин: ${escapeHtml(request.username || '—')} · email: ${escapeHtml(request.email || '—')} · телефон: ${escapeHtml(request.phone || '—')}</div>
+                <div class="muted-text">Создана: ${escapeHtml(formatRegistrationDate(request.created_at))} · статус: ${escapeHtml(registrationStatusLabel(request.status))}</div>
+                ${request.comment ? `<div class="muted-text">Комментарий: ${escapeHtml(request.comment)}</div>` : ''}
+            </div>
+            <div class="user-row-actions">
+                <button class="btn primary btn-inline" type="button" onclick="approveRegistrationRequest(${Number(request.id)})">Разрешить доступ</button>
+                <button class="btn danger btn-inline" type="button" onclick="rejectRegistrationRequest(${Number(request.id)})">Отклонить</button>
+            </div>
+        </div>
+    `).join('');
+}
+
+window.approveRegistrationRequest = async function (requestId) {
+    if (!confirm('Разрешить доступ по этой заявке? Будет создан управляющий и первая точка.')) return;
+    try {
+        const response = await fetch(`/api/registration-requests/${requestId}/approve`, { method: 'POST' });
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.detail || data.message || 'Не удалось одобрить заявку.');
+        }
+        alert(data.message || 'Заявка одобрена.');
+        await loadRegistrationRequests();
+        await loadLocations();
+    } catch (error) {
+        console.error(error);
+        alert(error?.message || 'Не удалось одобрить заявку.');
+    }
+};
+
+window.rejectRegistrationRequest = async function (requestId) {
+    const reasonInput = prompt('Причина отклонения заявки. Можно оставить пустым:');
+    if (reasonInput === null) return;
+    const reason = reasonInput || '';
+    try {
+        const response = await fetch(`/api/registration-requests/${requestId}/reject`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reason: reason.trim() || null }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.detail || data.message || 'Не удалось отклонить заявку.');
+        }
+        alert(data.message || 'Заявка отклонена.');
+        await loadRegistrationRequests();
+    } catch (error) {
+        console.error(error);
+        alert(error?.message || 'Не удалось отклонить заявку.');
+    }
+};
+
 function switchLocationModalTab(tab) {
     adminState.locationModalTab = tab;
     document.querySelectorAll('[data-location-tab]').forEach(button => {
@@ -3311,6 +3406,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         await loadUsers();
     });
     document.getElementById('open-create-location-btn')?.addEventListener('click', () => openLocationModal('create'));
+    document.getElementById('open-registration-requests-btn')?.addEventListener('click', async () => {
+        showModal('registration-requests-modal');
+        await loadRegistrationRequests();
+    });
+    document.getElementById('refresh-registration-requests-btn')?.addEventListener('click', loadRegistrationRequests);
+    document.getElementById('close-registration-requests-modal-btn')?.addEventListener('click', () => hideModal('registration-requests-modal'));
     document.getElementById('open-cycle-targets-btn')?.addEventListener('click', async () => {
         try {
             await openCycleTargetsModal(getTodayIsoDate());

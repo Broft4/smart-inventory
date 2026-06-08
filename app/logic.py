@@ -2175,7 +2175,7 @@ async def list_moysklad_stores_by_token(ms_token: str) -> StoreListResponse:
     return StoreListResponse(stores=stores)
 
 
-async def create_location_point(payload: CreateLocationRequest, db: AsyncSession) -> CreateLocationResponse:
+async def create_location_point(payload: CreateLocationRequest, db: AsyncSession, current_user: User | None = None) -> CreateLocationResponse:
     name = _normalize_location(payload.name)
     existing = await db.scalar(select(LocationPoint).where(LocationPoint.name == name).limit(1))
     if existing:
@@ -2188,6 +2188,17 @@ async def create_location_point(payload: CreateLocationRequest, db: AsyncSession
         ms_store_name=payload.ms_store_name.strip(),
     )
     db.add(point)
+    await db.flush()
+
+    # В закрытом релизе обычный управляющий создаёт только свои точки.
+    # Сразу выдаём ему доступ к новой точке, чтобы она стала частью его рабочего пространства.
+    if current_user and current_user.role == RoleEnum.ADMIN.value:
+        db.add(AdminLocationAccess(
+            admin_user_id=current_user.id,
+            location_point_id=point.id,
+            granted_by_user_id=current_user.id,
+        ))
+
     await db.commit()
     await db.refresh(point)
     ms_client.invalidate_inventory(point.name)
@@ -2195,10 +2206,13 @@ async def create_location_point(payload: CreateLocationRequest, db: AsyncSession
     return CreateLocationResponse(success=True, message='Точка создана.', location=LocationPointModel.model_validate(point))
 
 
-async def update_location_point(location_id: int, payload: UpdateLocationRequest, db: AsyncSession) -> UpdateLocationResponse:
+async def update_location_point(location_id: int, payload: UpdateLocationRequest, db: AsyncSession, current_user: User | None = None) -> UpdateLocationResponse:
     point = await db.get(LocationPoint, location_id)
     if not point:
         raise HTTPException(status_code=404, detail='Точка не найдена.')
+
+    if current_user and current_user.role != RoleEnum.SUPERADMIN.value:
+        await ensure_user_can_access_location(current_user, point.name, db)
 
     name = _normalize_location(payload.name)
     duplicate = await db.scalar(select(LocationPoint).where(LocationPoint.name == name, LocationPoint.id != location_id).limit(1))
@@ -2228,10 +2242,13 @@ async def update_location_point(location_id: int, payload: UpdateLocationRequest
     return UpdateLocationResponse(success=True, message='Точка обновлена.', location=LocationPointModel.model_validate(point))
 
 
-async def delete_location_point(location_id: int, db: AsyncSession) -> DeleteResponse:
+async def delete_location_point(location_id: int, db: AsyncSession, current_user: User | None = None) -> DeleteResponse:
     point = await db.get(LocationPoint, location_id)
     if not point:
         raise HTTPException(status_code=404, detail='Точка не найдена.')
+
+    if current_user and current_user.role != RoleEnum.SUPERADMIN.value:
+        await ensure_user_can_access_location(current_user, point.name, db)
 
     linked_entities: list[str] = []
     checks = [
