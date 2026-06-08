@@ -3371,3 +3371,208 @@ button:disabled.loading {
     0%, 100% { transform: scale(0.9); opacity: 0.6; }
     50% { transform: scale(1.15); opacity: 1; }
 }
+
+/* Interactive onboarding */
+.tutorial-launcher {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    z-index: 990;
+    width: 28px;
+    height: 28px;
+    border: 0;
+    border-radius: 999px;
+    background: #2563eb;
+    color: #fff;
+    box-shadow: 0 10px 24px rgba(37, 99, 235, 0.28);
+    font-size: 15px;
+    font-weight: 900;
+    line-height: 1;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.tutorial-launcher:hover,
+.tutorial-launcher:focus-visible {
+    transform: translateY(-1px);
+    box-shadow: 0 13px 30px rgba(37, 99, 235, 0.38);
+    outline: none;
+}
+.tutorial-start-modal {
+    z-index: 10060;
+}
+.tutorial-start-card {
+    width: min(620px, 100%);
+}
+.tutorial-start-actions,
+.tutorial-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 16px;
+}
+.tutorial-spotlight {
+    position: fixed;
+    z-index: 10001;
+    border-radius: 18px;
+    border: 2px solid rgba(255, 255, 255, 0.94);
+    box-shadow: 0 0 0 9999px rgba(15, 23, 42, 0.66), 0 0 0 6px rgba(37, 99, 235, 0.28), 0 18px 48px rgba(15, 23, 42, 0.28);
+    pointer-events: none;
+    transition: top 0.2s ease, left 0.2s ease, width 0.2s ease, height 0.2s ease;
+}
+.tutorial-popover {
+    position: fixed;
+    z-index: 10050;
+    width: min(440px, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
+    overflow: auto;
+    overscroll-behavior: contain;
+    background: #fff;
+    color: #263238;
+    border-radius: 18px;
+    padding: 18px;
+    box-shadow: 0 24px 64px rgba(15, 23, 42, 0.3);
+}
+.tutorial-popover-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+.tutorial-step-counter {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 999px;
+    padding: 5px 10px;
+    background: #eef4ff;
+    color: #1d4ed8;
+    font-size: 13px;
+    font-weight: 800;
+}
+.tutorial-close-btn,
+.tutorial-modal-close {
+    width: 36px;
+    height: 36px;
+    border: 0;
+    border-radius: 999px;
+    background: #eef2f7;
+    color: #263238;
+    font-size: 22px;
+    line-height: 1;
+    cursor: pointer;
+}
+.tutorial-title {
+    margin: 0 0 8px;
+}
+.tutorial-text {
+    margin: 0;
+    color: #4b5563;
+    line-height: 1.5;
+}
+.tutorial-start-note,
+.tutorial-demo-notice {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: #fff7ed;
+    color: #9a3412;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.45;
+}
+.tutorial-start-note,
+.tutorial-demo-notice {
+    background: #eefbf3;
+    color: #166534;
+}
+.tutorial-placeholder {
+    padding: 12px;
+    border: 1px dashed #cbd5e1;
+    border-radius: 12px;
+    background: #f8fafc;
+}
+.tutorial-fake-record {
+    border: 2px dashed #60a5fa;
+    background: #eff6ff;
+}
+.tutorial-current-target {
+    border-radius: 14px;
+}
+.tutorial-click-feedback {
+    transform: scale(0.98);
+    transition: transform 0.12s ease;
+}
+body.tutorial-active .tutorial-launcher {
+    display: none;
+}
+body.tutorial-active {
+    overflow-x: hidden;
+}
+
+.modal-overlay.tutorial-modal-open {
+    z-index: 10003;
+}
+body.tutorial-active .modal-overlay.tutorial-modal-open {
+    overscroll-behavior: contain;
+}
+body.tutorial-active .modal-overlay.tutorial-modal-open .modal-card {
+    position: relative;
+    z-index: 10012;
+    outline: 2px solid rgba(255, 255, 255, 0.96);
+}
+
+@media (max-width: 640px) {
+    .tutorial-launcher {
+        top: 9px;
+        right: 9px;
+        width: 26px;
+        height: 26px;
+        font-size: 14px;
+    }
+    .tutorial-popover {
+        left: 10px !important;
+        right: 10px;
+        width: auto;
+        max-height: 46vh;
+        padding: 14px;
+    }
+    .tutorial-actions,
+    .tutorial-start-actions {
+        justify-content: stretch;
+    }
+    .tutorial-actions .btn,
+    .tutorial-start-actions .btn {
+        flex: 1 1 100%;
+    }
+}
+.tutorial-launcher::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    top: 50%;
+    right: calc(100% + 10px);
+    transform: translateY(-50%);
+    opacity: 0;
+    pointer-events: none;
+    white-space: nowrap;
+    background: #111827;
+    color: #fff;
+    border-radius: 10px;
+    padding: 6px 9px;
+    font-size: 12px;
+    font-weight: 700;
+    box-shadow: 0 12px 28px rgba(15, 23, 42, 0.22);
+    transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.tutorial-launcher:hover::after,
+.tutorial-launcher:focus-visible::after {
+    opacity: 1;
+    transform: translateY(-50%) translateX(-2px);
+}
+@media (max-width: 640px) {
+    .tutorial-launcher::after {
+        display: none;
+    }
+}
