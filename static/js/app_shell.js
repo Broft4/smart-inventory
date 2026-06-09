@@ -5,6 +5,10 @@
     let panelOpen = false;
     let notificationItems = [];
     let hasOpenedNotifications = false;
+    let lastUnreadCount = null;
+    let notificationSoundContext = null;
+    let notificationSoundUnlocked = false;
+    let pendingNotificationSound = false;
 
     function savedTheme() {
         let saved = null;
@@ -13,8 +17,10 @@
         } catch (error) {
             saved = null;
         }
-        if (saved === 'dark' || saved === 'light') return saved;
-        return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        // По умолчанию всегда используем светлую тему.
+        // Тёмная тема включается только после явного выбора пользователя.
+        if (saved === 'dark') return 'dark';
+        return 'light';
     }
 
     function applyTheme(theme) {
@@ -73,6 +79,68 @@
         }
     }
 
+    function getNotificationSoundContext() {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) return null;
+        if (!notificationSoundContext) {
+            notificationSoundContext = new AudioContextClass();
+        }
+        return notificationSoundContext;
+    }
+
+    async function unlockNotificationSound() {
+        const context = getNotificationSoundContext();
+        if (!context) return;
+        try {
+            if (context.state === 'suspended') {
+                await context.resume();
+            }
+            notificationSoundUnlocked = context.state === 'running';
+            if (notificationSoundUnlocked && pendingNotificationSound) {
+                pendingNotificationSound = false;
+                window.setTimeout(playNotificationSound, 40);
+            }
+        } catch (error) {
+            notificationSoundUnlocked = false;
+        }
+    }
+
+    function playNotificationSound() {
+        const context = getNotificationSoundContext();
+        if (!context || !notificationSoundUnlocked || context.state !== 'running') return false;
+
+        const now = context.currentTime;
+        const output = context.createGain();
+        output.gain.setValueAtTime(0.0001, now);
+        output.gain.exponentialRampToValueAtTime(0.16, now + 0.018);
+        output.gain.exponentialRampToValueAtTime(0.0001, now + 0.46);
+        output.connect(context.destination);
+
+        [0, 0.13].forEach((offset, index) => {
+            const oscillator = context.createOscillator();
+            oscillator.type = 'sine';
+            oscillator.frequency.setValueAtTime(index === 0 ? 880 : 1175, now + offset);
+            oscillator.connect(output);
+            oscillator.start(now + offset);
+            oscillator.stop(now + offset + 0.12);
+        });
+
+        window.setTimeout(() => {
+            try {
+                output.disconnect();
+            } catch (error) {}
+        }, 700);
+        return true;
+    }
+
+    function maybePlayNotificationSound(unreadCount) {
+        const total = Number(unreadCount || 0);
+        if (lastUnreadCount !== null && total > lastUnreadCount && !panelOpen) {
+            pendingNotificationSound = !playNotificationSound();
+        }
+        lastUnreadCount = total;
+    }
+
     function renderNotifications() {
         const list = document.getElementById('app-notification-list');
         if (!list) return;
@@ -105,8 +173,10 @@
             if (!response.ok) throw new Error('notifications request failed');
             const data = await response.json();
             notificationItems = Array.isArray(data.items) ? data.items : [];
-            renderNotificationBadge(data.unread_count || notificationItems.length);
+            const unreadCount = data.unread_count || notificationItems.length;
+            renderNotificationBadge(unreadCount);
             renderNotifications();
+            maybePlayNotificationSound(unreadCount);
         } catch (error) {
             const list = document.getElementById('app-notification-list');
             if (list) list.innerHTML = '<div class="app-notification-empty app-notification-error">Не удалось загрузить уведомления.</div>';
@@ -122,6 +192,7 @@
             return;
         }
         notificationItems = [];
+        lastUnreadCount = 0;
         renderNotificationBadge(0);
         renderNotifications();
     }
@@ -175,6 +246,7 @@
         });
         document.getElementById('app-notification-toggle')?.addEventListener('click', (event) => {
             event.stopPropagation();
+            unlockNotificationSound();
             setPanelOpen(!panelOpen);
         });
         document.getElementById('app-notification-close')?.addEventListener('click', (event) => {
@@ -186,6 +258,9 @@
         });
         document.addEventListener('click', () => {
             if (panelOpen) setPanelOpen(false);
+        });
+        ['pointerdown', 'keydown', 'touchstart'].forEach((eventName) => {
+            document.addEventListener(eventName, unlockNotificationSound, { once: true, passive: true });
         });
         document.addEventListener('keydown', (event) => {
             if (event.key === 'Escape' && panelOpen) setPanelOpen(false);

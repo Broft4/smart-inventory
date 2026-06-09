@@ -4038,6 +4038,249 @@ html[data-theme="dark"] .status-orange { border-left-color: #fb923c; }
 html[data-theme="dark"] .status-red { border-left-color: #ef4444; }
 html[data-theme="dark"] .status-grey { border-left-color: #64748b; }
 
+
+/* Dark theme contrast fixes for cards and dynamic payroll/report blocks */
+html[data-theme="dark"] .summary-topline-item,
+html[data-theme="dark"] .summary-kpi-card,
+html[data-theme="dark"] .employee-summary-card,
+html[data-theme="dark"] .employee-detail-kpis > div,
+html[data-theme="dark"] .employee-detail-category-row,
+html[data-theme="dark"] .admin-category-economics-card,
+html[data-theme="dark"] .employee-detail-economics-card,
+html[data-theme="dark"] .category-empty-state,
+html[data-theme="dark"] .discrepancy-edit-summary,
+html[data-theme="dark"] .admin-filter-checkbox,
+html[data-theme="dark"] .payroll-settings-rates-card,
+html[data-theme="dark"] .settings-rate-card,
+html[data-theme="dark"] .settings-threshold-row,
+html[data-theme="dark"] .payroll-day-grid--emphasis > div,
+html[data-theme="dark"] .expense-create-card,
+html[data-theme="dark"] .expense-section,
+html[data-theme="dark"] .expense-checkbox-card,
+html[data-theme="dark"] .expense-entry-card.manual,
+html[data-theme="dark"] .audit-day-card,
+html[data-theme="dark"] .payroll-collapse--nested,
+html[data-theme="dark"] .shift-date-picker-popover,
+html[data-theme="dark"] .payroll-loading-step {
+    background: #0b1220 !important;
+    border-color: #24344d !important;
+    color: #e5edf7 !important;
+}
+
+html[data-theme="dark"] .summary-kpi-card.neutral,
+html[data-theme="dark"] .summary-topline-item,
+html[data-theme="dark"] .employee-stat-card,
+html[data-theme="dark"] .payroll-day-grid--emphasis > div {
+    background: linear-gradient(180deg, #111c30 0%, #0b1220 100%) !important;
+}
+
+html[data-theme="dark"] .summary-kpi-card.plus,
+html[data-theme="dark"] .category-empty-state.green,
+html[data-theme="dark"] .category-card--success,
+html[data-theme="dark"] .employee-revision-banner.done,
+html[data-theme="dark"] .inventory-status.success,
+html[data-theme="dark"] .shift-calendar-entry.closed,
+html[data-theme="dark"] .employee-shift-calendar-cell.employee-shift-day--closed {
+    background: rgba(34, 197, 94, 0.13) !important;
+    border-color: rgba(34, 197, 94, 0.34) !important;
+    color: #bbf7d0 !important;
+}
+
+html[data-theme="dark"] .summary-kpi-card.minus,
+html[data-theme="dark"] .inventory-status.error {
+    background: rgba(239, 68, 68, 0.13) !important;
+    border-color: rgba(239, 68, 68, 0.34) !important;
+    color: #fecaca !important;
+}
+
+html[data-theme="dark"] .summary-kpi-card.warning,
+html[data-theme="dark"] .summary-kpi-card.finance.accent,
+html[data-theme="dark"] .admin-category-economics-card.accent,
+html[data-theme="dark"] .employee-detail-economics-card.accent,
+html[data-theme="dark"] .category-empty-state.orange,
+html[data-theme="dark"] .shift-calendar-entry.open,
+html[data-theme="dark"] .employee-shift-calendar-cell.employee-shift-day--future {
+    background: rgba(245, 158, 11, 0.14) !important;
+    border-color: rgba(245, 158, 11, 0.34) !important;
+    color: #fde68a !important;
+}
+
+html[data-theme="dark"] .summary-kpi-card.finance,
+html[data-theme="dark"] .employee-revision-banner.idle,
+html[data-theme="dark"] .inventory-status.loading,
+html[data-theme="dark"] .employee-shift-calendar-cell.employee-shift-day--today-open {
+    background: rgba(59, 130, 246, 0.14) !important;
+    border-color: rgba(96, 165, 250, 0.34) !important;
+    color: #bfdbfe !important;
+}
+
+html[data-theme="dark"] .summary-label,
+html[data-theme="dark"] .summary-kpi-label,
+html[data-theme="dark"] .employee-stat-label,
+html[data-theme="dark"] .shift-calendar-cell-head span,
+html[data-theme="dark"] .shift-calendar-entry-meta,
+html[data-theme="dark"] .shift-calendar-empty-day,
+html[data-theme="dark"] .shift-calendar-empty,
+html[data-theme="dark"] .expense-template-meta,
+html[data-theme="dark"] .audit-log-message,
+html[data-theme="dark"] .payroll-inline-loading,
+html[data-theme="dark"] .employee-shift-line span,
+html[data-theme="dark"] .payroll-category-filter-meta {
+    color: #9fb0c7 !important;
+}
+
+html[data-theme="dark"] .summary-topline-item strong,
+html[data-theme="dark"] .summary-kpi-card strong,
+html[data-theme="dark"] .employee-stat-card strong,
+html[data-theme="dark"] .employee-detail-kpis strong,
+html[data-theme="dark"] .admin-category-economics-card strong,
+html[data-theme="dark"] .employee-detail-economics-card strong,
+html[data-theme="dark"] .payroll-day-grid--emphasis strong,
+html[data-theme="dark"] .settings-rate-name,
+html[data-theme="dark"] .payroll-table td strong,
+html[data-theme="dark"] .employee-shift-line strong,
+html[data-theme="dark"] .employee-shift-compact-total,
+html[data-theme="dark"] .audit-day-card summary,
+html[data-theme="dark"] .shift-calendar-cell-head strong,
+html[data-theme="dark"] .shift-calendar-entry-head strong {
+    color: #f8fafc !important;
+}
+
+html[data-theme="dark"] .category-chip,
+html[data-theme="dark"] .employee-pill,
+html[data-theme="dark"] .assigned-badge,
+html[data-theme="dark"] .chip-button,
+html[data-theme="dark"] .payroll-day-total-badge,
+html[data-theme="dark"] .expense-entry-badge,
+html[data-theme="dark"] .audit-day-count,
+html[data-theme="dark"] .shift-calendar-count,
+html[data-theme="dark"] .shift-calendar-mini-more,
+html[data-theme="dark"] .money-badge-manual {
+    background: rgba(59, 130, 246, 0.16) !important;
+    border-color: rgba(96, 165, 250, 0.30) !important;
+    color: #bfdbfe !important;
+}
+
+html[data-theme="dark"] .chip-button-warning,
+html[data-theme="dark"] .category-chip--warning,
+html[data-theme="dark"] .employee-shift-status.planned,
+html[data-theme="dark"] .employee-shift-status.open,
+html[data-theme="dark"] .shift-calendar-mini-chip.open,
+html[data-theme="dark"] .payroll-chip.orange {
+    background: rgba(245, 158, 11, 0.17) !important;
+    border-color: rgba(245, 158, 11, 0.34) !important;
+    color: #fde68a !important;
+}
+
+html[data-theme="dark"] .category-chip--success,
+html[data-theme="dark"] .employee-shift-status.closed,
+html[data-theme="dark"] .shift-calendar-mini-chip.closed,
+html[data-theme="dark"] .payroll-chip.green {
+    background: rgba(34, 197, 94, 0.15) !important;
+    border-color: rgba(34, 197, 94, 0.32) !important;
+    color: #bbf7d0 !important;
+}
+
+html[data-theme="dark"] .report-status-chip.completed,
+html[data-theme="dark"] .status-chip.green {
+    background: rgba(34, 197, 94, 0.16) !important;
+    color: #bbf7d0 !important;
+}
+
+html[data-theme="dark"] .report-status-chip.progress,
+html[data-theme="dark"] .status-chip.orange {
+    background: rgba(245, 158, 11, 0.17) !important;
+    color: #fde68a !important;
+}
+
+html[data-theme="dark"] .status-chip.red {
+    background: rgba(239, 68, 68, 0.17) !important;
+    color: #fecaca !important;
+}
+
+html[data-theme="dark"] .status-chip.grey {
+    background: rgba(148, 163, 184, 0.15) !important;
+    color: #cbd5e1 !important;
+}
+
+html[data-theme="dark"] .selected-cycle-summary:hover,
+html[data-theme="dark"] .modal-tab-btn.active,
+html[data-theme="dark"] .employee-view-btn.active,
+html[data-theme="dark"] .shift-days-filter-buttons .btn.active,
+html[data-theme="dark"] .shift-date-picker-cell.is-active {
+    background: #1d4ed8 !important;
+    border-color: #3b82f6 !important;
+    color: #ffffff !important;
+}
+
+html[data-theme="dark"] .modal-tab-btn,
+html[data-theme="dark"] .icon-action-btn,
+html[data-theme="dark"] .shift-date-picker-cell,
+html[data-theme="dark"] .shift-calendar-weekdays span {
+    background: #111c30 !important;
+    border-color: #24344d !important;
+    color: #dbeafe !important;
+}
+
+html[data-theme="dark"] .shift-calendar-cell,
+html[data-theme="dark"] .shift-calendar-entry {
+    background: linear-gradient(180deg, #111c30 0%, #0b1220 100%) !important;
+    border-color: #24344d !important;
+    color: #e5edf7 !important;
+}
+
+html[data-theme="dark"] .shift-date-picker-cell.is-disabled,
+html[data-theme="dark"] .shift-date-picker-cell:disabled {
+    background: #111827 !important;
+    border-color: #1f2937 !important;
+    color: #64748b !important;
+}
+
+html[data-theme="dark"] .selected-cycle-grid,
+html[data-theme="dark"] .payroll-day-accordion-body,
+html[data-theme="dark"] .expense-entry-accordion-body,
+html[data-theme="dark"] .audit-day-body,
+html[data-theme="dark"] .expense-entry-accordion-body,
+html[data-theme="dark"] .admin-period-toolbar,
+html[data-theme="dark"] .admin-problem-export-toolbar,
+html[data-theme="dark"] .employee-view-switch,
+html[data-theme="dark"] .employee-shift-line.total,
+html[data-theme="dark"] .shift-days-filter-bar {
+    border-color: #24344d !important;
+}
+
+html[data-theme="dark"] .payroll-loading-step span:not(.payroll-loading-dot),
+html[data-theme="dark"] .payroll-loading-note {
+    color: #c7d2e1 !important;
+    opacity: 1;
+}
+
+html[data-theme="dark"] .money-cell.emphasis strong,
+html[data-theme="dark"] .diagnostic-warning {
+    color: #fbbf24 !important;
+}
+
+html[data-theme="dark"] .diff-plus,
+html[data-theme="dark"] .success-text,
+html[data-theme="dark"] .message.success-text {
+    color: #86efac !important;
+}
+
+html[data-theme="dark"] .diff-minus,
+html[data-theme="dark"] .error-text,
+html[data-theme="dark"] .items-warning,
+html[data-theme="dark"] .discrepancy-banner {
+    color: #fca5a5 !important;
+}
+
+@media (max-width: 640px) {
+    html[data-theme="dark"] .payroll-category-table tr {
+        background: #0b1220 !important;
+        border-color: #24344d !important;
+        color: #e5edf7 !important;
+    }
+}
+
 @media (max-width: 640px) {
     .app-shell-controls {
         top: 9px;
