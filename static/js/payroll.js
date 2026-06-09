@@ -55,14 +55,15 @@ function qs(id) {
 }
 
 function isAdminRole() {
-    return ['admin', 'superadmin'].includes(payrollState.user.role);
+    return ['platform_admin', 'admin', 'superadmin'].includes(payrollState.user.role);
 }
 
 function isSuperadminRole() {
-    return payrollState.user.role === 'superadmin';
+    return payrollState.user.role === 'platform_admin' || payrollState.user.role === 'superadmin';
 }
 
 function roleDisplayName(role) {
+    if (role === 'platform_admin') return 'Админ';
     if (role === 'superadmin') return 'Главный управляющий';
     if (role === 'admin') return 'Управляющий';
     if (role === 'employee') return 'Сотрудник';

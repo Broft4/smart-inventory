@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     password_reset_max_attempts: int = 5
     password_reset_resend_cooldown_seconds: int = 60
     registration_notify_email: Optional[str] = None
+    public_app_url: Optional[str] = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

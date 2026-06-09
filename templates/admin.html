@@ -24,7 +24,7 @@
         <div class="header-actions">
             <button id="open-cycle-targets-btn" class="btn secondary btn-inline" type="button" data-open-modal-action="cycle-targets">Категории цикла</button>
             <button id="open-create-location-btn" class="btn secondary btn-inline" type="button" data-open-modal-action="location">Точки</button>
-            {% if user.role == 'superadmin' %}
+            {% if user.role == 'platform_admin' %}
             <button id="open-registration-requests-btn" class="btn secondary btn-inline" type="button">Заявки</button>
             {% endif %}
             <a href="/shifts" class="btn secondary btn-inline">Смены</a>
@@ -277,6 +277,22 @@
                 <button id="close-users-modal-btn" class="btn secondary btn-inline" type="button">Закрыть</button>
             </div>
         </div>
+        <div class="users-filter-bar">
+            <label>Точка
+                <select id="users-location-filter">
+                    <option value="">Все точки</option>
+                </select>
+            </label>
+            <label>Должность
+                <select id="users-role-filter">
+                    <option value="">Все должности</option>
+                    <option value="platform_admin">Админ</option>
+                    <option value="superadmin">Главный управляющий</option>
+                    <option value="admin">Управляющий</option>
+                    <option value="employee">Сотрудник</option>
+                </select>
+            </label>
+        </div>
         <div id="users-list" class="users-list modal-users-list">
             <p>Загрузка пользователей...</p>
         </div>
@@ -292,12 +308,40 @@
                 <p class="muted-text">Новые участники получают доступ только после ручного подтверждения.</p>
             </div>
             <div class="modal-header-actions">
+                <button id="open-referrals-btn" class="btn secondary btn-inline" type="button">Просмотр рефералов</button>
                 <button id="refresh-registration-requests-btn" class="btn secondary btn-inline" type="button">Обновить</button>
                 <button id="close-registration-requests-modal-btn" class="btn secondary btn-inline" type="button">Закрыть</button>
             </div>
         </div>
         <div id="registration-requests-list" class="users-list modal-users-list">
             <p>Загрузка заявок...</p>
+        </div>
+    </div>
+</div>
+
+<div id="referrals-modal" class="modal-overlay hidden">
+    <div class="modal-card users-modal-card">
+        <div class="modal-header">
+            <div>
+                <h2>Реферальные ссылки</h2>
+                <p class="muted-text">Админ может создать ссылку для любого пользователя и видеть заявки, которые пришли по этой ссылке.</p>
+            </div>
+            <div class="modal-header-actions">
+                <button id="refresh-referrals-btn" class="btn secondary btn-inline" type="button">Обновить</button>
+                <button id="close-referrals-modal-btn" class="btn secondary btn-inline" type="button">Закрыть</button>
+            </div>
+        </div>
+        <div class="referral-create-bar">
+            <label>Пользователь
+                <select id="referral-owner-select">
+                    <option value="">Сначала загрузите пользователей</option>
+                </select>
+            </label>
+            <button id="create-referral-link-btn" class="btn primary btn-inline" type="button">Создать ссылку</button>
+        </div>
+        <div id="referrals-message" class="message"></div>
+        <div id="referrals-list" class="users-list modal-users-list">
+            <p>Загрузка рефералов...</p>
         </div>
     </div>
 </div>
@@ -335,6 +379,7 @@
                     <option value="employee">Сотрудник</option>
                     <option value="admin">Управляющий</option>
                     <option value="superadmin">Главный управляющий</option>
+                    <option value="platform_admin">Админ</option>
                 </select>
             </label>
             <label id="user-location-row">Точка сотрудника
@@ -558,6 +603,7 @@
         id: {{ user.id | tojson }},
         role: {{ user.role | tojson }},
         full_name: {{ user.full_name | tojson }},
+        is_platform_admin: {{ (user.role == 'platform_admin') | tojson }},
         is_superadmin: {{ (user.role == 'superadmin') | tojson }}
     };
 </script>

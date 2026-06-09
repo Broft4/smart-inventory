@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ 'Бухгалтерия' if user.role in ['admin', 'superadmin'] else 'Зарплата' }} — UCHETKA</title>
+    <title>{{ 'Бухгалтерия' if user.role in ['platform_admin', 'admin', 'superadmin'] else 'Зарплата' }} — UCHETKA</title>
     <link rel="stylesheet" href="/static/css/style.css?v={{ asset_version }}">
     <link rel="icon" type="image/png" href="/static/img/uchetka-mark.png?v={{ asset_version }}">
 </head>
@@ -18,12 +18,12 @@
                     <p class="app-brand-tagline">ЭФФЕКТИВНЫЙ УЧЕТ И КОНТРОЛЬ</p>
                 </div>
             </div>
-            <h1>{{ 'Бухгалтерия' if user.role in ['admin', 'superadmin'] else 'Зарплата' }}</h1>
+            <h1>{{ 'Бухгалтерия' if user.role in ['platform_admin', 'admin', 'superadmin'] else 'Зарплата' }}</h1>
             <p class="muted-text">{{ user.full_name }}{% if default_location %} · базовая точка {{ default_location }}{% endif %}</p>
         </div>
         <div class="header-actions">
-            <a href="{{ '/admin' if user.role in ['admin', 'superadmin'] else '/' }}" class="btn secondary btn-inline">Назад</a>
-            {% if user.role in ['admin', 'superadmin'] %}
+            <a href="{{ '/admin' if user.role in ['platform_admin', 'admin', 'superadmin'] else '/' }}" class="btn secondary btn-inline">Назад</a>
+            {% if user.role in ['platform_admin', 'admin', 'superadmin'] %}
             <a href="/shifts" class="btn secondary btn-inline">Смены</a>
             {% else %}
             <a href="/shifts" class="btn secondary btn-inline">Календарь смен</a>
@@ -93,8 +93,8 @@
         <details class="payroll-collapse">
             <summary class="report-summary-header payroll-collapse-summary">
                 <div>
-                    <h2>{{ 'Итог за период' if user.role in ['admin', 'superadmin'] else 'Моя зарплата за период' }}</h2>
-                    <p class="muted-text">{% if user.role in ['admin', 'superadmin'] %}Здесь общий итог за период и сводка по категориям. Подробные смены выводятся ниже отдельным блоком.{% else %}Здесь только ваша зарплата за выбранный период: общий итог и детализация по категориям, откуда она сложилась.{% endif %}</p>
+                    <h2>{{ 'Итог за период' if user.role in ['platform_admin', 'admin', 'superadmin'] else 'Моя зарплата за период' }}</h2>
+                    <p class="muted-text">{% if user.role in ['platform_admin', 'admin', 'superadmin'] %}Здесь общий итог за период и сводка по категориям. Подробные смены выводятся ниже отдельным блоком.{% else %}Здесь только ваша зарплата за выбранный период: общий итог и детализация по категориям, откуда она сложилась.{% endif %}</p>
                 </div>
                 <span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span>
             </summary>
@@ -167,7 +167,7 @@
         </details>
     </section>
 
-    <section class="category-card{% if user.role in ['admin', 'superadmin'] %} hidden{% endif %}" id="employee-shift-details-card">
+    <section class="category-card{% if user.role in ['platform_admin', 'admin', 'superadmin'] %} hidden{% endif %}" id="employee-shift-details-card">
         <details class="payroll-collapse">
             <summary class="report-summary-header payroll-collapse-summary">
                 <div>
@@ -262,7 +262,7 @@
         </details>
     </section>
 
-    <section class="category-card{% if user.role not in ['admin', 'superadmin'] %} hidden{% endif %}" id="sales-motivations-card">
+    <section class="category-card{% if user.role not in ['platform_admin', 'admin', 'superadmin'] %} hidden{% endif %}" id="sales-motivations-card">
         <details class="payroll-collapse">
             <summary class="report-summary-header payroll-collapse-summary">
                 <div>
@@ -325,7 +325,7 @@
         </details>
     </section>
 
-    <section class="category-card{% if user.role not in ['admin', 'superadmin'] %} hidden{% endif %}" id="expenses-card">
+    <section class="category-card{% if user.role not in ['platform_admin', 'admin', 'superadmin'] %} hidden{% endif %}" id="expenses-card">
         <details class="payroll-collapse">
             <summary class="report-summary-header payroll-collapse-summary"><div><h2>Расходы</h2><p class="muted-text">Шаблоны расходов на месяц и фактические суммы по точке.</p></div><span class="btn secondary btn-inline payroll-collapse-btn">Развернуть</span></summary>
             <div class="payroll-collapse-body">
@@ -399,7 +399,7 @@
         </details>
     </section>
 
-    <section class="category-card{% if user.role not in ['admin', 'superadmin'] %} hidden{% endif %}" id="employee-bonuses-card">
+    <section class="category-card{% if user.role not in ['platform_admin', 'admin', 'superadmin'] %} hidden{% endif %}" id="employee-bonuses-card">
         <details class="payroll-collapse">
             <summary class="report-summary-header payroll-collapse-summary">
                 <div>
@@ -448,7 +448,7 @@
         </details>
     </section>
 
-    <section class="category-card{% if user.role not in ['admin', 'superadmin'] %} hidden{% endif %}" id="employee-penalties-card">
+    <section class="category-card{% if user.role not in ['platform_admin', 'admin', 'superadmin'] %} hidden{% endif %}" id="employee-penalties-card">
         <details class="payroll-collapse">
             <summary class="report-summary-header payroll-collapse-summary">
                 <div>
@@ -497,7 +497,7 @@
         </details>
     </section>
 
-    <section class="category-card{% if user.role not in ['admin', 'superadmin'] %} hidden{% endif %}" id="audit-card">
+    <section class="category-card{% if user.role not in ['platform_admin', 'admin', 'superadmin'] %} hidden{% endif %}" id="audit-card">
         <div class="report-summary-header">
             <div>
                 <h2>Журнал изменений</h2>
@@ -515,7 +515,7 @@
         <div id="audit-log-list" class="audit-log-list hidden"></div>
     </section>
 
-    <section class="category-card{% if user.role not in ['admin', 'superadmin'] %} hidden{% endif %}" id="closed-shifts-recalc-card">
+    <section class="category-card{% if user.role not in ['platform_admin', 'admin', 'superadmin'] %} hidden{% endif %}" id="closed-shifts-recalc-card">
         <div class="report-summary-header">
             <div>
                 <h2>Пересчёт закрытых смен</h2>

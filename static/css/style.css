@@ -3591,3 +3591,81 @@ body.tutorial-active .modal-overlay.tutorial-modal-open .modal-card {
     .registration-request-row .user-row-actions { justify-content: stretch; min-width: 0; }
     .registration-request-row .user-row-actions .btn { width: 100%; }
 }
+
+.auth-info-box {
+    border-radius: 14px;
+    background: #eef4ff;
+    color: #173b78;
+    padding: 12px 14px;
+    font-size: 0.95rem;
+    line-height: 1.45;
+}
+
+.auth-info-box a {
+    color: #1d5ee8;
+    font-weight: 700;
+    text-decoration: none;
+}
+
+.auth-info-box a:hover {
+    text-decoration: underline;
+}
+
+.users-filter-bar,
+.referral-create-bar {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    align-items: end;
+    margin: 0 0 16px;
+}
+
+.users-filter-bar label,
+.referral-create-bar label {
+    display: grid;
+    gap: 6px;
+    font-weight: 700;
+}
+
+.referral-link-copy-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    margin: 10px 0;
+}
+
+.referral-link-copy-row input {
+    width: 100%;
+}
+
+.referral-details {
+    margin-top: 8px;
+}
+
+.referral-details summary {
+    cursor: pointer;
+    font-weight: 700;
+    margin-bottom: 8px;
+}
+
+.referral-registrations-list {
+    display: grid;
+    gap: 8px;
+}
+
+.referral-registration-row {
+    border-radius: 12px;
+    background: #f4f7fb;
+    padding: 10px 12px;
+}
+
+.referral-source-text {
+    color: #1d5ee8;
+    font-weight: 700;
+}
+
+@media (max-width: 640px) {
+    .referral-link-copy-row {
+        grid-template-columns: 1fr;
+    }
+}

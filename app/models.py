@@ -86,6 +86,23 @@ class RegistrationRequest(Base):
     approved_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
     created_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
     created_location_point_id: Mapped[int | None] = mapped_column(ForeignKey('location_points.id', ondelete='SET NULL'), nullable=True, index=True)
+    referral_token: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    referral_link_id: Mapped[int | None] = mapped_column(ForeignKey('referral_links.id', ondelete='SET NULL'), nullable=True, index=True)
+    referred_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+
+
+class ReferralLink(Base):
+    __tablename__ = 'referral_links'
+    __table_args__ = (
+        UniqueConstraint('token', name='uq_referral_links_token'),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    token: Mapped[str] = mapped_column(String(128), unique=True, index=True, nullable=False)
+    owner_user_id: Mapped[int] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class AdminLocationAccess(Base):

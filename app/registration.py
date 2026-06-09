@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import secrets
 from datetime import date, datetime
 from typing import Iterable
 
@@ -17,8 +18,14 @@ from app.logic import (
     hash_password,
 )
 from app.mailer import MailerConfigurationError, send_email_message
-from app.models import LocationPoint, RegistrationRequest, User
+from app.models import LocationPoint, ReferralLink, RegistrationRequest, User
 from app.schemas import (
+    ReferralLinkActionResponse,
+    ReferralLinkCreateRequest,
+    ReferralLinkModel,
+    ReferralLinksResponse,
+    ReferralResolveResponse,
+    ReferralUserModel,
     RegistrationActionResponse,
     RegistrationApplicationModel,
     RegistrationCreateRequest,
@@ -33,6 +40,15 @@ logger = logging.getLogger(__name__)
 REGISTRATION_STATUS_PENDING = 'pending'
 REGISTRATION_STATUS_APPROVED = 'approved'
 REGISTRATION_STATUS_REJECTED = 'rejected'
+
+
+def _base_app_url() -> str:
+    configured = str(getattr(settings, 'public_app_url', '') or '').strip().rstrip('/')
+    return configured or 'https://uchetka-retail.ru'
+
+
+def _referral_url(token: str) -> str:
+    return f'{_base_app_url()}/r/{token}'
 
 
 def _clean_text(value: str | None) -> str:
@@ -73,7 +89,7 @@ async def _superadmin_notification_emails(db: AsyncSession) -> list[str]:
         await db.scalars(
             select(User.email)
             .where(
-                User.role == RoleEnum.SUPERADMIN.value,
+                User.role == RoleEnum.PLATFORM_ADMIN.value,
                 User.is_active.is_(True),
                 User.email.is_not(None),
             )
@@ -100,8 +116,14 @@ async def _send_many(to_emails: Iterable[str], *, subject: str, text: str) -> No
 async def _notify_superadmins_about_registration(request_row: RegistrationRequest, db: AsyncSession) -> None:
     recipients = await _superadmin_notification_emails(db)
     if not recipients:
-        logger.warning('Заявка на регистрацию #%s создана, но email главного управляющего не найден.', request_row.id)
+        logger.warning('Заявка на регистрацию #%s создана, но email админа не найден.', request_row.id)
         return
+
+    referral_line = 'Реферальная ссылка: нет\n'
+    if request_row.referred_by_user_id:
+        owner = await db.get(User, request_row.referred_by_user_id)
+        referral_line = f'Реферальная ссылка: {owner.full_name if owner else "пользователь удалён"}\n'
+
     await _send_many(
         recipients,
         subject='Новая заявка на регистрацию UCHETKA',
@@ -113,8 +135,9 @@ async def _notify_superadmins_about_registration(request_row: RegistrationReques
             f'Первая точка: {request_row.location_name}\n'
             f'Логин: {request_row.username}\n'
             f'Email: {request_row.email}\n'
-            f'Телефон: {request_row.phone or "—"}\n\n'
-            'Чтобы разрешить доступ, войдите в сервис главным управляющим и откройте раздел «Заявки».\n'
+            f'Телефон: {request_row.phone or "—"}\n'
+            f'{referral_line}\n'
+            'Чтобы разрешить доступ, войдите в сервис админом и откройте раздел «Заявки».\n'
         ),
     )
 
@@ -165,8 +188,24 @@ async def _ensure_registration_email_available(email: str, db: AsyncSession, *, 
         raise HTTPException(status_code=400, detail='Заявка с таким email уже ожидает подтверждения.')
 
 
-def _to_model(row: RegistrationRequest) -> RegistrationApplicationModel:
-    return RegistrationApplicationModel.model_validate(row)
+def _to_model(row: RegistrationRequest, referred_by_user_name: str | None = None) -> RegistrationApplicationModel:
+    model = RegistrationApplicationModel.model_validate(row)
+    model.referred_by_user_name = referred_by_user_name
+    return model
+
+
+async def _resolve_referral_token(token: str | None, db: AsyncSession) -> ReferralLink | None:
+    normalized = str(token or '').strip()
+    if not normalized:
+        return None
+    link = await db.scalar(
+        select(ReferralLink)
+        .where(ReferralLink.token == normalized, ReferralLink.is_active.is_(True))
+        .limit(1)
+    )
+    if not link:
+        raise HTTPException(status_code=400, detail='Реферальная ссылка не найдена или уже отключена.')
+    return link
 
 
 async def create_registration_request(payload: RegistrationCreateRequest, db: AsyncSession) -> RegistrationCreateResponse:
@@ -186,6 +225,7 @@ async def create_registration_request(payload: RegistrationCreateRequest, db: As
 
     await _ensure_username_available(username, db)
     await _ensure_registration_email_available(email, db)
+    referral_link = await _resolve_referral_token(payload.referral_token, db)
 
     row = RegistrationRequest(
         full_name=full_name,
@@ -198,6 +238,9 @@ async def create_registration_request(payload: RegistrationCreateRequest, db: As
         comment=_clean_optional_text(payload.comment),
         status=REGISTRATION_STATUS_PENDING,
         created_at=datetime.utcnow(),
+        referral_token=referral_link.token if referral_link else None,
+        referral_link_id=referral_link.id if referral_link else None,
+        referred_by_user_id=referral_link.owner_user_id if referral_link else None,
     )
     db.add(row)
     await db.commit()
@@ -205,9 +248,17 @@ async def create_registration_request(payload: RegistrationCreateRequest, db: As
 
     await _notify_superadmins_about_registration(row, db)
     return RegistrationCreateResponse(
-        message='Заявка отправлена. Доступ появится после подтверждения главным управляющим.',
+        message='Заявка отправлена. Доступ появится после подтверждения админом.',
         request_id=row.id,
     )
+
+
+async def _referrer_names_for_requests(rows: list[RegistrationRequest], db: AsyncSession) -> dict[int, str]:
+    referrer_ids = sorted({int(row.referred_by_user_id) for row in rows if row.referred_by_user_id})
+    if not referrer_ids:
+        return {}
+    users = (await db.scalars(select(User).where(User.id.in_(referrer_ids)))).all()
+    return {int(user.id): user.full_name for user in users}
 
 
 async def list_registration_requests(db: AsyncSession, *, status: str | None = None) -> RegistrationListResponse:
@@ -224,7 +275,8 @@ async def list_registration_requests(db: AsyncSession, *, status: str | None = N
             )
         )
     ).all()
-    return RegistrationListResponse(requests=[_to_model(row) for row in rows])
+    names = await _referrer_names_for_requests(list(rows), db)
+    return RegistrationListResponse(requests=[_to_model(row, names.get(int(row.referred_by_user_id or 0))) for row in rows])
 
 
 async def _make_unique_location_name(base_name: str, organization_name: str, db: AsyncSession) -> str:
@@ -275,7 +327,7 @@ async def approve_registration_request(request_id: int, db: AsyncSession, curren
         username=row.username,
         email=row.email,
         password_hash=row.password_hash,
-        role=RoleEnum.ADMIN.value,
+        role=RoleEnum.SUPERADMIN.value,
         location=None,
         is_active=True,
         created_at=datetime.utcnow(),
@@ -295,7 +347,7 @@ async def approve_registration_request(request_id: int, db: AsyncSession, curren
     await db.refresh(row)
 
     await _notify_applicant(row, approved=True)
-    return RegistrationActionResponse(success=True, message='Заявка одобрена. Управляющий и первая точка созданы.', request=_to_model(row))
+    return RegistrationActionResponse(success=True, message='Заявка одобрена. Главный управляющий и первая точка созданы.', request=_to_model(row))
 
 
 async def reject_registration_request(request_id: int, payload: RegistrationRejectRequest, db: AsyncSession, current_user: User) -> RegistrationActionResponse:
@@ -316,3 +368,110 @@ async def reject_registration_request(request_id: int, payload: RegistrationReje
 
     await _notify_applicant(row, approved=False, reason=reason)
     return RegistrationActionResponse(success=True, message='Заявка отклонена.', request=_to_model(row))
+
+
+
+def _user_to_referral_user_model(user: User) -> ReferralUserModel:
+    return ReferralUserModel(
+        id=user.id,
+        full_name=user.full_name,
+        username=user.username,
+        role=RoleEnum(user.role),
+        location=user.location,
+    )
+
+
+async def _build_referral_link_model(link: ReferralLink, db: AsyncSession) -> ReferralLinkModel:
+    owner = await db.get(User, link.owner_user_id)
+    if not owner:
+        owner = User(
+            id=0,
+            full_name='Пользователь удалён',
+            birth_date=date(1990, 1, 1),
+            username='deleted',
+            password_hash='',
+            role=RoleEnum.EMPLOYEE.value,
+            location=None,
+            is_active=False,
+        )
+    requests = (
+        await db.scalars(
+            select(RegistrationRequest)
+            .where(RegistrationRequest.referral_link_id == link.id)
+            .order_by(RegistrationRequest.created_at.desc(), RegistrationRequest.id.desc())
+        )
+    ).all()
+    names = await _referrer_names_for_requests(list(requests), db)
+    return ReferralLinkModel(
+        id=link.id,
+        token=link.token,
+        url=_referral_url(link.token),
+        owner=_user_to_referral_user_model(owner),
+        is_active=link.is_active,
+        created_at=link.created_at,
+        registrations=[_to_model(row, names.get(int(row.referred_by_user_id or 0))) for row in requests],
+    )
+
+
+async def create_referral_link(payload: ReferralLinkCreateRequest, db: AsyncSession, current_user: User) -> ReferralLinkActionResponse:
+    owner = await db.get(User, payload.user_id)
+    if not owner:
+        raise HTTPException(status_code=404, detail='Пользователь не найден.')
+    existing = await db.scalar(
+        select(ReferralLink)
+        .where(ReferralLink.owner_user_id == owner.id, ReferralLink.is_active.is_(True))
+        .order_by(ReferralLink.created_at.desc(), ReferralLink.id.desc())
+        .limit(1)
+    )
+    if existing:
+        return ReferralLinkActionResponse(
+            message='У пользователя уже есть активная реферальная ссылка.',
+            link=await _build_referral_link_model(existing, db),
+        )
+
+    for _ in range(10):
+        token = secrets.token_urlsafe(24)
+        duplicate = await db.scalar(select(ReferralLink.id).where(ReferralLink.token == token).limit(1))
+        if duplicate:
+            continue
+        link = ReferralLink(
+            token=token,
+            owner_user_id=owner.id,
+            created_by_user_id=current_user.id,
+            is_active=True,
+            created_at=datetime.utcnow(),
+        )
+        db.add(link)
+        await db.commit()
+        await db.refresh(link)
+        return ReferralLinkActionResponse(
+            message='Реферальная ссылка создана.',
+            link=await _build_referral_link_model(link, db),
+        )
+    raise HTTPException(status_code=500, detail='Не удалось сгенерировать уникальную ссылку.')
+
+
+async def list_referral_links(db: AsyncSession) -> ReferralLinksResponse:
+    links = (
+        await db.scalars(
+            select(ReferralLink)
+            .where(ReferralLink.is_active.is_(True))
+            .order_by(ReferralLink.created_at.desc(), ReferralLink.id.desc())
+        )
+    ).all()
+    return ReferralLinksResponse(links=[await _build_referral_link_model(link, db) for link in links])
+
+
+async def resolve_referral_token(token: str, db: AsyncSession) -> ReferralResolveResponse:
+    normalized = str(token or '').strip()
+    if not normalized:
+        return ReferralResolveResponse(found=False)
+    link = await db.scalar(
+        select(ReferralLink)
+        .where(ReferralLink.token == normalized, ReferralLink.is_active.is_(True))
+        .limit(1)
+    )
+    if not link:
+        return ReferralResolveResponse(found=False)
+    owner = await db.get(User, link.owner_user_id)
+    return ReferralResolveResponse(found=True, referrer_name=owner.full_name if owner else 'пользователь удалён')

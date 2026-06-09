@@ -69,9 +69,12 @@ from app.password_reset import (
 )
 from app.registration import (
     approve_registration_request,
+    create_referral_link,
     create_registration_request,
+    list_referral_links,
     list_registration_requests,
     reject_registration_request,
+    resolve_referral_token,
 )
 from app.payroll import (
     EmployeeBonusCreateRequest,
@@ -152,6 +155,10 @@ from app.schemas import (
     RegistrationCreateRequest,
     RegistrationCreateResponse,
     RegistrationListResponse,
+    ReferralLinkActionResponse,
+    ReferralLinkCreateRequest,
+    ReferralLinksResponse,
+    ReferralResolveResponse,
     RegistrationRejectRequest,
     LogoutResponse,
     MeResponse,
@@ -294,29 +301,34 @@ async def require_user(user: User | None = Depends(get_current_user)) -> User:
 
 
 async def require_admin_or_superadmin(user: User = Depends(require_user)) -> User:
-    if user.role not in {'admin', 'superadmin'}:
+    if user.role not in {'platform_admin', 'superadmin', 'admin'}:
         raise HTTPException(status_code=403, detail='Доступ только для управляющего.')
     return user
 
 
-async def require_superadmin(user: User = Depends(require_user)) -> User:
-    if user.role != 'superadmin':
-        raise HTTPException(status_code=403, detail='Доступ только для главного управляющего.')
+async def require_platform_admin(user: User = Depends(require_user)) -> User:
+    if user.role != 'platform_admin':
+        raise HTTPException(status_code=403, detail='Доступ только для админа.')
     return user
 
 
 @app.get('/login')
 async def login_page(request: Request, user: User | None = Depends(get_current_user)):
     if user:
-        return RedirectResponse(url='/admin' if user.role in {'admin', 'superadmin'} else '/', status_code=302)
+        return RedirectResponse(url='/admin' if user.role in {'platform_admin', 'superadmin', 'admin'} else '/', status_code=302)
     return templates.TemplateResponse(request, 'login.html', {})
+
+
+@app.get('/r/{token}')
+async def referral_registration_page(token: str):
+    return RedirectResponse(url=f'/login?register=1&ref={quote(token)}', status_code=302)
 
 
 @app.get('/')
 async def inventory_page(request: Request, user: User | None = Depends(get_current_user)):
     if not user:
         return RedirectResponse(url='/login', status_code=302)
-    if user.role in {'admin', 'superadmin'}:
+    if user.role in {'platform_admin', 'superadmin', 'admin'}:
         return RedirectResponse(url='/admin', status_code=302)
     _spawn_prewarm(user.location)
     return templates.TemplateResponse(
@@ -392,7 +404,7 @@ async def api_login(payload: LoginRequest, request: Request, db: AsyncSession = 
         success=True,
         message='Вход выполнен.',
         user=user_to_schema(user),
-        redirect_to='/admin' if user.role in {'admin', 'superadmin'} else '/',
+        redirect_to='/admin' if user.role in {'platform_admin', 'superadmin', 'admin'} else '/',
     )
 
 
@@ -401,18 +413,33 @@ async def api_register(payload: RegistrationCreateRequest, db: AsyncSession = De
     return await create_registration_request(payload, db)
 
 
+@app.get('/api/referrals/resolve/{token}', response_model=ReferralResolveResponse)
+async def api_resolve_referral_token(token: str, db: AsyncSession = Depends(get_db)):
+    return await resolve_referral_token(token, db)
+
+
+@app.get('/api/referral-links', response_model=ReferralLinksResponse)
+async def api_list_referral_links(admin: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db)):
+    return await list_referral_links(db)
+
+
+@app.post('/api/referral-links', response_model=ReferralLinkActionResponse)
+async def api_create_referral_link(payload: ReferralLinkCreateRequest, admin: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db)):
+    return await create_referral_link(payload, db, admin)
+
+
 @app.get('/api/registration-requests', response_model=RegistrationListResponse)
-async def api_list_registration_requests(status: str | None = 'pending', admin: User = Depends(require_superadmin), db: AsyncSession = Depends(get_db)):
+async def api_list_registration_requests(status: str | None = 'pending', admin: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db)):
     return await list_registration_requests(db, status=status)
 
 
 @app.post('/api/registration-requests/{request_id}/approve', response_model=RegistrationActionResponse)
-async def api_approve_registration_request(request_id: int, admin: User = Depends(require_superadmin), db: AsyncSession = Depends(get_db)):
+async def api_approve_registration_request(request_id: int, admin: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db)):
     return await approve_registration_request(request_id, db, admin)
 
 
 @app.post('/api/registration-requests/{request_id}/reject', response_model=RegistrationActionResponse)
-async def api_reject_registration_request(request_id: int, payload: RegistrationRejectRequest, admin: User = Depends(require_superadmin), db: AsyncSession = Depends(get_db)):
+async def api_reject_registration_request(request_id: int, payload: RegistrationRejectRequest, admin: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db)):
     return await reject_registration_request(request_id, payload, db, admin)
 
 

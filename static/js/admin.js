@@ -70,6 +70,8 @@ const adminState = {
     diagnosticsRows: [],
     diagnosticsLocation: null,
     locations: [],
+    allUsers: [],
+    userFilters: { location: '', role: '' },
     locationModalTab: 'create',
     editingLocationId: null,
     editingDiscrepancy: null,
@@ -362,11 +364,25 @@ function getUserEmail(user) {
 }
 
 
-function isSuperadmin() {
+function isPlatformAdmin() {
+    return Boolean(window.currentAdmin?.is_platform_admin || window.currentAdmin?.role === 'platform_admin');
+}
+
+function isMainManager() {
     return Boolean(window.currentAdmin?.is_superadmin || window.currentAdmin?.role === 'superadmin');
 }
 
+function isSuperadmin() {
+    // Старое имя функции оставлено для совместимости кода: теперь оно означает именно админа сервиса.
+    return isPlatformAdmin();
+}
+
+function canManageManagerRoles() {
+    return isPlatformAdmin() || isMainManager();
+}
+
 function roleDisplayName(role) {
+    if (role === 'platform_admin') return 'Админ';
     if (role === 'superadmin') return 'Главный управляющий';
     if (role === 'admin') return 'Управляющий';
     if (role === 'employee') return 'Сотрудник';
@@ -396,33 +412,43 @@ function updateUserFormByRole({ editingUser = null } = {}) {
 
     const selectedRole = roleSelect.value;
     const editingCurrentAdmin = Boolean(editingUser && Number(editingUser.id) === Number(window.currentAdmin?.id));
-    const currentIsSuperadmin = isSuperadmin();
+    const currentIsPlatformAdmin = isPlatformAdmin();
+    const currentCanManageManagers = canManageManagerRoles();
 
     [...roleSelect.options].forEach(option => {
+        if (option.value === 'platform_admin') {
+            option.hidden = !currentIsPlatformAdmin && !(editingUser && editingUser.role === 'platform_admin');
+        }
         if (option.value === 'superadmin') {
-            option.hidden = !currentIsSuperadmin && !(editingUser && editingUser.role === 'superadmin');
+            option.hidden = !currentIsPlatformAdmin && !(editingUser && editingUser.role === 'superadmin');
         }
         if (option.value === 'admin') {
-            option.hidden = !currentIsSuperadmin && !(editingUser && editingUser.role === 'admin');
+            option.hidden = !currentCanManageManagers && !(editingUser && editingUser.role === 'admin');
         }
     });
 
-    if (!currentIsSuperadmin && selectedRole !== 'employee') {
+    if (!currentIsPlatformAdmin && selectedRole === 'platform_admin') {
+        roleSelect.value = editingCurrentAdmin ? window.currentAdmin?.role || 'employee' : 'employee';
+    }
+    if (!currentIsPlatformAdmin && selectedRole === 'superadmin' && !(editingUser && editingUser.role === 'superadmin')) {
+        roleSelect.value = editingCurrentAdmin ? 'superadmin' : 'employee';
+    }
+    if (!currentCanManageManagers && selectedRole === 'admin') {
         roleSelect.value = editingCurrentAdmin ? 'admin' : 'employee';
     }
 
     const roleValue = roleSelect.value;
     const isEmployee = roleValue === 'employee';
-    const isAdmin = roleValue === 'admin';
+    const usesLocationAccess = roleValue === 'admin' || roleValue === 'superadmin';
 
     locationRow.classList.toggle('hidden', !isEmployee);
-    adminLocationsRow.classList.toggle('hidden', !isAdmin || !currentIsSuperadmin);
+    adminLocationsRow.classList.toggle('hidden', !usesLocationAccess || !currentCanManageManagers);
 
-    roleSelect.disabled = !currentIsSuperadmin && editingCurrentAdmin;
+    roleSelect.disabled = !currentIsPlatformAdmin && editingCurrentAdmin;
     if (!isEmployee) {
         locationSelect.value = '';
     }
-    if (!(isAdmin && currentIsSuperadmin)) {
+    if (!(usesLocationAccess && currentCanManageManagers)) {
         setMultiSelectValues(adminLocationsSelect, []);
     }
 }
@@ -1040,6 +1066,7 @@ function renderLocationOptions(locations) {
     const locationSelect = document.getElementById('admin-location-select');
     const userLocation = document.getElementById('user-location');
     const adminLocations = document.getElementById('user-admin-locations');
+    const usersLocationFilter = document.getElementById('users-location-filter');
     adminState.locations = Array.isArray(locations) ? locations : [];
 
     if (adminState.selectedLocation && !adminState.locations.some(location => location.name === adminState.selectedLocation)) {
@@ -1063,6 +1090,12 @@ function renderLocationOptions(locations) {
     }
     if (adminLocations) {
         adminLocations.innerHTML = adminState.locations.map(location => `<option value="${escapeHtml(location.id)}">${escapeHtml(location.name)}</option>`).join('');
+    }
+    if (usersLocationFilter) {
+        const previous = usersLocationFilter.value || adminState.userFilters.location || '';
+        usersLocationFilter.innerHTML = `<option value="">Все точки</option>${adminState.locations.map(location => `<option value="${escapeHtml(location.name)}">${escapeHtml(location.name)}</option>`).join('')}`;
+        usersLocationFilter.value = adminState.locations.some(location => location.name === previous) ? previous : '';
+        adminState.userFilters.location = usersLocationFilter.value;
     }
 
     renderLocationManageList();
@@ -1131,6 +1164,7 @@ function renderRegistrationRequests(requests) {
                 <div class="muted-text">${escapeHtml(request.organization_name || 'Без организации')} · первая точка: ${escapeHtml(request.location_name || '—')}</div>
                 <div class="muted-text">Логин: ${escapeHtml(request.username || '—')} · email: ${escapeHtml(request.email || '—')} · телефон: ${escapeHtml(request.phone || '—')}</div>
                 <div class="muted-text">Создана: ${escapeHtml(formatRegistrationDate(request.created_at))} · статус: ${escapeHtml(registrationStatusLabel(request.status))}</div>
+                ${request.referred_by_user_name ? `<div class="muted-text referral-source-text">По реферальной ссылке: ${escapeHtml(request.referred_by_user_name)}</div>` : ''}
                 ${request.comment ? `<div class="muted-text">Комментарий: ${escapeHtml(request.comment)}</div>` : ''}
             </div>
             <div class="user-row-actions">
@@ -1142,7 +1176,7 @@ function renderRegistrationRequests(requests) {
 }
 
 window.approveRegistrationRequest = async function (requestId) {
-    if (!confirm('Разрешить доступ по этой заявке? Будет создан управляющий и первая точка.')) return;
+    if (!confirm('Разрешить доступ по этой заявке? Будет создан главный управляющий и первая точка.')) return;
     try {
         const response = await fetch(`/api/registration-requests/${requestId}/approve`, { method: 'POST' });
         const data = await response.json();
@@ -1179,6 +1213,101 @@ window.rejectRegistrationRequest = async function (requestId) {
         alert(error?.message || 'Не удалось отклонить заявку.');
     }
 };
+
+function referralStatusText(request) {
+    const status = registrationStatusLabel(request.status);
+    return `${status}${request.created_user_id ? ` · пользователь #${Number(request.created_user_id)}` : ''}`;
+}
+
+function renderReferrals(links) {
+    const container = document.getElementById('referrals-list');
+    if (!container) return;
+    if (!Array.isArray(links) || !links.length) {
+        container.innerHTML = '<p>Реферальных ссылок пока нет.</p>';
+        return;
+    }
+    container.innerHTML = links.map(link => {
+        const registrations = Array.isArray(link.registrations) ? link.registrations : [];
+        const registrationsHtml = registrations.length
+            ? registrations.map(request => `
+                <div class="referral-registration-row">
+                    <strong>${escapeHtml(request.full_name || 'Без имени')}</strong>
+                    <div class="muted-text">${escapeHtml(request.organization_name || '—')} · ${escapeHtml(request.email || '—')}</div>
+                    <div class="muted-text">${escapeHtml(formatRegistrationDate(request.created_at))} · ${escapeHtml(referralStatusText(request))}</div>
+                </div>
+            `).join('')
+            : '<div class="muted-text">По этой ссылке пока никто не регистрировался.</div>';
+        return `
+            <div class="user-row referral-link-row">
+                <div>
+                    <strong>${escapeHtml(link.owner?.full_name || 'Пользователь')}</strong>
+                    <div class="muted-text">${escapeHtml(link.owner?.username || '—')} · ${escapeHtml(roleDisplayName(link.owner?.role))}</div>
+                    <div class="referral-link-copy-row">
+                        <input type="text" readonly value="${escapeHtml(link.url || '')}">
+                        <button class="btn secondary btn-inline" type="button" onclick="copyReferralLink('${escapeHtml(link.url || '')}')">Скопировать</button>
+                    </div>
+                    <details class="referral-details" open>
+                        <summary>Зарегистрировались по ссылке: ${registrations.length}</summary>
+                        <div class="referral-registrations-list">${registrationsHtml}</div>
+                    </details>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+async function loadReferrals() {
+    const container = document.getElementById('referrals-list');
+    const message = document.getElementById('referrals-message');
+    if (container) container.innerHTML = '<p>Загрузка рефералов...</p>';
+    setMessage(message, '');
+    try {
+        if (!adminState.allUsers.length) {
+            await loadUsers();
+        }
+        const response = await fetch('/api/referral-links');
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || data.message || 'Не удалось загрузить рефералов.');
+        renderReferrals(data.links || []);
+    } catch (error) {
+        console.error(error);
+        if (container) container.innerHTML = `<p class="empty-text error-text">${escapeHtml(error?.message || 'Не удалось загрузить рефералов.')}</p>`;
+    }
+}
+
+window.copyReferralLink = async function (url) {
+    try {
+        await navigator.clipboard.writeText(url);
+        alert('Ссылка скопирована.');
+    } catch {
+        prompt('Скопируйте ссылку:', url);
+    }
+};
+
+async function createReferralLink() {
+    const select = document.getElementById('referral-owner-select');
+    const message = document.getElementById('referrals-message');
+    const userId = Number(select?.value || 0);
+    if (!userId) {
+        setMessage(message, 'Выберите пользователя.');
+        return;
+    }
+    setMessage(message, '');
+    try {
+        const response = await fetch('/api/referral-links', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: userId }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || data.message || 'Не удалось создать ссылку.');
+        setMessage(message, data.message || 'Ссылка создана.', '#1f9d55');
+        await loadReferrals();
+    } catch (error) {
+        console.error(error);
+        setMessage(message, error?.message || 'Не удалось создать ссылку.');
+    }
+}
 
 function switchLocationModalTab(tab) {
     adminState.locationModalTab = tab;
@@ -1406,17 +1535,57 @@ async function deleteSelectedLocation() {
     }
 }
 
-function renderUsers(users) {
+function updateReferralOwnerSelect(users = adminState.allUsers) {
+    const select = document.getElementById('referral-owner-select');
+    if (!select) return;
+    const normalizedUsers = Array.isArray(users) ? users : [];
+    if (!normalizedUsers.length) {
+        select.innerHTML = '<option value="">Пользователей пока нет</option>';
+        return;
+    }
+    const previous = select.value;
+    select.innerHTML = `<option value="">Выберите пользователя</option>${normalizedUsers.map(user => `<option value="${Number(user.id)}">${escapeHtml(user.full_name)} · ${escapeHtml(roleDisplayName(user.role))}</option>`).join('')}`;
+    if (previous && normalizedUsers.some(user => Number(user.id) === Number(previous))) {
+        select.value = previous;
+    }
+}
+
+function getUserLocationForFilter(user) {
+    if (user.role === 'admin' || user.role === 'superadmin') {
+        return Array.isArray(user.admin_locations) ? user.admin_locations : [];
+    }
+    if (user.role === 'platform_admin') {
+        return ['__all__'];
+    }
+    return user.location ? [user.location] : [];
+}
+
+function filterUsers(users) {
+    const roleFilter = adminState.userFilters.role || '';
+    const locationFilter = adminState.userFilters.location || '';
+    return (users || []).filter(user => {
+        if (roleFilter && user.role !== roleFilter) return false;
+        if (locationFilter) {
+            const userLocations = getUserLocationForFilter(user);
+            if (!userLocations.includes('__all__') && !userLocations.includes(locationFilter)) return false;
+        }
+        return true;
+    });
+}
+
+function renderUsers(users = adminState.allUsers) {
     const container = document.getElementById('users-list');
-    if (!users.length) {
-        container.innerHTML = '<p>Пользователей пока нет.</p>';
+    if (!container) return;
+    const filteredUsers = filterUsers(users);
+    if (!filteredUsers.length) {
+        container.innerHTML = '<p>Пользователи по выбранным фильтрам не найдены.</p>';
         return;
     }
 
-    container.innerHTML = users.map(user => {
-        const locationInfo = user.role === 'admin'
+    container.innerHTML = filteredUsers.map(user => {
+        const locationInfo = (user.role === 'admin' || user.role === 'superadmin')
             ? (Array.isArray(user.admin_locations) && user.admin_locations.length ? `точки: ${escapeHtml(user.admin_locations.join(', '))}` : 'точки не назначены')
-            : escapeHtml(user.location || 'без точки');
+            : (user.role === 'platform_admin' ? 'доступ ко всем точкам' : escapeHtml(user.location || 'без точки'));
         const email = getUserEmail(user);
         const emailText = email ? escapeHtml(email) : '<span class="muted-text-warning">не указана</span>';
         return `
@@ -1483,7 +1652,9 @@ async function loadUsers() {
     const response = await fetch('/api/users');
     if (!response.ok) throw new Error('Ошибка загрузки пользователей');
     const data = await response.json();
-    renderUsers(data.users);
+    adminState.allUsers = Array.isArray(data.users) ? data.users : [];
+    updateReferralOwnerSelect(adminState.allUsers);
+    renderUsers(adminState.allUsers);
 }
 
 async function extractErrorMessage(response) {
@@ -3412,6 +3583,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     document.getElementById('refresh-registration-requests-btn')?.addEventListener('click', loadRegistrationRequests);
     document.getElementById('close-registration-requests-modal-btn')?.addEventListener('click', () => hideModal('registration-requests-modal'));
+    document.getElementById('open-referrals-btn')?.addEventListener('click', async () => {
+        showModal('referrals-modal');
+        await loadReferrals();
+    });
+    document.getElementById('refresh-referrals-btn')?.addEventListener('click', loadReferrals);
+    document.getElementById('close-referrals-modal-btn')?.addEventListener('click', () => hideModal('referrals-modal'));
+    document.getElementById('create-referral-link-btn')?.addEventListener('click', createReferralLink);
+    document.getElementById('users-location-filter')?.addEventListener('change', (event) => {
+        adminState.userFilters.location = event.target.value || '';
+        renderUsers(adminState.allUsers);
+    });
+    document.getElementById('users-role-filter')?.addEventListener('change', (event) => {
+        adminState.userFilters.role = event.target.value || '';
+        renderUsers(adminState.allUsers);
+    });
     document.getElementById('open-cycle-targets-btn')?.addEventListener('click', async () => {
         try {
             await openCycleTargetsModal(getTodayIsoDate());

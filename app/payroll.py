@@ -796,7 +796,7 @@ async def enqueue_closed_shift_recalculation(
     db: AsyncSession,
     current_user: User,
 ) -> dict[str, Any]:
-    if current_user.role not in {'admin', 'superadmin'}:
+    if current_user.role not in {'platform_admin', 'admin', 'superadmin'}:
         raise HTTPException(status_code=403, detail='Пересчитывать закрытые смены может только управляющий.')
     if payload.date_from > payload.date_to:
         raise HTTPException(status_code=400, detail='Дата начала не может быть позже даты окончания.')
@@ -1612,10 +1612,10 @@ async def get_user_accessible_locations(user: User, db: AsyncSession) -> list[st
             result.append(fallback_location)
         return result
 
-    if user.role == 'superadmin':
+    if user.role == 'platform_admin':
         rows = (await db.scalars(select(LocationPoint).order_by(LocationPoint.name.asc()))).all()
         return _merge_locations(rows)
-    if user.role == 'admin':
+    if user.role in {'superadmin', 'admin'}:
         rows = (
             await db.scalars(
                 select(LocationPoint)
@@ -1650,7 +1650,7 @@ async def _get_accessible_location_points(user: User, db: AsyncSession) -> list[
 
 async def _get_payroll_scope_points(user: User, location: str, db: AsyncSession) -> tuple[list[LocationPoint], bool]:
     if _is_all_locations_scope(location):
-        if user.role not in {'admin', 'superadmin'}:
+        if user.role not in {'platform_admin', 'admin', 'superadmin'}:
             raise HTTPException(status_code=403, detail='Все точки доступны только управляющим.')
         points = await _get_accessible_location_points(user, db)
         if not points:
@@ -1663,7 +1663,7 @@ async def _get_payroll_scope_points(user: User, location: str, db: AsyncSession)
 
 async def ensure_user_can_access_location(user: User, location: str, db: AsyncSession) -> None:
     if _is_all_locations_scope(location):
-        if user.role not in {'admin', 'superadmin'}:
+        if user.role not in {'platform_admin', 'admin', 'superadmin'}:
             raise HTTPException(status_code=403, detail='Все точки доступны только управляющим.')
         return
     normalized = _normalize_location(location)
@@ -1804,7 +1804,7 @@ async def _list_location_admins(point: LocationPoint, db: AsyncSession) -> list[
             select(User)
             .join(AdminLocationAccess, AdminLocationAccess.admin_user_id == User.id)
             .where(
-                User.role.in_(['admin', 'superadmin']),
+                User.role.in_(['platform_admin', 'admin', 'superadmin']),
                 User.is_active.is_(True),
                 AdminLocationAccess.location_point_id == point.id,
             )
@@ -1815,7 +1815,7 @@ async def _list_location_admins(point: LocationPoint, db: AsyncSession) -> list[
         await db.scalars(
             select(User)
             .where(
-                User.role.in_(['admin', 'superadmin']),
+                User.role.in_(['platform_admin', 'admin', 'superadmin']),
                 User.is_active.is_(True),
                 User.location == point.name,
             )
@@ -1840,9 +1840,9 @@ def _dedupe_users(users: list[User]) -> list[User]:
 
 
 async def _is_user_location_admin(user: User, point: LocationPoint, db: AsyncSession) -> bool:
-    if user.role not in {'admin', 'superadmin'} or not user.is_active:
+    if user.role not in {'platform_admin', 'admin', 'superadmin'} or not user.is_active:
         return False
-    if user.role == 'superadmin':
+    if user.role == 'platform_admin':
         return True
     normalized_point = _normalize_location(point.name)
     if _normalize_location(user.location or '') == normalized_point:
@@ -1891,7 +1891,7 @@ async def get_location_shift_setup(location: str, db: AsyncSession, current_user
     point = await _get_location_point_by_name(location, db)
     employees = await _list_location_employees(point, db)
     admins = await _list_location_admins(point, db)
-    if current_user.role in {'admin', 'superadmin'} and await _is_user_assignable_to_shift(current_user, point, db):
+    if current_user.role in {'platform_admin', 'admin', 'superadmin'} and await _is_user_assignable_to_shift(current_user, point, db):
         admins = _dedupe_users([current_user, *admins])
 
     employee_options = [
@@ -1916,7 +1916,7 @@ async def get_location_shift_setup(location: str, db: AsyncSession, current_user
                 'id': item.id,
                 'full_name': item.full_name,
                 'role': item.role,
-                'shift_role': 'admin' if item.role in {'admin', 'superadmin'} else 'employee',
+                'shift_role': 'admin' if item.role in {'platform_admin', 'admin', 'superadmin'} else 'employee',
             }
             for item in shift_assignees
         ],
@@ -2063,14 +2063,14 @@ async def get_payroll_category_catalog(location: str, db: AsyncSession, current_
 
 
 async def update_location_payroll_settings(payload: PayrollSettingsUpdateRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
-    if current_user.role not in {'admin', 'superadmin'}:
+    if current_user.role not in {'platform_admin', 'admin', 'superadmin'}:
         raise HTTPException(status_code=403, detail='Изменять настройки зарплаты может только управляющий.')
     await ensure_user_can_access_location(current_user, payload.location, db)
     point = await _get_location_point_by_name(payload.location, db)
 
     if payload.responsible_admin_user_id:
         admin_user = await db.get(User, payload.responsible_admin_user_id)
-        if not admin_user or admin_user.role not in {'admin', 'superadmin'} or not admin_user.is_active:
+        if not admin_user or admin_user.role not in {'platform_admin', 'admin', 'superadmin'} or not admin_user.is_active:
             raise HTTPException(status_code=400, detail='Ответственный управляющий не найден.')
         has_access = await db.scalar(
             select(func.count())
@@ -2083,7 +2083,7 @@ async def update_location_payroll_settings(payload: PayrollSettingsUpdateRequest
         if (has_access or 0) <= 0:
             raise HTTPException(status_code=400, detail='У выбранного управляющего нет доступа к точке.')
 
-    if current_user.role != 'superadmin' and payload.manager_salary_brackets:
+    if current_user.role not in {'platform_admin', 'superadmin'} and payload.manager_salary_brackets:
         raise HTTPException(status_code=403, detail='Настраивать зарплату управляющего может только главный управляющий.')
 
     normalized_bonus_category_ids = _normalize_bonus_category_ids(payload.bonus_category_ids)
@@ -2099,7 +2099,7 @@ async def update_location_payroll_settings(payload: PayrollSettingsUpdateRequest
     )
 
     settings_source = existing_version or await _ensure_default_payroll_settings(point, db)
-    manager_salary_brackets = _normalize_manager_salary_brackets(payload.manager_salary_brackets) if current_user.role == 'superadmin' else _load_manager_salary_brackets(settings_source)
+    manager_salary_brackets = _normalize_manager_salary_brackets(payload.manager_salary_brackets) if current_user.role in {'platform_admin', 'superadmin'} else _load_manager_salary_brackets(settings_source)
 
     if existing_version is None:
         version = PayrollSettingsVersion(
@@ -2124,7 +2124,7 @@ async def update_location_payroll_settings(payload: PayrollSettingsUpdateRequest
         version.bonus_amount = payload.bonus_amount
         version.other_rate_percent = payload.other_rate_percent
         version.bonus_category_ids_json = json.dumps(normalized_bonus_category_ids, ensure_ascii=False)
-        if current_user.role == 'superadmin' or not getattr(version, 'manager_salary_brackets_json', None):
+        if current_user.role in {'platform_admin', 'superadmin'} or not getattr(version, 'manager_salary_brackets_json', None):
             version.manager_salary_brackets_json = json.dumps(manager_salary_brackets, ensure_ascii=False)
         version.responsible_admin_user_id = payload.responsible_admin_user_id
         version.created_by_user_id = current_user.id
@@ -2298,7 +2298,7 @@ async def list_expense_templates(location: str, db: AsyncSession, current_user: 
 
 
 async def create_expense_template(payload: ExpenseTemplateCreateRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
-    if current_user.role not in {'admin', 'superadmin'}:
+    if current_user.role not in {'platform_admin', 'admin', 'superadmin'}:
         raise HTTPException(status_code=403, detail='Создавать шаблоны расходов может только управляющий.')
     await ensure_user_can_access_location(current_user, payload.location, db)
     point = await _get_location_point_by_name(payload.location, db)
@@ -2416,7 +2416,7 @@ def _serialize_monthly_expense_entry(
 
 
 async def create_manual_monthly_expense(payload: ManualMonthlyExpenseCreateRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
-    if current_user.role not in {'admin', 'superadmin'}:
+    if current_user.role not in {'platform_admin', 'admin', 'superadmin'}:
         raise HTTPException(status_code=403, detail='Создавать расходы может только управляющий.')
     await ensure_user_can_access_location(current_user, payload.location, db)
     point = await _get_location_point_by_name(payload.location, db)
@@ -2695,7 +2695,7 @@ async def _list_employee_adjustments(
     *,
     entry_type: str,
 ) -> dict[str, Any]:
-    if current_user.role not in {'admin', 'superadmin'}:
+    if current_user.role not in {'platform_admin', 'admin', 'superadmin'}:
         raise HTTPException(status_code=403, detail='Просматривать начисления и штрафы может только управляющий.')
     await ensure_user_can_access_location(current_user, location, db)
     point = await _get_location_point_by_name(location, db)
@@ -2758,7 +2758,7 @@ async def _create_employee_adjustment(
 ) -> dict[str, Any]:
     normalized_type = _normalize_employee_adjustment_type(entry_type)
     label = _employee_adjustment_label(normalized_type)
-    if current_user.role not in {'admin', 'superadmin'}:
+    if current_user.role not in {'platform_admin', 'admin', 'superadmin'}:
         raise HTTPException(status_code=403, detail=f'Создавать {_employee_adjustment_plural_label(normalized_type)} может только управляющий.')
     await ensure_user_can_access_location(current_user, location, db)
     point = await _get_location_point_by_name(location, db)
@@ -2844,7 +2844,7 @@ async def _update_employee_adjustment(
 ) -> dict[str, Any]:
     normalized_type = _normalize_employee_adjustment_type(entry_type)
     label = _employee_adjustment_label(normalized_type)
-    if current_user.role not in {'admin', 'superadmin'}:
+    if current_user.role not in {'platform_admin', 'admin', 'superadmin'}:
         raise HTTPException(status_code=403, detail=f'Редактировать {_employee_adjustment_plural_label(normalized_type)} может только управляющий.')
     entry = await db.get(EmployeeBonusEntry, entry_id)
     if not entry or _normalize_employee_adjustment_type(getattr(entry, 'entry_type', None)) != normalized_type:
@@ -2924,7 +2924,7 @@ async def update_employee_penalty(entry_id: int, payload: EmployeePenaltyUpdateR
 async def _delete_employee_adjustment(entry_id: int, db: AsyncSession, current_user: User, *, entry_type: str) -> dict[str, Any]:
     normalized_type = _normalize_employee_adjustment_type(entry_type)
     label = _employee_adjustment_label(normalized_type)
-    if current_user.role not in {'admin', 'superadmin'}:
+    if current_user.role not in {'platform_admin', 'admin', 'superadmin'}:
         raise HTTPException(status_code=403, detail=f'Удалять {_employee_adjustment_plural_label(normalized_type)} может только управляющий.')
     entry = await db.get(EmployeeBonusEntry, entry_id)
     if not entry or _normalize_employee_adjustment_type(getattr(entry, 'entry_type', None)) != normalized_type:
@@ -4672,7 +4672,7 @@ def _validate_sales_motivation_payload(payload: SalesMotivationCreateRequest | S
 
 
 async def create_sales_motivation_model(payload: SalesMotivationCreateRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
-    if current_user.role not in {'admin', 'superadmin'}:
+    if current_user.role not in {'platform_admin', 'admin', 'superadmin'}:
         raise HTTPException(status_code=403, detail='Создавать мотивации может только управляющий.')
     await ensure_user_can_access_location(current_user, payload.location, db)
     point = await _get_location_point_by_name(payload.location, db)
@@ -4711,7 +4711,7 @@ async def create_sales_motivation_model(payload: SalesMotivationCreateRequest, d
 
 
 async def update_sales_motivation_model(model_id: int, payload: SalesMotivationUpdateRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
-    if current_user.role not in {'admin', 'superadmin'}:
+    if current_user.role not in {'platform_admin', 'admin', 'superadmin'}:
         raise HTTPException(status_code=403, detail='Редактировать мотивации может только управляющий.')
     model = await db.get(SalesMotivationModel, model_id)
     if not model:
@@ -4748,7 +4748,7 @@ async def update_sales_motivation_model(model_id: int, payload: SalesMotivationU
 
 
 async def delete_sales_motivation_model(model_id: int, db: AsyncSession, current_user: User) -> dict[str, Any]:
-    if current_user.role not in {'admin', 'superadmin'}:
+    if current_user.role not in {'platform_admin', 'admin', 'superadmin'}:
         raise HTTPException(status_code=403, detail='Удалять мотивации может только управляющий.')
     model = await db.get(SalesMotivationModel, model_id)
     if not model:
@@ -5378,7 +5378,7 @@ async def refresh_sales_motivation_daily_snapshots(
 ) -> dict[str, Any]:
     if date_from > date_to:
         raise HTTPException(status_code=400, detail='Дата начала не может быть позже даты окончания.')
-    if current_user is not None and current_user.role not in {'admin', 'superadmin'}:
+    if current_user is not None and current_user.role not in {'platform_admin', 'admin', 'superadmin'}:
         raise HTTPException(status_code=403, detail='Обновлять снимки мотиваций может только управляющий.')
 
     points = await _resolve_sales_motivation_snapshot_points(db, location=location, current_user=current_user)
@@ -5827,7 +5827,7 @@ async def backfill_closed_shift_sales_motivation_snapshots(
     """
     if date_from > date_to:
         raise HTTPException(status_code=400, detail='Дата начала не может быть позже даты окончания.')
-    if current_user is not None and current_user.role not in {'admin', 'superadmin'}:
+    if current_user is not None and current_user.role not in {'platform_admin', 'admin', 'superadmin'}:
         raise HTTPException(status_code=403, detail='Обновлять мотивации закрытых смен может только управляющий.')
 
     points = await _resolve_sales_motivation_snapshot_points(db, location=location, current_user=current_user)
@@ -6410,7 +6410,7 @@ async def _close_shift_unlocked(shift_id: int, db: AsyncSession, actor_user: Use
     if actor_user is not None:
         if actor_user.role == 'employee' and actor_user.id != shift.employee_user_id:
             raise HTTPException(status_code=403, detail='Можно закрыть только свою смену.')
-        if actor_user.role in {'admin', 'superadmin'}:
+        if actor_user.role in {'platform_admin', 'admin', 'superadmin'}:
             await ensure_user_can_access_location(actor_user, point.name, db)
     if shift.status == 'closed':
         computed = await _build_computed_shift(shift, db)
@@ -6504,7 +6504,7 @@ async def _close_shift_unlocked(shift_id: int, db: AsyncSession, actor_user: Use
 
 
 async def upsert_work_shift(payload: WorkShiftUpsertRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
-    if current_user.role not in {'admin', 'superadmin'}:
+    if current_user.role not in {'platform_admin', 'admin', 'superadmin'}:
         raise HTTPException(status_code=403, detail='Назначать смены может только управляющий.')
     await ensure_user_can_access_location(current_user, payload.location, db)
     point = await _get_location_point_by_name(payload.location, db)
@@ -7862,7 +7862,7 @@ async def list_payroll_audit_logs(location: str | None, db: AsyncSession, curren
     elif location and _is_all_locations_scope(location):
         points = await _get_accessible_location_points(current_user, db)
         query = query.where(PayrollAuditLog.location_point_id.in_([point.id for point in points] or [-1]))
-    elif current_user.role == 'admin':
+    elif current_user.role in {'admin', 'superadmin'}:
         accessible_locations = set(await get_user_accessible_locations(current_user, db))
         point_ids = (
             await db.scalars(select(LocationPoint.id).where(LocationPoint.name.in_(accessible_locations)))

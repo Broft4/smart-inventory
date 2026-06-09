@@ -15,9 +15,10 @@ class StatusEnum(str, Enum):
 
 
 class RoleEnum(str, Enum):
-    SUPERADMIN = 'superadmin'
-    ADMIN = 'admin'
-    EMPLOYEE = 'employee'
+    PLATFORM_ADMIN = 'platform_admin'  # Админ сервиса: доступ ко всем точкам, заявкам и рефералам.
+    SUPERADMIN = 'superadmin'          # Главный управляющий своего пространства/точек.
+    ADMIN = 'admin'                    # Управляющий назначенных точек.
+    EMPLOYEE = 'employee'              # Сотрудник точки.
 
 
 class UserInfo(BaseModel):
@@ -43,6 +44,7 @@ class RegistrationCreateRequest(BaseModel):
     password: str = Field(..., min_length=6, max_length=255)
     password_confirm: str = Field(..., min_length=6, max_length=255)
     comment: Optional[str] = Field(default=None, max_length=1000)
+    referral_token: Optional[str] = Field(default=None, max_length=128)
 
 
 class RegistrationCreateResponse(BaseModel):
@@ -67,6 +69,10 @@ class RegistrationApplicationModel(BaseModel):
     approved_by_user_id: Optional[int] = None
     created_user_id: Optional[int] = None
     created_location_point_id: Optional[int] = None
+    referral_token: Optional[str] = None
+    referral_link_id: Optional[int] = None
+    referred_by_user_id: Optional[int] = None
+    referred_by_user_name: Optional[str] = None
 
     model_config = {'from_attributes': True}
 
@@ -83,6 +89,43 @@ class RegistrationActionResponse(BaseModel):
     success: bool
     message: str
     request: Optional[RegistrationApplicationModel] = None
+
+
+class ReferralLinkCreateRequest(BaseModel):
+    user_id: int = Field(..., ge=1)
+
+
+class ReferralUserModel(BaseModel):
+    id: int
+    full_name: str
+    username: str
+    role: RoleEnum
+    location: Optional[str] = None
+
+
+class ReferralLinkModel(BaseModel):
+    id: int
+    token: str
+    url: str
+    owner: ReferralUserModel
+    is_active: bool
+    created_at: datetime
+    registrations: list[RegistrationApplicationModel] = Field(default_factory=list)
+
+
+class ReferralLinksResponse(BaseModel):
+    links: list[ReferralLinkModel]
+
+
+class ReferralLinkActionResponse(BaseModel):
+    success: bool = True
+    message: str
+    link: ReferralLinkModel
+
+
+class ReferralResolveResponse(BaseModel):
+    found: bool
+    referrer_name: Optional[str] = None
 
 
 class LoginRequest(BaseModel):

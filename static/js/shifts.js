@@ -34,7 +34,7 @@ function qs(id) {
 }
 
 function isAdminRole() {
-    return ['admin', 'superadmin'].includes(shiftsState.user.role);
+    return ['platform_admin', 'admin', 'superadmin'].includes(shiftsState.user.role);
 }
 
 function formatMoney(value) {
@@ -263,7 +263,7 @@ function dedupeAssignees(items) {
 }
 
 function assigneeRoleLabel(item) {
-    if (item?.shift_role === 'admin' || ['admin', 'superadmin'].includes(item?.role)) return 'Управляющий';
+    if (item?.shift_role === 'admin' || ['platform_admin', 'admin', 'superadmin'].includes(item?.role)) return 'Управляющий';
     return 'Сотрудник';
 }
 

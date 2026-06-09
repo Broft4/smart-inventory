@@ -16,6 +16,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const closeRegistrationButton = document.getElementById('close-registration-modal-btn');
     const registrationForm = document.getElementById('registration-form');
     const registrationMessage = document.getElementById('registration-message');
+    const registrationReferralTokenInput = document.getElementById('registration-referral-token');
+    const registrationReferralNote = document.getElementById('registration-referral-note');
+    const initialParams = new URLSearchParams(window.location.search);
+    const initialReferralToken = (initialParams.get('ref') || '').trim();
 
     const resetState = {
         requestId: '',
@@ -67,9 +71,44 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
 
-    function openRegistrationModal() {
+    function setReferralToken(token, referrerName = '') {
+        const normalized = String(token || '').trim();
+        if (registrationReferralTokenInput) registrationReferralTokenInput.value = normalized;
+        if (!registrationReferralNote) return;
+        if (!normalized) {
+            registrationReferralNote.classList.add('hidden');
+            registrationReferralNote.textContent = '';
+            return;
+        }
+        registrationReferralNote.classList.remove('hidden');
+        registrationReferralNote.textContent = referrerName
+            ? `Вы регистрируетесь по реферальной ссылке: ${referrerName}.`
+            : 'Вы регистрируетесь по реферальной ссылке.';
+    }
+
+    async function resolveInitialReferralToken() {
+        if (!initialReferralToken) return;
+        setReferralToken(initialReferralToken);
+        try {
+            const response = await fetch(`/api/referrals/resolve/${encodeURIComponent(initialReferralToken)}`);
+            const data = await response.json();
+            if (response.ok && data.found) {
+                setReferralToken(initialReferralToken, data.referrer_name || '');
+            } else {
+                setRegistrationMessage('Реферальная ссылка не найдена или уже отключена. Можно отправить обычную заявку.');
+                setReferralToken('');
+            }
+        } catch (error) {
+            console.error(error);
+            setReferralToken(initialReferralToken);
+        }
+    }
+
+    function openRegistrationModal({ preserveReferral = true } = {}) {
+        const referralToken = preserveReferral ? (registrationReferralTokenInput?.value || initialReferralToken || '') : '';
         registrationForm?.reset();
         setRegistrationMessage('');
+        setReferralToken(referralToken);
         registrationModal?.classList.remove('hidden');
         registrationModal?.setAttribute('aria-hidden', 'false');
         document.body.classList.add('modal-open');
@@ -154,6 +193,11 @@ document.addEventListener('DOMContentLoaded', () => {
         if (event.target === registrationModal) closeRegistrationModal();
     });
 
+    if (initialReferralToken || initialParams.get('register') === '1') {
+        openRegistrationModal({ preserveReferral: true });
+        resolveInitialReferralToken();
+    }
+
     registrationForm?.addEventListener('submit', async (event) => {
         event.preventDefault();
         const password = document.getElementById('registration-password').value;
@@ -181,6 +225,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     password,
                     password_confirm: passwordConfirm,
                     comment: document.getElementById('registration-comment').value.trim() || null,
+                    referral_token: registrationReferralTokenInput?.value.trim() || null,
                 }),
             });
             const result = await parseResponse(response, 'Не удалось отправить заявку.');

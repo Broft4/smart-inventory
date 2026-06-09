@@ -85,13 +85,18 @@
         <div class="modal-header">
             <div>
                 <h2>Заявка на доступ</h2>
-                <p class="muted-text">Заполните форму. Доступ откроется после ручного подтверждения главным управляющим.</p>
+                <p class="muted-text">Заполните форму. Доступ откроется после ручного подтверждения админом.</p>
             </div>
             <button id="close-registration-modal-btn" class="btn secondary btn-inline" type="button">Закрыть</button>
         </div>
 
         <form id="registration-form" class="auth-form" novalidate>
-            <label>ФИО управляющего
+            <input type="hidden" id="registration-referral-token">
+            <div id="registration-referral-note" class="auth-info-box hidden"></div>
+            <div class="auth-info-box auth-telegram-note">
+                Подпишитесь на Telegram-канал <a href="https://t.me/uchetka_retail" target="_blank" rel="noopener">t.me/uchetka_retail</a>, чтобы оставаться в курсе новостей или задать вопросы.
+            </div>
+            <label>ФИО главного управляющего
                 <input type="text" id="registration-full-name" autocomplete="name" required>
             </label>
             <label>Название организации
