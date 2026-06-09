@@ -4465,3 +4465,72 @@ html[data-theme="dark"] .employee-empty-state {
     color: #9fb0c7 !important;
 }
 
+
+/* Mobile Safari fix: keep admin report filters inside the card */
+@media (max-width: 640px) {
+    .admin-container {
+        width: 100%;
+        max-width: 100%;
+        overflow-x: hidden;
+    }
+
+    .admin-hero-card,
+    .admin-toolbar-grid,
+    .admin-period-toolbar,
+    .admin-problem-export-toolbar {
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+    }
+
+    .admin-toolbar-grid > *,
+    .admin-period-toolbar > *,
+    .admin-problem-export-toolbar > * {
+        min-width: 0 !important;
+        max-width: 100%;
+    }
+
+    .admin-toolbar-grid label,
+    .admin-period-toolbar label,
+    .admin-problem-export-toolbar label {
+        width: 100%;
+        min-width: 0 !important;
+        max-width: 100%;
+    }
+
+    .admin-hero-card input,
+    .admin-hero-card select,
+    .admin-hero-card textarea {
+        display: block;
+        width: 100%;
+        min-width: 0;
+        max-width: 100%;
+    }
+
+    .admin-hero-card input[type="date"] {
+        -webkit-appearance: none;
+        appearance: none;
+        overflow: hidden;
+    }
+
+    .admin-hero-card input[type="date"]::-webkit-date-and-time-value {
+        text-align: center;
+    }
+
+    .admin-period-actions {
+        display: grid;
+        grid-template-columns: 1fr;
+        width: 100%;
+    }
+
+    .admin-period-actions .btn {
+        width: 100%;
+        min-width: 0;
+    }
+
+    #admin-report-select,
+    #problem-export-preset {
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+}
