@@ -1687,7 +1687,7 @@ async function submitUserForm(event) {
         email: document.getElementById('user-email').value.trim() || null,
         role: selectedRole,
         location: selectedRole === 'employee' ? (document.getElementById('user-location').value || null) : null,
-        admin_location_ids: selectedRole === 'admin' ? getSelectedMultiSelectValues(document.getElementById('user-admin-locations')) : [],
+        admin_location_ids: (selectedRole === 'admin' || selectedRole === 'superadmin') ? getSelectedMultiSelectValues(document.getElementById('user-admin-locations')) : [],
         is_active: document.getElementById('user-active').checked,
     };
 
