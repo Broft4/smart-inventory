@@ -68,6 +68,7 @@ from app.password_reset import (
     request_password_reset,
     verify_password_reset_code,
 )
+from app.notifications import list_unread_notifications, mark_unread_notifications_read
 from app.registration import (
     approve_registration_request,
     create_referral_link,
@@ -246,7 +247,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260608-interactive-tutorial-v2'
+templates.env.globals['asset_version'] = '20260609-theme-notifications-v1'
 
 
 @app.middleware('http')
@@ -465,6 +466,16 @@ async def api_password_reset_complete(payload: PasswordResetCompleteRequest, req
     response = await complete_password_reset(payload, db)
     request.session.clear()
     return response
+
+
+@app.get('/api/notifications/unread')
+async def api_notifications_unread(user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
+    return await list_unread_notifications(db, user)
+
+
+@app.post('/api/notifications/read-all')
+async def api_notifications_read_all(user: User = Depends(require_user), db: AsyncSession = Depends(get_db)):
+    return await mark_unread_notifications_read(db, user)
 
 
 @app.post('/api/logout', response_model=LogoutResponse)

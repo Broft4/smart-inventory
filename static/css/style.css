@@ -3669,3 +3669,398 @@ body.tutorial-active .modal-overlay.tutorial-modal-open .modal-card {
         grid-template-columns: 1fr;
     }
 }
+
+/* Global shell controls: theme + notifications */
+.app-shell-controls {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    z-index: 992;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.app-shell-btn {
+    min-width: 38px;
+    height: 38px;
+    border: 1px solid rgba(205, 213, 225, 0.82);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.92);
+    color: #1f2937;
+    box-shadow: 0 12px 32px rgba(15, 23, 42, 0.14);
+    backdrop-filter: blur(10px);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    font-weight: 800;
+    line-height: 1;
+    transition: transform 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+}
+
+.app-shell-btn:hover,
+.app-shell-btn:focus-visible {
+    transform: translateY(-1px);
+    box-shadow: 0 15px 34px rgba(15, 23, 42, 0.22);
+    outline: none;
+}
+
+.app-control-label {
+    font-size: 12px;
+    padding-right: 3px;
+}
+
+.app-notification-wrap {
+    position: relative;
+}
+
+.app-notification-toggle {
+    position: relative;
+    width: 38px;
+    padding: 0;
+}
+
+.app-notification-toggle.is-loading .app-bell-icon {
+    opacity: 0.55;
+}
+
+.app-notification-badge {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: #dc3545;
+    color: #fff;
+    border: 2px solid #fff;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    font-weight: 900;
+    line-height: 1;
+}
+
+.app-notification-panel {
+    position: absolute;
+    top: calc(100% + 10px);
+    right: 0;
+    width: min(360px, calc(100vw - 24px));
+    max-height: min(520px, calc(100vh - 78px));
+    overflow: hidden;
+    border-radius: 18px;
+    background: #fff;
+    color: #263238;
+    border: 1px solid #e2e8f0;
+    box-shadow: 0 24px 70px rgba(15, 23, 42, 0.22);
+}
+
+.app-notification-panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 14px 10px;
+    border-bottom: 1px solid #eef2f7;
+}
+
+.app-notification-close {
+    width: 32px;
+    height: 32px;
+    border: 0;
+    border-radius: 999px;
+    background: #eef2f7;
+    color: #263238;
+    font-size: 20px;
+    cursor: pointer;
+}
+
+.app-notification-list {
+    display: grid;
+    gap: 8px;
+    padding: 12px;
+    max-height: 360px;
+    overflow: auto;
+}
+
+.app-notification-item {
+    display: block;
+    text-decoration: none;
+    color: inherit;
+    padding: 12px;
+    border-radius: 14px;
+    background: #f6f8fb;
+    border: 1px solid #e3e8f0;
+}
+
+.app-notification-item:hover {
+    border-color: #b7c7e6;
+    background: #eef4ff;
+}
+
+.app-notification-item-title {
+    font-weight: 900;
+    color: #1f2937;
+    margin-bottom: 5px;
+}
+
+.app-notification-item-message {
+    font-size: 13px;
+    line-height: 1.42;
+    color: #526070;
+}
+
+.app-notification-item-time {
+    margin-top: 7px;
+    font-size: 12px;
+    color: #7a8797;
+    font-weight: 700;
+}
+
+.app-notification-empty {
+    padding: 18px 12px;
+    text-align: center;
+    color: #68768a;
+    font-size: 14px;
+}
+
+.app-notification-error {
+    color: #dc3545;
+    font-weight: 700;
+}
+
+.app-notification-panel-note {
+    padding: 10px 14px 14px;
+    color: #68768a;
+    font-size: 12px;
+    border-top: 1px solid #eef2f7;
+}
+
+/* Move interactive tutorial button to the upper left */
+.tutorial-launcher {
+    top: 12px;
+    left: 12px;
+    right: auto;
+    z-index: 992;
+}
+
+.tutorial-launcher::after {
+    left: calc(100% + 10px);
+    right: auto;
+}
+
+.tutorial-launcher:hover::after,
+.tutorial-launcher:focus-visible::after {
+    transform: translateY(-50%) translateX(2px);
+}
+
+/* Dark theme */
+html[data-theme="dark"] {
+    color-scheme: dark;
+}
+
+html[data-theme="dark"] body {
+    background: radial-gradient(circle at top left, rgba(37, 99, 235, 0.18), transparent 34%), #0f172a;
+    color: #e5edf7;
+}
+
+html[data-theme="dark"] h1,
+html[data-theme="dark"] h2,
+html[data-theme="dark"] h3,
+html[data-theme="dark"] h4,
+html[data-theme="dark"] .app-brand-name,
+html[data-theme="dark"] .app-brand-tagline,
+html[data-theme="dark"] .app-notification-item-title {
+    color: #f8fafc;
+}
+
+html[data-theme="dark"] .muted-text,
+html[data-theme="dark"] .auth-subtitle,
+html[data-theme="dark"] .finish-hint,
+html[data-theme="dark"] .app-notification-empty,
+html[data-theme="dark"] .app-notification-panel-note,
+html[data-theme="dark"] .app-notification-item-time {
+    color: #9fb0c7;
+}
+
+html[data-theme="dark"] .auth-card,
+html[data-theme="dark"] .category-card,
+html[data-theme="dark"] .modal-card,
+html[data-theme="dark"] .employee-tools-card,
+html[data-theme="dark"] .warning-card,
+html[data-theme="dark"] .admin-hero-card,
+html[data-theme="dark"] .app-notification-panel {
+    background: #111c30;
+    border-color: #24344d;
+    color: #e5edf7;
+    box-shadow: 0 18px 46px rgba(0, 0, 0, 0.34);
+}
+
+html[data-theme="dark"] input,
+html[data-theme="dark"] select,
+html[data-theme="dark"] textarea {
+    background: #0b1220;
+    border-color: #334155;
+    color: #e5edf7;
+}
+
+html[data-theme="dark"] input::placeholder,
+html[data-theme="dark"] textarea::placeholder {
+    color: #64748b;
+}
+
+html[data-theme="dark"] .btn.secondary,
+html[data-theme="dark"] .employee-view-btn,
+html[data-theme="dark"] .payroll-tab-btn,
+html[data-theme="dark"] .payroll-collapse-btn,
+html[data-theme="dark"] .shift-modal-cancel-btn {
+    background: #1e293b;
+    color: #e5edf7;
+    border-color: #334155;
+}
+
+html[data-theme="dark"] .btn.secondary:hover,
+html[data-theme="dark"] .employee-view-btn:hover,
+html[data-theme="dark"] .payroll-tab-btn:hover {
+    background: #26364d;
+}
+
+html[data-theme="dark"] .hint-box,
+html[data-theme="dark"] .auth-info-box,
+html[data-theme="dark"] .employee-revision-banner,
+html[data-theme="dark"] .inventory-status,
+html[data-theme="dark"] .tutorial-step-counter {
+    background: rgba(37, 99, 235, 0.16);
+    color: #bfdbfe;
+    border-color: rgba(96, 165, 250, 0.24);
+}
+
+html[data-theme="dark"] .category-header {
+    background: linear-gradient(135deg, #1e3a8a, #223150);
+    color: #fff;
+}
+
+html[data-theme="dark"] .item-card,
+html[data-theme="dark"] .user-row,
+html[data-theme="dark"] .employee-stat-card,
+html[data-theme="dark"] .expense-entry-card,
+html[data-theme="dark"] .payroll-day-card,
+html[data-theme="dark"] .payroll-summary-card,
+html[data-theme="dark"] .shift-calendar-day,
+html[data-theme="dark"] .shift-payroll-day-card,
+html[data-theme="dark"] .referral-registration-row,
+html[data-theme="dark"] .app-notification-item {
+    background: #0b1220;
+    border-color: #24344d;
+    color: #e5edf7;
+}
+
+html[data-theme="dark"] .app-notification-item:hover {
+    background: #13223b;
+    border-color: #3b82f6;
+}
+
+html[data-theme="dark"] .app-notification-item-message,
+html[data-theme="dark"] .tutorial-text {
+    color: #c7d2e1;
+}
+
+html[data-theme="dark"] .admin-table th,
+html[data-theme="dark"] table th {
+    background: #17233a;
+    color: #e5edf7;
+}
+
+html[data-theme="dark"] .admin-table td,
+html[data-theme="dark"] .admin-table th,
+html[data-theme="dark"] table td,
+html[data-theme="dark"] table th {
+    border-color: #2a3b55;
+}
+
+html[data-theme="dark"] .modal-overlay {
+    background: rgba(2, 6, 23, 0.74);
+}
+
+html[data-theme="dark"] .modal-header,
+html[data-theme="dark"] .app-notification-panel-head,
+html[data-theme="dark"] .app-notification-panel-note {
+    border-color: #24344d;
+}
+
+html[data-theme="dark"] .tutorial-popover,
+html[data-theme="dark"] .tutorial-start-card {
+    background: #111c30;
+    color: #e5edf7;
+}
+
+html[data-theme="dark"] .tutorial-close-btn,
+html[data-theme="dark"] .tutorial-modal-close,
+html[data-theme="dark"] .app-notification-close {
+    background: #1e293b;
+    color: #e5edf7;
+}
+
+html[data-theme="dark"] .tutorial-start-note,
+html[data-theme="dark"] .tutorial-demo-notice {
+    background: rgba(34, 197, 94, 0.12);
+    color: #86efac;
+}
+
+html[data-theme="dark"] .tutorial-placeholder,
+html[data-theme="dark"] .tutorial-fake-record {
+    background: #0b1220;
+    border-color: #3b82f6;
+}
+
+html[data-theme="dark"] .app-shell-btn {
+    background: rgba(15, 23, 42, 0.9);
+    border-color: rgba(71, 85, 105, 0.82);
+    color: #f8fafc;
+    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.34);
+}
+
+html[data-theme="dark"] .app-notification-badge {
+    border-color: #0f172a;
+}
+
+html[data-theme="dark"] .auth-info-box a,
+html[data-theme="dark"] .referral-source-text {
+    color: #93c5fd;
+}
+
+html[data-theme="dark"] .status-green { border-left-color: #22c55e; }
+html[data-theme="dark"] .status-orange { border-left-color: #fb923c; }
+html[data-theme="dark"] .status-red { border-left-color: #ef4444; }
+html[data-theme="dark"] .status-grey { border-left-color: #64748b; }
+
+@media (max-width: 640px) {
+    .app-shell-controls {
+        top: 9px;
+        right: 9px;
+        gap: 6px;
+    }
+    .app-control-label {
+        display: none;
+    }
+    .app-shell-btn,
+    .app-notification-toggle {
+        width: 34px;
+        min-width: 34px;
+        height: 34px;
+    }
+    .tutorial-launcher {
+        top: 9px;
+        left: 9px;
+        right: auto;
+    }
+    .app-notification-panel {
+        right: -2px;
+        width: min(340px, calc(100vw - 18px));
+        max-height: calc(100vh - 68px);
+    }
+}

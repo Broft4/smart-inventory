@@ -49,6 +49,7 @@ from app.models import (
 )
 from app.database import AsyncSessionLocal
 from app.moysklad import DEFAULT_CATEGORY_NAME, DEFAULT_SUBCATEGORY_NAME, ms_client
+from app.notifications import notify_location_managers
 
 logger = logging.getLogger(__name__)
 
@@ -2305,6 +2306,16 @@ async def create_expense_template(payload: ExpenseTemplateCreateRequest, db: Asy
             'assign_to_employee_by_default': template.assign_to_employee_by_default,
         },
     )
+    await notify_location_managers(
+        db,
+        location_point_id=point.id,
+        actor_user_id=current_user.id,
+        notification_type='expense_template_created',
+        title='Добавлен шаблон расхода',
+        message=f'{current_user.full_name} добавил шаблон расхода «{template.name}» для точки «{point.name}».',
+        url='/payroll',
+        payload={'location': point.name, 'template_id': template.id},
+    )
     await db.commit()
     return await list_expense_templates(point.name, db, current_user)
 
@@ -2441,6 +2452,16 @@ async def create_manual_monthly_expense(payload: ManualMonthlyExpenseCreateReque
             'is_paid': entry.is_paid,
             'comment': entry.comment,
         },
+    )
+    await notify_location_managers(
+        db,
+        location_point_id=point.id,
+        actor_user_id=current_user.id,
+        notification_type='manual_expense_created',
+        title='Добавлен расход',
+        message=f'{current_user.full_name} добавил расход «{entry.custom_name}» на {round(float(entry.amount or 0), 2)} ₽ для точки «{point.name}».',
+        url='/payroll',
+        payload={'location': point.name, 'entry_id': entry.id, 'month_start': month_key.isoformat()},
     )
     await db.commit()
     employee_names = {}
@@ -2770,6 +2791,21 @@ async def _create_employee_adjustment(
             'amount': entry.amount,
             'comment': entry.comment,
         },
+    )
+    notify_title = 'Добавлена премия' if normalized_type == EMPLOYEE_ADJUSTMENT_BONUS else 'Добавлен штраф'
+    notify_message = (
+        f'{current_user.full_name} добавил {label.lower()} для сотрудника {employee.full_name}: '
+        f'{round(float(entry.amount or 0), 2)} ₽, точка «{point.name}».'
+    )
+    await notify_location_managers(
+        db,
+        location_point_id=point.id,
+        actor_user_id=current_user.id,
+        notification_type='employee_bonus_created' if normalized_type == EMPLOYEE_ADJUSTMENT_BONUS else 'employee_penalty_created',
+        title=notify_title,
+        message=notify_message,
+        url='/payroll',
+        payload={'location': point.name, 'entry_id': entry.id, 'employee_user_id': employee.id, 'month_start': month_key.isoformat()},
     )
     await db.commit()
     if normalized_type == EMPLOYEE_ADJUSTMENT_PENALTY:
@@ -6472,6 +6508,19 @@ async def _close_shift_unlocked(shift_id: int, db: AsyncSession, actor_user: Use
             'sales_motivation_amount': computed.sales_motivation_amount,
             'split_count': computed.split_count,
         },
+    )
+    await notify_location_managers(
+        db,
+        location_point_id=point.id,
+        actor_user_id=None if auto else (actor_user.id if actor_user else None),
+        notification_type='work_shift_closed',
+        title='Смена завершена',
+        message=(
+            f'Смена {computed.employee.full_name} за {shift.shift_date.strftime("%d.%m.%Y")} '
+            f'на точке «{point.name}» закрыта. Начислено: {round(float(computed.gross_salary_amount or 0), 2)} ₽.'
+        ),
+        url='/shifts',
+        payload={'location': point.name, 'shift_id': shift.id, 'shift_date': shift.shift_date.isoformat()},
     )
     await db.commit()
     computed = await _build_computed_shift(shift, db)

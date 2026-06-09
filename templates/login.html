@@ -4,6 +4,16 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Вход — UCHETKA</title>
+    <script>
+        (function () {
+            try {
+                var theme = localStorage.getItem('uchetka:theme');
+                if (theme === 'dark') {
+                    document.documentElement.dataset.theme = 'dark';
+                }
+            } catch (error) {}
+        })();
+    </script>
     <link rel="stylesheet" href="/static/css/style.css?v={{ asset_version }}">
     <link rel="icon" type="image/png" href="/static/img/uchetka-mark.png?v={{ asset_version }}">
 </head>

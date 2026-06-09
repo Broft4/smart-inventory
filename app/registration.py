@@ -19,6 +19,7 @@ from app.logic import (
 )
 from app.mailer import MailerConfigurationError, send_email_message
 from app.models import LocationPoint, ReferralLink, RegistrationRequest, User
+from app.notifications import notify_platform_admins
 from app.schemas import (
     ReferralLinkActionResponse,
     ReferralLinkCreateRequest,
@@ -247,6 +248,15 @@ async def create_registration_request(payload: RegistrationCreateRequest, db: As
     await db.commit()
     await db.refresh(row)
 
+    await notify_platform_admins(
+        db,
+        notification_type='registration_request',
+        title='Новая заявка на регистрацию',
+        message=f'{row.full_name} отправил заявку для организации «{row.organization_name}» и точки «{row.location_name}».',
+        url='/admin',
+        payload={'request_id': row.id, 'username': row.username, 'location': row.location_name},
+        commit=True,
+    )
     await _notify_superadmins_about_registration(row, db)
     return RegistrationCreateResponse(
         message='Заявка отправлена. Доступ появится после подтверждения админом.',
