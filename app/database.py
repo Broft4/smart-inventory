@@ -8,11 +8,20 @@ from app.config import settings
 
 
 Base = declarative_base()
+
+
+def _engine_connect_args(database_url: str) -> dict[str, object]:
+    url = str(database_url or '').lower()
+    if url.startswith('sqlite'):
+        return {'timeout': 60}
+    return {}
+
+
 engine = create_async_engine(
     settings.database_url,
     echo=False,
     pool_pre_ping=True,
-    connect_args={'timeout': 60},
+    connect_args=_engine_connect_args(settings.database_url),
 )
 
 

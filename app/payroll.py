@@ -13,7 +13,7 @@ from typing import Any
 from openpyxl import Workbook
 from openpyxl.styles import Font
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import inspect, and_, delete, func, or_, select
 from sqlalchemy.exc import DatabaseError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
@@ -243,14 +243,17 @@ def _ms_client_enabled(token: str | None = None, location: str | None = None) ->
 
 
 def bootstrap_payroll_schema(connection) -> None:
-    tables = {
-        str(row[0])
-        for row in connection.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-    }
-    columns = {
-        str(row[1])
-        for row in connection.exec_driver_sql("PRAGMA table_info(payroll_settings_versions)").fetchall()
-    }
+    inspector = inspect(connection)
+    tables = set(inspector.get_table_names())
+    dialect = str(connection.dialect.name or '').lower()
+    bool_true_default = 'TRUE' if dialect.startswith('postgres') else '1'
+
+    def column_names(table_name: str) -> set[str]:
+        if table_name not in tables:
+            return set()
+        return {str(column['name']) for column in inspector.get_columns(table_name)}
+
+    columns = column_names('payroll_settings_versions')
     if 'bonus_category_ids_json' not in columns:
         connection.exec_driver_sql(
             "ALTER TABLE payroll_settings_versions ADD COLUMN bonus_category_ids_json TEXT NOT NULL DEFAULT '[]'"
@@ -263,10 +266,7 @@ def bootstrap_payroll_schema(connection) -> None:
         )
 
     if 'monthly_expense_entries' in tables:
-        expense_columns = {
-            str(row[1])
-            for row in connection.exec_driver_sql("PRAGMA table_info(monthly_expense_entries)").fetchall()
-        }
+        expense_columns = column_names('monthly_expense_entries')
         if 'expense_date' not in expense_columns:
             connection.exec_driver_sql("ALTER TABLE monthly_expense_entries ADD COLUMN expense_date DATE")
             connection.exec_driver_sql(
@@ -281,20 +281,14 @@ def bootstrap_payroll_schema(connection) -> None:
             )
 
     if 'shift_payroll_category_snapshots' in tables:
-        shift_category_columns = {
-            str(row[1])
-            for row in connection.exec_driver_sql("PRAGMA table_info(shift_payroll_category_snapshots)").fetchall()
-        }
+        shift_category_columns = column_names('shift_payroll_category_snapshots')
         if 'cost_amount' not in shift_category_columns:
             connection.exec_driver_sql(
                 "ALTER TABLE shift_payroll_category_snapshots ADD COLUMN cost_amount FLOAT NOT NULL DEFAULT 0"
             )
 
     if 'employee_bonus_entries' in tables:
-        bonus_columns = {
-            str(row[1])
-            for row in connection.exec_driver_sql("PRAGMA table_info(employee_bonus_entries)").fetchall()
-        }
+        bonus_columns = column_names('employee_bonus_entries')
         if 'bonus_date' not in bonus_columns:
             connection.exec_driver_sql("ALTER TABLE employee_bonus_entries ADD COLUMN bonus_date DATE")
         if 'entry_type' not in bonus_columns:
@@ -302,7 +296,9 @@ def bootstrap_payroll_schema(connection) -> None:
                 f"ALTER TABLE employee_bonus_entries ADD COLUMN entry_type VARCHAR(20) NOT NULL DEFAULT '{EMPLOYEE_ADJUSTMENT_BONUS}'"
             )
         if 'is_active' not in bonus_columns:
-            connection.exec_driver_sql("ALTER TABLE employee_bonus_entries ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT 1")
+            connection.exec_driver_sql(
+                f"ALTER TABLE employee_bonus_entries ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT {bool_true_default}"
+            )
         if 'updated_by_user_id' not in bonus_columns:
             connection.exec_driver_sql("ALTER TABLE employee_bonus_entries ADD COLUMN updated_by_user_id INTEGER")
         connection.exec_driver_sql(
@@ -310,44 +306,23 @@ def bootstrap_payroll_schema(connection) -> None:
         )
         connection.exec_driver_sql("UPDATE employee_bonus_entries SET bonus_date = month_start WHERE bonus_date IS NULL")
 
-    if 'sales_motivation_product_catalog_cache' not in tables:
-        connection.exec_driver_sql(
-            "CREATE TABLE sales_motivation_product_catalog_cache ("
-            "id INTEGER NOT NULL PRIMARY KEY, "
-            "location_point_id INTEGER NOT NULL, "
-            "no_sales_days INTEGER NOT NULL DEFAULT 0, "
-            "products_json TEXT NOT NULL DEFAULT '[]', "
-            "product_count INTEGER NOT NULL DEFAULT 0, "
-            "source_refreshed_at DATETIME NOT NULL, "
-            "created_at DATETIME NOT NULL, "
-            "updated_at DATETIME NOT NULL, "
-            "FOREIGN KEY(location_point_id) REFERENCES location_points (id) ON DELETE CASCADE, "
-            "CONSTRAINT uq_sales_motivation_catalog_location_days UNIQUE (location_point_id, no_sales_days)"
-            ")"
-        )
-        connection.exec_driver_sql(
-            "CREATE INDEX ix_sales_motivation_catalog_location_days "
-            "ON sales_motivation_product_catalog_cache (location_point_id, no_sales_days)"
-        )
+    if 'sales_motivation_product_catalog_cache' in tables:
+        # Таблица создаётся через SQLAlchemy-модели. Здесь оставлен только защитный блок
+        # для будущих точечных миграций, чтобы bootstrap работал и в SQLite, и в PostgreSQL.
+        pass
 
     if 'sales_motivation_models' in tables:
-        motivation_columns = {
-            str(row[1])
-            for row in connection.exec_driver_sql("PRAGMA table_info(sales_motivation_models)").fetchall()
-        }
+        motivation_columns = column_names('sales_motivation_models')
         if 'include_fiscalized_sales' not in motivation_columns:
             connection.exec_driver_sql(
-                "ALTER TABLE sales_motivation_models ADD COLUMN include_fiscalized_sales BOOLEAN NOT NULL DEFAULT 1"
+                f"ALTER TABLE sales_motivation_models ADD COLUMN include_fiscalized_sales BOOLEAN NOT NULL DEFAULT {bool_true_default}"
             )
 
     if 'shift_sales_motivation_snapshots' in tables:
-        motivation_snapshot_columns = {
-            str(row[1])
-            for row in connection.exec_driver_sql("PRAGMA table_info(shift_sales_motivation_snapshots)").fetchall()
-        }
+        motivation_snapshot_columns = column_names('shift_sales_motivation_snapshots')
         if 'include_fiscalized_sales' not in motivation_snapshot_columns:
             connection.exec_driver_sql(
-                "ALTER TABLE shift_sales_motivation_snapshots ADD COLUMN include_fiscalized_sales BOOLEAN NOT NULL DEFAULT 1"
+                f"ALTER TABLE shift_sales_motivation_snapshots ADD COLUMN include_fiscalized_sales BOOLEAN NOT NULL DEFAULT {bool_true_default}"
             )
         if 'fiscalization_status' not in motivation_snapshot_columns:
             connection.exec_driver_sql(
