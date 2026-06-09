@@ -4307,3 +4307,39 @@ html[data-theme="dark"] .discrepancy-banner {
         max-height: calc(100vh - 68px);
     }
 }
+
+/* Dark theme fixes for location management modal */
+html[data-theme="dark"] .location-manage-row {
+    background: linear-gradient(180deg, #111c30 0%, #0b1220 100%) !important;
+    border-color: #24344d !important;
+    color: #e5edf7 !important;
+    box-shadow: none !important;
+}
+
+html[data-theme="dark"] .location-manage-row:hover {
+    background: #13223b !important;
+    border-color: #3b82f6 !important;
+}
+
+html[data-theme="dark"] .location-manage-row.active {
+    background: rgba(37, 99, 235, 0.24) !important;
+    border-color: rgba(96, 165, 250, 0.62) !important;
+    box-shadow: 0 12px 26px rgba(15, 23, 42, 0.34) !important;
+}
+
+html[data-theme="dark"] .location-manage-row strong {
+    color: #f8fafc !important;
+}
+
+html[data-theme="dark"] .location-manage-row .muted-text,
+html[data-theme="dark"] .location-manage-title,
+html[data-theme="dark"] .location-manage-row-arrow {
+    color: #9fb0c7 !important;
+}
+
+html[data-theme="dark"] .employee-empty-state {
+    background: #0b1220 !important;
+    border-color: #24344d !important;
+    color: #9fb0c7 !important;
+}
+
