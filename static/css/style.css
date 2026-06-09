@@ -3864,7 +3864,7 @@ html[data-theme="dark"] {
 }
 
 html[data-theme="dark"] body {
-    background: radial-gradient(circle at top left, rgba(37, 99, 235, 0.18), transparent 34%), #0f172a;
+    background: radial-gradient(circle at top left, rgba(59, 130, 246, 0.22), transparent 36%), #12213a;
     color: #e5edf7;
 }
 
@@ -3894,18 +3894,18 @@ html[data-theme="dark"] .employee-tools-card,
 html[data-theme="dark"] .warning-card,
 html[data-theme="dark"] .admin-hero-card,
 html[data-theme="dark"] .app-notification-panel {
-    background: #111c30;
-    border-color: #24344d;
-    color: #e5edf7;
+    background: #17243a;
+    border-color: #2c3f5c;
+    color: #e8f1fb;
     box-shadow: 0 18px 46px rgba(0, 0, 0, 0.34);
 }
 
 html[data-theme="dark"] input,
 html[data-theme="dark"] select,
 html[data-theme="dark"] textarea {
-    background: #0b1220;
-    border-color: #334155;
-    color: #e5edf7;
+    background: #132038;
+    border-color: #3a4f6d;
+    color: #e8f1fb;
 }
 
 html[data-theme="dark"] input::placeholder,
@@ -3918,15 +3918,15 @@ html[data-theme="dark"] .employee-view-btn,
 html[data-theme="dark"] .payroll-tab-btn,
 html[data-theme="dark"] .payroll-collapse-btn,
 html[data-theme="dark"] .shift-modal-cancel-btn {
-    background: #1e293b;
-    color: #e5edf7;
-    border-color: #334155;
+    background: #25354d;
+    color: #e8f1fb;
+    border-color: #3a4f6d;
 }
 
 html[data-theme="dark"] .btn.secondary:hover,
 html[data-theme="dark"] .employee-view-btn:hover,
 html[data-theme="dark"] .payroll-tab-btn:hover {
-    background: #26364d;
+    background: #2d4361;
 }
 
 html[data-theme="dark"] .hint-box,
@@ -3948,19 +3948,20 @@ html[data-theme="dark"] .item-card,
 html[data-theme="dark"] .user-row,
 html[data-theme="dark"] .employee-stat-card,
 html[data-theme="dark"] .expense-entry-card,
+html[data-theme="dark"] .expense-template-card,
 html[data-theme="dark"] .payroll-day-card,
 html[data-theme="dark"] .payroll-summary-card,
 html[data-theme="dark"] .shift-calendar-day,
 html[data-theme="dark"] .shift-payroll-day-card,
 html[data-theme="dark"] .referral-registration-row,
 html[data-theme="dark"] .app-notification-item {
-    background: #0b1220;
-    border-color: #24344d;
-    color: #e5edf7;
+    background: #132038;
+    border-color: #2c3f5c;
+    color: #e8f1fb;
 }
 
 html[data-theme="dark"] .app-notification-item:hover {
-    background: #13223b;
+    background: #1b3150;
     border-color: #3b82f6;
 }
 
@@ -3971,15 +3972,15 @@ html[data-theme="dark"] .tutorial-text {
 
 html[data-theme="dark"] .admin-table th,
 html[data-theme="dark"] table th {
-    background: #17233a;
-    color: #e5edf7;
+    background: #1a2b46;
+    color: #e8f1fb;
 }
 
 html[data-theme="dark"] .admin-table td,
 html[data-theme="dark"] .admin-table th,
 html[data-theme="dark"] table td,
 html[data-theme="dark"] table th {
-    border-color: #2a3b55;
+    border-color: #314967;
 }
 
 html[data-theme="dark"] .modal-overlay {
@@ -3989,13 +3990,13 @@ html[data-theme="dark"] .modal-overlay {
 html[data-theme="dark"] .modal-header,
 html[data-theme="dark"] .app-notification-panel-head,
 html[data-theme="dark"] .app-notification-panel-note {
-    border-color: #24344d;
+    border-color: #2c3f5c;
 }
 
 html[data-theme="dark"] .tutorial-popover,
 html[data-theme="dark"] .tutorial-start-card {
-    background: #111c30;
-    color: #e5edf7;
+    background: #17243a;
+    color: #e8f1fb;
 }
 
 html[data-theme="dark"] .tutorial-close-btn,
@@ -4013,19 +4014,19 @@ html[data-theme="dark"] .tutorial-demo-notice {
 
 html[data-theme="dark"] .tutorial-placeholder,
 html[data-theme="dark"] .tutorial-fake-record {
-    background: #0b1220;
+    background: #132038;
     border-color: #3b82f6;
 }
 
 html[data-theme="dark"] .app-shell-btn {
-    background: rgba(15, 23, 42, 0.9);
-    border-color: rgba(71, 85, 105, 0.82);
+    background: rgba(23, 36, 58, 0.94);
+    border-color: rgba(95, 119, 153, 0.82);
     color: #f8fafc;
     box-shadow: 0 14px 36px rgba(0, 0, 0, 0.34);
 }
 
 html[data-theme="dark"] .app-notification-badge {
-    border-color: #0f172a;
+    border-color: #12213a;
 }
 
 html[data-theme="dark"] .auth-info-box a,
@@ -4057,21 +4058,43 @@ html[data-theme="dark"] .payroll-day-grid--emphasis > div,
 html[data-theme="dark"] .expense-create-card,
 html[data-theme="dark"] .expense-section,
 html[data-theme="dark"] .expense-checkbox-card,
+html[data-theme="dark"] .expense-template-card,
 html[data-theme="dark"] .expense-entry-card.manual,
 html[data-theme="dark"] .audit-day-card,
 html[data-theme="dark"] .payroll-collapse--nested,
 html[data-theme="dark"] .shift-date-picker-popover,
 html[data-theme="dark"] .payroll-loading-step {
-    background: #0b1220 !important;
-    border-color: #24344d !important;
-    color: #e5edf7 !important;
+    background: #132038 !important;
+    border-color: #2c3f5c !important;
+    color: #e8f1fb !important;
+}
+
+html[data-theme="dark"] .expense-template-card {
+    background: linear-gradient(180deg, #1a2b46 0%, #132038 100%) !important;
+    border-color: #2c3f5c !important;
+    color: #e8f1fb !important;
+    box-shadow: 0 14px 34px rgba(2, 6, 23, 0.26);
+}
+
+html[data-theme="dark"] .expense-template-card h4,
+html[data-theme="dark"] .expense-template-card strong {
+    color: #f8fafc !important;
+}
+
+html[data-theme="dark"] .expense-template-card .expense-template-meta,
+html[data-theme="dark"] .expense-template-card .expense-template-meta span {
+    color: #b8c7dc !important;
+}
+
+html[data-theme="dark"] .expense-template-card.inactive {
+    opacity: 0.72;
 }
 
 html[data-theme="dark"] .summary-kpi-card.neutral,
 html[data-theme="dark"] .summary-topline-item,
 html[data-theme="dark"] .employee-stat-card,
 html[data-theme="dark"] .payroll-day-grid--emphasis > div {
-    background: linear-gradient(180deg, #111c30 0%, #0b1220 100%) !important;
+    background: linear-gradient(180deg, #1a2b46 0%, #132038 100%) !important;
 }
 
 html[data-theme="dark"] .summary-kpi-card.plus,
@@ -4217,22 +4240,22 @@ html[data-theme="dark"] .modal-tab-btn,
 html[data-theme="dark"] .icon-action-btn,
 html[data-theme="dark"] .shift-date-picker-cell,
 html[data-theme="dark"] .shift-calendar-weekdays span {
-    background: #111c30 !important;
-    border-color: #24344d !important;
+    background: #17243a !important;
+    border-color: #2c3f5c !important;
     color: #dbeafe !important;
 }
 
 html[data-theme="dark"] .shift-calendar-cell,
 html[data-theme="dark"] .shift-calendar-entry {
-    background: linear-gradient(180deg, #111c30 0%, #0b1220 100%) !important;
-    border-color: #24344d !important;
-    color: #e5edf7 !important;
+    background: linear-gradient(180deg, #1a2b46 0%, #132038 100%) !important;
+    border-color: #2c3f5c !important;
+    color: #e8f1fb !important;
 }
 
 html[data-theme="dark"] .shift-date-picker-cell.is-disabled,
 html[data-theme="dark"] .shift-date-picker-cell:disabled {
-    background: #111827 !important;
-    border-color: #1f2937 !important;
+    background: #152238 !important;
+    border-color: #26364d !important;
     color: #64748b !important;
 }
 
@@ -4246,7 +4269,7 @@ html[data-theme="dark"] .admin-problem-export-toolbar,
 html[data-theme="dark"] .employee-view-switch,
 html[data-theme="dark"] .employee-shift-line.total,
 html[data-theme="dark"] .shift-days-filter-bar {
-    border-color: #24344d !important;
+    border-color: #2c3f5c !important;
 }
 
 html[data-theme="dark"] .payroll-loading-step span:not(.payroll-loading-dot),
@@ -4275,9 +4298,9 @@ html[data-theme="dark"] .discrepancy-banner {
 
 @media (max-width: 640px) {
     html[data-theme="dark"] .payroll-category-table tr {
-        background: #0b1220 !important;
-        border-color: #24344d !important;
-        color: #e5edf7 !important;
+        background: #132038 !important;
+        border-color: #2c3f5c !important;
+        color: #e8f1fb !important;
     }
 }
 
@@ -4310,14 +4333,14 @@ html[data-theme="dark"] .discrepancy-banner {
 
 /* Dark theme fixes for location management modal */
 html[data-theme="dark"] .location-manage-row {
-    background: linear-gradient(180deg, #111c30 0%, #0b1220 100%) !important;
-    border-color: #24344d !important;
-    color: #e5edf7 !important;
+    background: linear-gradient(180deg, #1a2b46 0%, #132038 100%) !important;
+    border-color: #2c3f5c !important;
+    color: #e8f1fb !important;
     box-shadow: none !important;
 }
 
 html[data-theme="dark"] .location-manage-row:hover {
-    background: #13223b !important;
+    background: #1b3150 !important;
     border-color: #3b82f6 !important;
 }
 
@@ -4338,8 +4361,8 @@ html[data-theme="dark"] .location-manage-row-arrow {
 }
 
 html[data-theme="dark"] .employee-empty-state {
-    background: #0b1220 !important;
-    border-color: #24344d !important;
+    background: #132038 !important;
+    border-color: #2c3f5c !important;
     color: #9fb0c7 !important;
 }
 
