@@ -6674,6 +6674,8 @@ async def _serialize_shift_lightweight(
         employee_penalties: list[dict[str, Any]] | None,
         gross_salary_amount: float,
         net_salary_amount: float,
+        payroll_deferred: bool = False,
+        payroll_deferred_reason: str | None = None,
     ) -> dict[str, Any]:
         return {
             'id': shift.id,
@@ -6698,6 +6700,8 @@ async def _serialize_shift_lightweight(
             'employee_penalties': employee_penalties or [],
             'gross_salary_amount': gross_salary_amount,
             'net_salary_amount': net_salary_amount,
+            'payroll_deferred': payroll_deferred,
+            'payroll_deferred_reason': payroll_deferred_reason,
         }
 
     snapshot = await db.scalar(
@@ -6778,7 +6782,29 @@ async def _serialize_shift_lightweight(
         )
 
     today = get_moscow_today()
-    should_show_realized_amounts = shift.status == 'closed' or shift.shift_date <= today
+    if shift.status != 'closed':
+        return _pack_lightweight(
+            is_closed=False,
+            closed_at=_datetime_to_str(shift.closed_at),
+            gross_sales_amount=0.0,
+            return_amount=0.0,
+            net_sales_amount=0.0,
+            exit_amount=0.0,
+            bonus_amount=0.0,
+            category_earnings_total=0.0,
+            employee_bonus_amount=0.0,
+            employee_bonuses=[],
+            sales_motivation_amount=0.0,
+            sales_motivations=[],
+            employee_penalty_amount=0.0,
+            employee_penalties=[],
+            gross_salary_amount=0.0,
+            net_salary_amount=0.0,
+            payroll_deferred=True,
+            payroll_deferred_reason='open_shift_snapshot_only',
+        )
+
+    should_show_realized_amounts = shift.status == 'closed' or shift.shift_date < today
     if should_show_realized_amounts:
         computed = await _build_computed_shift(shift, db, allow_live_sales_motivation=False)
         return _pack_lightweight(
@@ -6869,7 +6895,8 @@ async def list_work_shifts(location: str, date_from: date, date_to: date, db: As
         }
 
     point = points[0]
-    await _ensure_shift_snapshots_for_point(point, db)
+    # Календарь смен должен открываться быстро: не запускаем автозакрытие и live-расчёты из GET-запроса.
+    # Закрытые смены берутся из snapshots, а открытые показываются без актуальной зарплаты.
     query = select(WorkShift).where(
         WorkShift.location_point_id == point.id,
         WorkShift.shift_date >= date_from,
@@ -6926,7 +6953,8 @@ async def list_work_shift_day_summary(location: str, date_from: date, date_to: d
         }
 
     point = points[0]
-    await _ensure_shift_snapshots_for_point(point, db)
+    # Календарь смен должен открываться быстро: не запускаем автозакрытие и live-расчёты из GET-запроса.
+    # Закрытые смены берутся из snapshots, а открытые показываются без актуальной зарплаты.
     query = select(WorkShift).where(
         WorkShift.location_point_id == point.id,
         WorkShift.shift_date >= date_from,

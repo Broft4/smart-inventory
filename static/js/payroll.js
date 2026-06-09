@@ -88,6 +88,18 @@ function formatMoney(value) {
     return `${num.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`;
 }
 
+function isShiftPayrollDeferred(shift) {
+    return Boolean(shift?.payroll_deferred || shift?.payroll_deferred_reason);
+}
+
+function shiftPayrollDeferredLabel() {
+    return 'Расчёт после закрытия';
+}
+
+function shiftPayrollAmount(shift, key = 'gross_salary_amount') {
+    return isShiftPayrollDeferred(shift) ? shiftPayrollDeferredLabel() : formatMoney(shift?.[key] || 0);
+}
+
 function isPayrollReturnsCategory(category) {
     const categoryId = String(category?.category_id || '').trim();
     const categoryName = String(category?.category_name || '').trim();
@@ -1478,7 +1490,7 @@ function renderShiftCalendar() {
                         <strong>${escapeHtml(shift.employee_name)}</strong>
                         <span class="payroll-chip ${shift.is_closed ? 'green' : 'orange'}">${shift.is_closed ? 'Закрыта' : 'Открыта'}</span>
                     </div>
-                    <div class="shift-calendar-entry-meta">${formatMoney(shift.gross_salary_amount)}</div>
+                    <div class="shift-calendar-entry-meta">${shiftPayrollAmount(shift)}</div>
                     <div class="shift-calendar-entry-actions">
                         ${!shift.is_closed ? `<button type="button" class="btn secondary btn-inline" onclick="closeAdminShift(${shift.id})">Закрыть</button>` : ''}
                         <button type="button" class="btn danger btn-inline" onclick="deleteShift(${shift.id})">Убрать</button>

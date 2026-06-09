@@ -42,6 +42,18 @@ function formatMoney(value) {
     return `${num.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`;
 }
 
+function isShiftPayrollDeferred(shift) {
+    return Boolean(shift?.payroll_deferred || shift?.payroll_deferred_reason);
+}
+
+function shiftPayrollDeferredLabel() {
+    return 'Расчёт после закрытия';
+}
+
+function shiftPayrollAmount(shift, key = 'gross_salary_amount') {
+    return isShiftPayrollDeferred(shift) ? shiftPayrollDeferredLabel() : formatMoney(shift?.[key] || 0);
+}
+
 function escapeHtml(value) {
     return String(value ?? '')
         .replace(/&/g, '&amp;')
@@ -452,7 +464,7 @@ function renderPayrollDays() {
                 <div><span class="summary-label">Бонус к выходу</span><strong>${formatMoney(day.bonus_amount)}</strong></div>
                 <div><span class="summary-label">Бонус по категориям</span><strong>${formatMoney(day.category_earnings_total)}</strong></div>
                 <div><span class="summary-label">Мотивация</span><strong>${formatMoney(day.sales_motivation_amount || 0)}</strong></div>
-                <div><span class="summary-label">Итого</span><strong>${formatMoney(day.gross_salary_amount)}</strong></div>
+                <div><span class="summary-label">Итого</span><strong>${shiftPayrollAmount(day)}</strong></div>
             </div>
             ${(day.id && !day.is_closed) ? `
                 <div class="shift-detail-actions">
@@ -611,7 +623,7 @@ function renderShiftCalendar() {
                                 >−</button>
                             </div>
                         </div>
-                        <div class="shift-calendar-entry-meta">${formatMoney(shift.gross_salary_amount)}</div>
+                        <div class="shift-calendar-entry-meta">${shiftPayrollAmount(shift)}</div>
                         <div class="shift-calendar-entry-actions">
                             ${!shift.is_closed ? `<button type="button" class="btn secondary btn-inline" onclick="closeAdminShift(${shift.id})">Закрыть</button>` : ''}
                             <button type="button" class="btn danger btn-inline" onclick="deleteShift(${shift.id})">Убрать</button>
@@ -645,19 +657,21 @@ function renderShiftCalendar() {
             const compactMode = isMobileCompactMode();
             const statusLabel = shift.is_closed ? 'Завершена' : (day.date > today ? 'Назначена' : (day.date === today ? 'Сегодня' : 'Открыта'));
             const statusClass = shift.is_closed ? 'closed' : (day.date > today ? 'planned' : 'open');
-            const lines = [
-                `<div class="employee-shift-line"><span>Выход</span><strong>${formatMoney(shift.exit_amount || 0)}</strong></div>`,
-                `<div class="employee-shift-line"><span>Бонус</span><strong>${formatMoney(shift.bonus_amount || 0)}</strong></div>`,
-                `<div class="employee-shift-line"><span>Категории</span><strong>${formatMoney(shift.category_earnings_total || 0)}</strong></div>`,
-                `<div class="employee-shift-line"><span>Мотивация</span><strong>${formatMoney(shift.sales_motivation_amount || 0)}</strong></div>`,
-            ];
-            if (shift.is_closed || day.date <= today) {
+            const lines = isShiftPayrollDeferred(shift)
+                ? [`<div class="employee-shift-line total"><span>Зарплата</span><strong>${shiftPayrollDeferredLabel()}</strong></div>`]
+                : [
+                    `<div class="employee-shift-line"><span>Выход</span><strong>${formatMoney(shift.exit_amount || 0)}</strong></div>`,
+                    `<div class="employee-shift-line"><span>Бонус</span><strong>${formatMoney(shift.bonus_amount || 0)}</strong></div>`,
+                    `<div class="employee-shift-line"><span>Категории</span><strong>${formatMoney(shift.category_earnings_total || 0)}</strong></div>`,
+                    `<div class="employee-shift-line"><span>Мотивация</span><strong>${formatMoney(shift.sales_motivation_amount || 0)}</strong></div>`,
+                ];
+            if (!isShiftPayrollDeferred(shift) && (shift.is_closed || day.date <= today)) {
                 lines.push(`<div class="employee-shift-line total"><span>${shift.is_closed ? 'Итог' : 'Промежуточно'}</span><strong>${formatMoney(shift.gross_salary_amount || 0)}</strong></div>`);
             }
             body = compactMode
                 ? `
                     <div class="employee-shift-status-dot ${statusClass}" aria-label="${statusLabel}" title="${statusLabel}"></div>
-                    ${(shift.is_closed || day.date <= today) ? `<div class="employee-shift-compact-total">${formatMoney(shift.gross_salary_amount || 0)}</div>` : ''}
+                    ${(shift.is_closed || day.date <= today) ? `<div class="employee-shift-compact-total">${shiftPayrollAmount(shift)}</div>` : ''}
                 `
                 : `
                     <div class="employee-shift-status ${statusClass}">${statusLabel}</div>
