@@ -47,24 +47,6 @@ class User(Base):
         foreign_keys='AdminLocationAccess.granted_by_user_id',
     )
     password_reset_requests: Mapped[list['PasswordResetRequest']] = relationship(back_populates='user', cascade='all, delete-orphan')
-    notifications: Mapped[list['AppNotification']] = relationship(back_populates='user', cascade='all, delete-orphan')
-
-
-class AppNotification(Base):
-    __tablename__ = 'app_notifications'
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
-    notification_type: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
-    title: Mapped[str] = mapped_column(String(255), nullable=False)
-    message: Mapped[str] = mapped_column(Text, nullable=False)
-    url: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    is_read: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
-    read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-
-    user: Mapped[User] = relationship(back_populates='notifications')
 
 
 class PasswordResetRequest(Base):
@@ -351,7 +333,7 @@ class PayrollCategoryRateVersion(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     settings_version_id: Mapped[int] = mapped_column(ForeignKey('payroll_settings_versions.id', ondelete='CASCADE'), nullable=False, index=True)
-    category_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    category_id: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
     category_name: Mapped[str] = mapped_column(String(255), nullable=False)
     rate_percent: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 
@@ -413,7 +395,7 @@ class ShiftPayrollCategorySnapshot(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     snapshot_id: Mapped[int] = mapped_column(ForeignKey('shift_payroll_snapshots.id', ondelete='CASCADE'), nullable=False, index=True)
-    category_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    category_id: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
     category_name: Mapped[str] = mapped_column(String(255), nullable=False)
     rate_percent: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     sales_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
