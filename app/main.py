@@ -247,7 +247,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260609-shifts-fast-snapshot-v1'
+templates.env.globals['asset_version'] = '20260609-mobile-payroll-status-v1'
 
 
 @app.middleware('http')

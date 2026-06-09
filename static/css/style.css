@@ -2430,6 +2430,58 @@ body.modal-open {
         min-height: 120px;
         padding: 8px;
     }
+
+    .payroll-filters-card {
+        overflow: hidden;
+    }
+
+    .payroll-filter-grid,
+    .payroll-filter-grid > label,
+    .payroll-filter-actions-inline {
+        min-width: 0;
+        max-width: 100%;
+    }
+
+    .payroll-filter-grid input,
+    .payroll-filter-grid select {
+        display: block;
+        min-width: 0;
+        max-width: 100%;
+    }
+
+    .inventory-status.payroll-loading-status {
+        padding: 12px;
+    }
+
+    .payroll-loading-head {
+        align-items: flex-start;
+        gap: 8px;
+        line-height: 1.25;
+    }
+
+    .payroll-loading-head strong {
+        font-size: 15px;
+    }
+
+    .payroll-loading-steps {
+        gap: 8px;
+    }
+
+    .payroll-loading-step {
+        grid-template-columns: 12px minmax(0, 1fr);
+        gap: 8px;
+        padding: 8px;
+    }
+
+    .payroll-loading-step strong {
+        font-size: 12.5px;
+    }
+
+    .payroll-loading-step span:not(.payroll-loading-dot),
+    .payroll-loading-note {
+        font-size: 11.5px;
+        line-height: 1.32;
+    }
 }
 
 
@@ -3302,6 +3354,7 @@ button:disabled.loading {
 
 .payroll-loading-status {
     overflow: hidden;
+    max-width: 100%;
 }
 
 .payroll-loading-head {
@@ -3309,28 +3362,46 @@ button:disabled.loading {
     align-items: center;
     gap: 10px;
     margin-bottom: 12px;
+    min-width: 0;
+}
+
+.payroll-loading-head strong {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: normal;
 }
 
 .payroll-loading-steps {
     display: grid;
     gap: 8px;
+    min-width: 0;
+    max-width: 100%;
 }
 
 .payroll-loading-step {
     display: grid;
-    grid-template-columns: 14px 1fr;
+    grid-template-columns: 14px minmax(0, 1fr);
     gap: 10px;
     align-items: start;
     padding: 8px 10px;
     border-radius: 10px;
     background: rgba(255, 255, 255, 0.58);
     border: 1px solid rgba(31, 92, 168, 0.10);
+    min-width: 0;
+    max-width: 100%;
+}
+
+.payroll-loading-step > div {
+    min-width: 0;
+    max-width: 100%;
 }
 
 .payroll-loading-step strong {
     display: block;
     font-size: 13px;
     line-height: 1.25;
+    overflow-wrap: anywhere;
+    word-break: normal;
 }
 
 .payroll-loading-step span:not(.payroll-loading-dot) {
@@ -3338,6 +3409,8 @@ button:disabled.loading {
     margin-top: 2px;
     font-size: 12px;
     opacity: 0.78;
+    overflow-wrap: anywhere;
+    word-break: normal;
 }
 
 .payroll-loading-dot {
