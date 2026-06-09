@@ -58,6 +58,14 @@ function isAdminRole() {
     return ['platform_admin', 'admin', 'superadmin'].includes(payrollState.user.role);
 }
 
+function shouldShowPayrollCostColumns() {
+    return isAdminRole();
+}
+
+function payrollCategoryEmptyColspan() {
+    return shouldShowPayrollCostColumns() ? 7 : 6;
+}
+
 function isSuperadminRole() {
     return payrollState.user.role === 'platform_admin' || payrollState.user.role === 'superadmin';
 }
@@ -955,16 +963,17 @@ function renderShiftCategoryBreakdown(categories = []) {
         return '<div class="muted-text">По этой смене нет начислений по категориям.</div>';
     }
     const totals = sumPayrollCategoryColumns(rows);
+    const showCostColumns = shouldShowPayrollCostColumns();
     return `
         <div class="table-wrap payroll-table-wrap payroll-shift-categories-wrap">
-            <table class="table payroll-table payroll-category-table payroll-shift-category-table">
+            <table class="table payroll-table payroll-category-table payroll-shift-category-table${showCostColumns ? '' : ' payroll-category-table--employee'}">
                 <thead>
                     <tr>
                         <th>Категория</th>
                         <th>%</th>
                         <th>Продажи</th>
                         <th>Возвраты</th>
-                        <th>Себестоимость</th>
+                        ${showCostColumns ? '<th>Себестоимость</th>' : ''}
                         <th>Начислено</th>
                         <th>Прибыль</th>
                     </tr>
@@ -976,7 +985,7 @@ function renderShiftCategoryBreakdown(categories = []) {
                             <td data-label="%">${formatPayrollCategoryRate(category)}</td>
                             <td data-label="Продажи">${formatMoney(category.sales_amount || 0)}</td>
                             <td data-label="Возвраты">${formatMoney(category.return_amount || 0)}</td>
-                            <td data-label="Себестоимость">${formatMoney(category.cost_amount || 0)}</td>
+                            ${showCostColumns ? `<td data-label="Себестоимость">${formatMoney(category.cost_amount || 0)}</td>` : ''}
                             <td data-label="Начислено"><strong>${formatMoney(category.earning_amount || 0)}</strong></td>
                             <td data-label="Прибыль"><strong>${formatMoney(normalizeCategoryProfit(category))}</strong></td>
                         </tr>
@@ -986,7 +995,7 @@ function renderShiftCategoryBreakdown(categories = []) {
                         <td data-label="%">—</td>
                         <td data-label="Продажи"><strong>${formatMoney(totals.sales_amount)}</strong></td>
                         <td data-label="Возвраты"><strong>${formatMoney(totals.return_amount)}</strong></td>
-                        <td data-label="Себестоимость"><strong>${formatMoney(totals.cost_amount)}</strong></td>
+                        ${showCostColumns ? `<td data-label="Себестоимость"><strong>${formatMoney(totals.cost_amount)}</strong></td>` : ''}
                         <td data-label="Начислено"><strong>${formatMoney(totals.earning_amount)}</strong></td>
                         <td data-label="Прибыль"><strong>${formatMoney(totals.profit_amount)}</strong></td>
                     </tr>
@@ -1180,6 +1189,7 @@ function renderPayrollCategoryTable(categories = payrollState.summary?.categorie
     }
 
     const totals = sumPayrollCategoryColumns(filtered);
+    const showCostColumns = shouldShowPayrollCostColumns();
     categoryTbody.innerHTML = filtered.length
         ? `${filtered.map(category => `
             <tr>
@@ -1187,7 +1197,7 @@ function renderPayrollCategoryTable(categories = payrollState.summary?.categorie
                 <td data-label="%">${formatPayrollCategoryRate(category)}</td>
                 <td data-label="Продажи">${formatMoney(category.sales_amount)}</td>
                 <td data-label="Возвраты">${formatMoney(category.return_amount)}</td>
-                <td data-label="Себестоимость">${formatMoney(category.cost_amount || 0)}</td>
+                ${showCostColumns ? `<td data-label="Себестоимость">${formatMoney(category.cost_amount || 0)}</td>` : ''}
                 <td data-label="Начислено"><strong>${formatMoney(category.earning_amount)}</strong></td>
                 <td data-label="Прибыль"><strong>${formatMoney(normalizeCategoryProfit(category))}</strong></td>
             </tr>
@@ -1197,11 +1207,11 @@ function renderPayrollCategoryTable(categories = payrollState.summary?.categorie
             <td data-label="%">—</td>
             <td data-label="Продажи"><strong>${formatMoney(totals.sales_amount)}</strong></td>
             <td data-label="Возвраты"><strong>${formatMoney(totals.return_amount)}</strong></td>
-            <td data-label="Себестоимость"><strong>${formatMoney(totals.cost_amount)}</strong></td>
+            ${showCostColumns ? `<td data-label="Себестоимость"><strong>${formatMoney(totals.cost_amount)}</strong></td>` : ''}
             <td data-label="Начислено"><strong>${formatMoney(totals.earning_amount)}</strong></td>
             <td data-label="Прибыль"><strong>${formatMoney(totals.profit_amount)}</strong></td>
         </tr>`
-        : '<tr><td colspan="7" class="muted-text">По текущим фильтрам категории не найдены.</td></tr>';
+        : `<tr><td colspan="${payrollCategoryEmptyColspan()}" class="muted-text">По текущим фильтрам категории не найдены.</td></tr>`;
 }
 
 function applyPayrollCategoryFiltersFromUi() {

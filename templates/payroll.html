@@ -143,14 +143,14 @@
                     <div class="payroll-category-filter-meta muted-text" id="payroll-category-filter-meta">Показано категорий: 0</div>
                 </div>
                 <div class="table-wrap payroll-table-wrap">
-                    <table class="table payroll-table payroll-category-table">
+                    <table class="table payroll-table payroll-category-table{% if user.role not in ['platform_admin', 'admin', 'superadmin'] %} payroll-category-table--employee{% endif %}">
                         <thead>
                             <tr>
                                 <th>Категория</th>
                                 <th>%</th>
                                 <th>Выручка</th>
                                 <th>Возвраты</th>
-                                <th>Себестоимость</th>
+                                {% if user.role in ['platform_admin', 'admin', 'superadmin'] %}<th>Себестоимость</th>{% endif %}
                                 <th>Начислено</th>
                                 <th>Прибыль</th>
                             </tr>

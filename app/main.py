@@ -247,7 +247,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260609-theme-notifications-v3'
+templates.env.globals['asset_version'] = '20260609-employee-payroll-cost-hidden-v1'
 
 
 @app.middleware('http')
