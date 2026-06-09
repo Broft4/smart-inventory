@@ -152,7 +152,7 @@
                                 <th>Возвраты</th>
                                 {% if user.role in ['platform_admin', 'admin', 'superadmin'] %}<th>Себестоимость</th>{% endif %}
                                 <th>Начислено</th>
-                                <th>Прибыль</th>
+                                {% if user.role in ['platform_admin', 'admin', 'superadmin'] %}<th>Прибыль</th>{% endif %}
                             </tr>
                         </thead>
                         <tbody id="payroll-category-tbody"></tbody>
