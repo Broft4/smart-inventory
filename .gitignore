@@ -13,3 +13,4 @@ inventory.db-shm
 *.db-shm
 .env
 .env.*
+backups/
