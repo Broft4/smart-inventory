@@ -1245,6 +1245,7 @@ function renderReferrals(links) {
                     <div class="referral-link-copy-row">
                         <input type="text" readonly value="${escapeHtml(link.url || '')}">
                         <button class="btn secondary btn-inline" type="button" onclick="copyReferralLink('${escapeHtml(link.url || '')}')">Скопировать</button>
+                        <button class="btn danger btn-inline" type="button" onclick="deleteReferralLink(${Number(link.id)})">Удалить</button>
                     </div>
                     <details class="referral-details" open>
                         <summary>Зарегистрировались по ссылке: ${registrations.length}</summary>
@@ -1283,6 +1284,30 @@ window.copyReferralLink = async function (url) {
         prompt('Скопируйте ссылку:', url);
     }
 };
+
+window.deleteReferralLink = async function (linkId) {
+    const id = Number(linkId || 0);
+    const message = document.getElementById('referrals-message');
+    if (!id) return;
+    if (!confirm('Удалить реферальную ссылку? Все заявки, пришедшие по ней, перестанут отображаться как реферальные.')) {
+        return;
+    }
+    setMessage(message, '');
+    try {
+        const response = await fetch(`/api/referral-links/${encodeURIComponent(id)}`, {
+            method: 'DELETE',
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || data.message || 'Не удалось удалить реферальную ссылку.');
+        setMessage(message, data.message || 'Реферальная ссылка удалена.', '#1f9d55');
+        await loadRegistrationRequests();
+        await loadReferrals();
+    } catch (error) {
+        console.error(error);
+        setMessage(message, error?.message || 'Не удалось удалить реферальную ссылку.');
+    }
+};
+
 
 async function createReferralLink() {
     const select = document.getElementById('referral-owner-select');

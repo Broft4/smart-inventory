@@ -61,6 +61,7 @@ from app.logic import (
     verify_item_or_category,
 )
 from app.models import Report, User
+from app.schemas import DeleteResponse
 from app.moysklad import ms_client
 from app.password_reset import (
     complete_password_reset,
@@ -71,6 +72,7 @@ from app.registration import (
     approve_registration_request,
     create_referral_link,
     create_registration_request,
+    delete_referral_link,
     list_referral_links,
     list_registration_requests,
     reject_registration_request,
@@ -426,6 +428,11 @@ async def api_list_referral_links(admin: User = Depends(require_platform_admin),
 @app.post('/api/referral-links', response_model=ReferralLinkActionResponse)
 async def api_create_referral_link(payload: ReferralLinkCreateRequest, admin: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db)):
     return await create_referral_link(payload, db, admin)
+
+
+@app.delete('/api/referral-links/{link_id}', response_model=DeleteResponse)
+async def api_delete_referral_link(link_id: int, admin: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db)):
+    return await delete_referral_link(link_id, db)
 
 
 @app.get('/api/registration-requests', response_model=RegistrationListResponse)

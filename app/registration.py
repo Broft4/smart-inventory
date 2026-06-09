@@ -6,7 +6,7 @@ from datetime import date, datetime
 from typing import Iterable
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -26,6 +26,7 @@ from app.schemas import (
     ReferralLinksResponse,
     ReferralResolveResponse,
     ReferralUserModel,
+    DeleteResponse,
     RegistrationActionResponse,
     RegistrationApplicationModel,
     RegistrationCreateRequest,
@@ -460,6 +461,33 @@ async def list_referral_links(db: AsyncSession) -> ReferralLinksResponse:
         )
     ).all()
     return ReferralLinksResponse(links=[await _build_referral_link_model(link, db) for link in links])
+
+
+async def delete_referral_link(link_id: int, db: AsyncSession) -> DeleteResponse:
+    link = await db.get(ReferralLink, link_id)
+    if not link:
+        raise HTTPException(status_code=404, detail='Реферальная ссылка не найдена.')
+
+    affected_requests = await db.scalar(
+        select(func.count(RegistrationRequest.id)).where(RegistrationRequest.referral_link_id == link.id)
+    ) or 0
+
+    await db.execute(
+        update(RegistrationRequest)
+        .where(RegistrationRequest.referral_link_id == link.id)
+        .values(
+            referral_token=None,
+            referral_link_id=None,
+            referred_by_user_id=None,
+        )
+    )
+    await db.delete(link)
+    await db.commit()
+
+    suffix = ''
+    if int(affected_requests):
+        suffix = f' Привязка снята с заявок: {int(affected_requests)}.'
+    return DeleteResponse(success=True, message=f'Реферальная ссылка удалена.{suffix}')
 
 
 async def resolve_referral_token(token: str, db: AsyncSession) -> ReferralResolveResponse:
