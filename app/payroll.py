@@ -312,11 +312,22 @@ def bootstrap_payroll_schema(connection) -> None:
         # для будущих точечных миграций, чтобы bootstrap работал и в SQLite, и в PostgreSQL.
         pass
 
+    if 'sales_motivation_products' in tables:
+        motivation_product_columns = column_names('sales_motivation_products')
+        if 'expiration_days_left' not in motivation_product_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE sales_motivation_products ADD COLUMN expiration_days_left INTEGER"
+            )
+
     if 'sales_motivation_models' in tables:
         motivation_columns = column_names('sales_motivation_models')
         if 'include_fiscalized_sales' not in motivation_columns:
             connection.exec_driver_sql(
                 f"ALTER TABLE sales_motivation_models ADD COLUMN include_fiscalized_sales BOOLEAN NOT NULL DEFAULT {bool_true_default}"
+            )
+        if 'expiration_days_left' not in motivation_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE sales_motivation_models ADD COLUMN expiration_days_left INTEGER"
             )
 
     if 'shift_sales_motivation_snapshots' in tables:
@@ -328,6 +339,17 @@ def bootstrap_payroll_schema(connection) -> None:
         if 'fiscalization_status' not in motivation_snapshot_columns:
             connection.exec_driver_sql(
                 "ALTER TABLE shift_sales_motivation_snapshots ADD COLUMN fiscalization_status VARCHAR(30) NOT NULL DEFAULT 'any'"
+            )
+        if 'expiration_days_left' not in motivation_snapshot_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE shift_sales_motivation_snapshots ADD COLUMN expiration_days_left INTEGER"
+            )
+
+    if 'sales_motivation_daily_snapshots' in tables:
+        motivation_daily_columns = column_names('sales_motivation_daily_snapshots')
+        if 'expiration_days_left' not in motivation_daily_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE sales_motivation_daily_snapshots ADD COLUMN expiration_days_left INTEGER"
             )
 
 
@@ -409,6 +431,7 @@ class SalesMotivationProductInput(BaseModel):
     current_stock_qty: float = 0.0
     last_sale_date: date | None = None
     days_without_sales: int | None = None
+    expiration_days_left: int | None = Field(default=None, ge=0)
 
 
 class SalesMotivationCreateRequest(BaseModel):
@@ -418,6 +441,7 @@ class SalesMotivationCreateRequest(BaseModel):
     reward_type: str = Field(default=SALES_MOTIVATION_REWARD_PERCENT)
     reward_value: float = Field(..., gt=0)
     no_sales_days: int | None = Field(default=None, ge=1)
+    expiration_days_left: int | None = Field(default=None, ge=0)
     include_fiscalized_sales: bool = True
     date_from: date | None = None
     date_to: date | None = None
@@ -431,6 +455,7 @@ class SalesMotivationUpdateRequest(BaseModel):
     reward_type: str = Field(default=SALES_MOTIVATION_REWARD_PERCENT)
     reward_value: float = Field(..., gt=0)
     no_sales_days: int | None = Field(default=None, ge=1)
+    expiration_days_left: int | None = Field(default=None, ge=0)
     include_fiscalized_sales: bool = True
     date_from: date | None = None
     date_to: date | None = None
@@ -3884,6 +3909,7 @@ def _serialize_sales_motivation_product(row: SalesMotivationProduct) -> dict[str
         'current_stock_qty': round(float(row.current_stock_qty or 0.0), 3),
         'last_sale_date': row.last_sale_date.isoformat() if row.last_sale_date else None,
         'days_without_sales': int(row.days_without_sales) if row.days_without_sales is not None else None,
+        'expiration_days_left': _normalize_sales_motivation_expiration_days(getattr(row, 'expiration_days_left', None)),
     }
 
 
@@ -3900,6 +3926,7 @@ def _serialize_sales_motivation_model(model: SalesMotivationModel, products: lis
         'reward_label': _sales_motivation_reward_label(reward_type),
         'reward_value': round(float(model.reward_value or 0.0), 2),
         'no_sales_days': int(model.no_sales_days) if model.no_sales_days is not None else None,
+        'expiration_days_left': _normalize_sales_motivation_expiration_days(getattr(model, 'expiration_days_left', None)),
         'include_fiscalized_sales': bool(getattr(model, 'include_fiscalized_sales', True)),
         'fiscalization_mode': _sales_motivation_fiscalization_mode(bool(getattr(model, 'include_fiscalized_sales', True))),
         'fiscalization_label': _sales_motivation_fiscalization_label(bool(getattr(model, 'include_fiscalized_sales', True))),
@@ -4284,6 +4311,17 @@ def _normalize_sales_motivation_no_sales_days(value: Any) -> int:
         return 0
 
 
+def _normalize_sales_motivation_expiration_days(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return None
+
+
 def _sales_motivation_catalog_cache_is_fresh(row: SalesMotivationProductCatalogCache | None) -> bool:
     if row is None:
         return False
@@ -4324,6 +4362,7 @@ def _normalize_cached_sales_motivation_products(raw_products: Any) -> list[dict[
             cloned['last_sale_date'] = None
         days_without_sales = cloned.get('days_without_sales')
         cloned['days_without_sales'] = _normalize_sales_motivation_no_sales_days(days_without_sales) if days_without_sales is not None else None
+        cloned['expiration_days_left'] = _normalize_sales_motivation_expiration_days(cloned.get('expiration_days_left'))
         products.append(cloned)
     products.sort(key=lambda row: (
         str(row.get('category_name') or '').lower(),
@@ -4468,11 +4507,15 @@ def _build_sales_motivation_catalog_response(
     products: list[dict[str, Any]],
     *,
     no_sales_days: int,
+    expiration_days_left: int | None = None,
     query: str | None = None,
     from_cache: bool = False,
     refreshed_at: datetime | None = None,
 ) -> dict[str, Any]:
+    normalized_expiration_days = _normalize_sales_motivation_expiration_days(expiration_days_left)
     filtered_products = _filter_sales_motivation_catalog_products(products, query)
+    if normalized_expiration_days is not None:
+        filtered_products = [dict(row, expiration_days_left=normalized_expiration_days) for row in filtered_products]
     categories: dict[str, dict[str, Any]] = {}
     for row in filtered_products:
         category_key = row.get('category_id') or f"category-name:{row.get('category_name') or DEFAULT_CATEGORY_NAME}"
@@ -4500,6 +4543,7 @@ def _build_sales_motivation_catalog_response(
     return {
         'location': point.name,
         'no_sales_days': no_sales_days or None,
+        'expiration_days_left': normalized_expiration_days,
         'product_count': len(filtered_products),
         'total_cached_product_count': len(products),
         'categories': category_list,
@@ -4515,6 +4559,7 @@ async def get_sales_motivation_product_catalog(
     current_user: User,
     *,
     no_sales_days: int | None = None,
+    expiration_days_left: int | None = None,
     query: str | None = None,
 ) -> dict[str, Any]:
     await ensure_user_can_access_location(current_user, location, db)
@@ -4531,6 +4576,7 @@ async def get_sales_motivation_product_catalog(
         point,
         products,
         no_sales_days=normalized_days,
+        expiration_days_left=expiration_days_left,
         query=query,
         from_cache=from_cache,
         refreshed_at=refreshed_at,
@@ -4629,6 +4675,9 @@ async def _replace_sales_motivation_products(
         if not item_id or not item_name or item_id in seen:
             continue
         seen.add(item_id)
+        product_expiration_days = _normalize_sales_motivation_expiration_days(product.expiration_days_left)
+        if product_expiration_days is None:
+            product_expiration_days = _normalize_sales_motivation_expiration_days(getattr(model, 'expiration_days_left', None))
         db.add(SalesMotivationProduct(
             model_id=model.id,
             item_id=item_id[:120],
@@ -4641,6 +4690,7 @@ async def _replace_sales_motivation_products(
             current_stock_qty=round(float(product.current_stock_qty or 0.0), 3),
             last_sale_date=product.last_sale_date,
             days_without_sales=product.days_without_sales,
+            expiration_days_left=product_expiration_days,
         ))
 
 
@@ -4696,6 +4746,7 @@ async def create_sales_motivation_model(payload: SalesMotivationCreateRequest, d
         reward_type=reward_type,
         reward_value=round(float(payload.reward_value or 0.0), 2),
         no_sales_days=int(payload.no_sales_days) if source_type == SALES_MOTIVATION_SOURCE_NO_SALES_DAYS and payload.no_sales_days else None,
+        expiration_days_left=_normalize_sales_motivation_expiration_days(payload.expiration_days_left),
         include_fiscalized_sales=bool(payload.include_fiscalized_sales),
         date_from=payload.date_from,
         date_to=payload.date_to,
@@ -4715,7 +4766,7 @@ async def create_sales_motivation_model(payload: SalesMotivationCreateRequest, d
         entity_type='sales_motivation_model',
         entity_id=str(model.id),
         action_type='create',
-        details={'name': model.name, 'source_type': model.source_type, 'reward_type': model.reward_type, 'reward_value': model.reward_value, 'include_fiscalized_sales': model.include_fiscalized_sales, 'product_count': len(payload.products)},
+        details={'name': model.name, 'source_type': model.source_type, 'reward_type': model.reward_type, 'reward_value': model.reward_value, 'include_fiscalized_sales': model.include_fiscalized_sales, 'expiration_days_left': model.expiration_days_left, 'product_count': len(payload.products)},
     )
     await db.commit()
     return await list_sales_motivation_models(point.name, db, current_user)
@@ -4738,6 +4789,7 @@ async def update_sales_motivation_model(model_id: int, payload: SalesMotivationU
     model.reward_type = reward_type
     model.reward_value = round(float(payload.reward_value or 0.0), 2)
     model.no_sales_days = int(payload.no_sales_days) if source_type == SALES_MOTIVATION_SOURCE_NO_SALES_DAYS and payload.no_sales_days else None
+    model.expiration_days_left = _normalize_sales_motivation_expiration_days(payload.expiration_days_left)
     model.include_fiscalized_sales = bool(payload.include_fiscalized_sales)
     model.date_from = payload.date_from
     model.date_to = payload.date_to
@@ -4752,7 +4804,7 @@ async def update_sales_motivation_model(model_id: int, payload: SalesMotivationU
         entity_type='sales_motivation_model',
         entity_id=str(model.id),
         action_type='update',
-        details={'before': before, 'after': {'name': model.name, 'source_type': model.source_type, 'reward_type': model.reward_type, 'reward_value': model.reward_value, 'include_fiscalized_sales': model.include_fiscalized_sales, 'is_active': model.is_active, 'product_count': len(payload.products)}},
+        details={'before': before, 'after': {'name': model.name, 'source_type': model.source_type, 'reward_type': model.reward_type, 'reward_value': model.reward_value, 'include_fiscalized_sales': model.include_fiscalized_sales, 'expiration_days_left': model.expiration_days_left, 'is_active': model.is_active, 'product_count': len(payload.products)}},
     )
     await db.commit()
     return await list_sales_motivation_models(point.name, db, current_user)
@@ -5059,6 +5111,7 @@ def _add_shift_sales_motivation_snapshot_rows(
             item_id=str(row.get('item_id') or '')[:120],
             item_name=str(row.get('item_name') or 'Товар')[:255],
             item_code=_clean_optional_string(row.get('item_code'), max_length=120),
+            expiration_days_left=_normalize_sales_motivation_expiration_days(row.get('expiration_days_left')),
             quantity=round(float(row.get('quantity') or 0.0), 3),
             sales_amount=round(float(row.get('sales_amount') or 0.0), 2),
             bonus_amount=round(float(row.get('bonus_amount') or 0.0), 2),
@@ -5112,6 +5165,7 @@ async def _load_shift_sales_motivation_rows_from_daily_snapshots(
             'item_id': row.item_id,
             'item_name': row.item_name,
             'item_code': row.item_code,
+            'expiration_days_left': _normalize_sales_motivation_expiration_days(getattr(row, 'expiration_days_left', None)),
             'quantity': quantity,
             'sales_amount': sales_amount,
             'bonus_amount': bonus_amount,
@@ -5171,6 +5225,7 @@ def _group_sales_motivation_rows(rows: list[dict[str, Any]]) -> list[dict[str, A
             'item_id': row.get('item_id'),
             'item_name': row.get('item_name') or 'Товар',
             'item_code': row.get('item_code'),
+            'expiration_days_left': _normalize_sales_motivation_expiration_days(row.get('expiration_days_left')),
             'quantity': round(float(row.get('quantity') or 0.0), 3),
             'sales_amount': round(float(row.get('sales_amount') or 0.0), 2),
             'bonus_amount': round(float(row.get('bonus_amount') or 0.0), 2),
@@ -5268,6 +5323,7 @@ async def _calculate_shift_sales_motivations(
                 'item_id': product.item_id,
                 'item_name': product.item_name or metric.get('item_name') or product.item_id,
                 'item_code': product.item_code or metric.get('item_code'),
+                'expiration_days_left': _resolve_sales_motivation_expiration_days(product, model),
                 'quantity': quantity,
                 'sales_amount': sales_amount,
                 'bonus_amount': bonus_amount,
@@ -5297,12 +5353,20 @@ async def _load_shift_sales_motivation_snapshot_rows(snapshot_id: int, db: Async
             'item_id': row.item_id,
             'item_name': row.item_name,
             'item_code': row.item_code,
+            'expiration_days_left': _normalize_sales_motivation_expiration_days(getattr(row, 'expiration_days_left', None)),
             'quantity': round(float(row.quantity or 0.0), 3),
             'sales_amount': round(float(row.sales_amount or 0.0), 2),
             'bonus_amount': round(float(row.bonus_amount or 0.0), 2),
         }
         for row in rows
     ]
+
+
+def _resolve_sales_motivation_expiration_days(product: Any, model: Any) -> int | None:
+    product_days = _normalize_sales_motivation_expiration_days(getattr(product, 'expiration_days_left', None))
+    if product_days is not None:
+        return product_days
+    return _normalize_sales_motivation_expiration_days(getattr(model, 'expiration_days_left', None))
 
 
 def _resolve_sales_motivation_days_without_sales(product: SalesMotivationProduct, model: SalesMotivationModel, snapshot_date: date, sold_quantity: float) -> int | None:
@@ -5331,6 +5395,7 @@ def _serialize_sales_motivation_daily_snapshot(row: SalesMotivationDailySnapshot
         'reward_label': _sales_motivation_reward_label(row.reward_type),
         'reward_value': round(float(row.reward_value or 0.0), 2),
         'no_sales_days': row.no_sales_days,
+        'expiration_days_left': _normalize_sales_motivation_expiration_days(getattr(row, 'expiration_days_left', None)),
         'include_fiscalized_sales': bool(row.include_fiscalized_sales),
         'fiscalization_mode': _sales_motivation_fiscalization_mode(bool(row.include_fiscalized_sales)),
         'fiscalization_label': _sales_motivation_fiscalization_label(bool(row.include_fiscalized_sales)),
@@ -5491,6 +5556,7 @@ async def refresh_sales_motivation_daily_snapshots(
                         reward_type=reward_type,
                         reward_value=reward_value,
                         no_sales_days=model.no_sales_days,
+                        expiration_days_left=_resolve_sales_motivation_expiration_days(product, model),
                         include_fiscalized_sales=include_fiscalized_sales,
                         fiscalization_status=fiscalization_status,
                         item_id=str(product.item_id or '')[:120],

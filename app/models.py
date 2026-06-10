@@ -599,6 +599,7 @@ class SalesMotivationModel(Base):
     reward_type: Mapped[str] = mapped_column(String(30), default='percent', nullable=False)
     reward_value: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     no_sales_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    expiration_days_left: Mapped[int | None] = mapped_column(Integer, nullable=True)
     include_fiscalized_sales: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     date_from: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     date_to: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
@@ -627,6 +628,7 @@ class SalesMotivationProduct(Base):
     current_stock_qty: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     last_sale_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     days_without_sales: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    expiration_days_left: Mapped[int | None] = mapped_column(Integer, nullable=True)
     added_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
@@ -648,6 +650,7 @@ class ShiftSalesMotivationSnapshot(Base):
     item_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     item_name: Mapped[str] = mapped_column(String(255), nullable=False)
     item_code: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    expiration_days_left: Mapped[int | None] = mapped_column(Integer, nullable=True)
     quantity: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     sales_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     bonus_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
@@ -669,6 +672,7 @@ class SalesMotivationDailySnapshot(Base):
     reward_type: Mapped[str] = mapped_column(String(30), default='percent', nullable=False)
     reward_value: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     no_sales_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    expiration_days_left: Mapped[int | None] = mapped_column(Integer, nullable=True)
     include_fiscalized_sales: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     fiscalization_status: Mapped[str] = mapped_column(String(30), default='any', nullable=False, index=True)
     item_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)

@@ -247,7 +247,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260609-ios-admin-fields-v1'
+templates.env.globals['asset_version'] = '20260610-motivation-expiration-v1'
 
 
 @app.middleware('http')
@@ -987,8 +987,8 @@ async def api_payroll_sales_motivations_active_products(location: str, user: Use
 
 
 @app.get('/api/payroll/sales-motivations/product-catalog')
-async def api_payroll_sales_motivation_product_catalog(location: str, no_sales_days: int | None = None, query: str | None = None, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
-    return await get_sales_motivation_product_catalog(location, db, user, no_sales_days=no_sales_days, query=query)
+async def api_payroll_sales_motivation_product_catalog(location: str, no_sales_days: int | None = None, expiration_days_left: int | None = None, query: str | None = None, user: User = Depends(require_admin_or_superadmin), db: AsyncSession = Depends(get_db)):
+    return await get_sales_motivation_product_catalog(location, db, user, no_sales_days=no_sales_days, expiration_days_left=expiration_days_left, query=query)
 
 
 @app.get('/api/payroll/sales-motivations/daily-snapshots')

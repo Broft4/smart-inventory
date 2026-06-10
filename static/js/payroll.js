@@ -2763,6 +2763,35 @@ function salesMotivationFiscalizationText(model) {
     return 'только без фискализации';
 }
 
+function salesMotivationExpirationText(item) {
+    const raw = item?.expiration_days_left;
+    if (raw === null || raw === undefined || raw === '') return '';
+    const days = Number(raw);
+    if (!Number.isFinite(days) || days < 0) return '';
+    if (days === 0) return 'срок годности: сегодня';
+    if (days === 1) return 'срок годности: 1 день';
+    return `срок годности: ${days.toLocaleString('ru-RU')} дн.`;
+}
+
+function salesMotivationProductMeta(item, { includeCategory = false, includeStock = true, includeDaysWithoutSales = true } = {}) {
+    const parts = [];
+    if (item?.item_code) parts.push(`код ${escapeHtml(item.item_code)}`);
+    if (includeCategory && item?.category_name) parts.push(escapeHtml(item.category_name));
+    if (includeStock) parts.push(`остаток ${Number(item?.current_stock_qty || 0).toLocaleString('ru-RU')} шт.`);
+    if (includeDaysWithoutSales && item?.days_without_sales) parts.push(`без продаж ${Number(item.days_without_sales).toLocaleString('ru-RU')}+ дней`);
+    const expirationText = salesMotivationExpirationText(item);
+    if (expirationText) parts.push(escapeHtml(expirationText));
+    return parts.join(' · ');
+}
+
+function selectedSalesMotivationExpirationDays() {
+    const field = qs('sales-motivation-expiration-days');
+    const raw = field?.value;
+    if (raw === null || raw === undefined || raw === '') return null;
+    const days = Number(raw);
+    if (!Number.isFinite(days) || days < 0) return null;
+    return Math.floor(days);
+}
 
 function isCurrentOpenShiftDay(day) {
     return Boolean(day && !day.is_closed && String(day.shift_date || '') === todayIso());
@@ -2853,7 +2882,7 @@ function renderShiftSalesMotivations(day) {
                     </div>
                     <div class="payroll-days-container payroll-days-container--note-only">
                         ${(model.items || []).map((item) => `
-                            <div class="muted-text">${escapeHtml(item.item_name || 'Товар')}${item.item_code ? ` · код ${escapeHtml(item.item_code)}` : ''}: ${formatMoney(item.bonus_amount || 0)} / продажи ${formatMoney(item.sales_amount || 0)} / ${Number(item.quantity || 0).toLocaleString('ru-RU')} шт.</div>
+                            <div class="muted-text">${escapeHtml(item.item_name || 'Товар')}${salesMotivationProductMeta(item, { includeStock: false, includeDaysWithoutSales: false }) ? ` · ${salesMotivationProductMeta(item, { includeStock: false, includeDaysWithoutSales: false })}` : ''}: ${formatMoney(item.bonus_amount || 0)} / продажи ${formatMoney(item.sales_amount || 0)} / ${Number(item.quantity || 0).toLocaleString('ru-RU')} шт.</div>
                         `).join('')}
                     </div>
                 </article>
@@ -2888,7 +2917,7 @@ function renderMotivationSelectedProducts() {
                             <div class="expense-entry-card-head">
                                 <div>
                                     <strong>${escapeHtml(product.item_name || 'Товар')}</strong>
-                                    <div class="muted-text">${product.item_code ? `код ${escapeHtml(product.item_code)} · ` : ''}${product.category_name ? `${escapeHtml(product.category_name)} · ` : ''}остаток ${Number(product.current_stock_qty || 0).toLocaleString('ru-RU')} шт.</div>
+                                    <div class="muted-text">${salesMotivationProductMeta(product, { includeCategory: true })}</div>
                                 </div>
                                 <button type="button" class="btn secondary btn-inline" onclick="removeSelectedMotivationProduct('${escapeHtml(product.item_id)}')">Убрать</button>
                             </div>
@@ -2929,6 +2958,7 @@ function normalizeMotivationProductForPayload(product) {
         current_stock_qty: Number(product?.current_stock_qty || 0),
         last_sale_date: product?.last_sale_date || null,
         days_without_sales: product?.days_without_sales == null ? null : Number(product.days_without_sales),
+        expiration_days_left: product?.expiration_days_left == null ? null : Number(product.expiration_days_left),
     };
 }
 
@@ -3041,7 +3071,7 @@ function renderSalesMotivationProductCatalog(payload) {
                                         <input type="checkbox" data-motivation-product-id="${escapeHtml(item.item_id || '')}" ${selected ? 'checked' : ''}>
                                         <span>
                                             <strong>${escapeHtml(item.item_name || 'Товар')}</strong>
-                                            <span class="muted-text">${item.item_code ? `код ${escapeHtml(item.item_code)} · ` : ''}остаток ${Number(item.current_stock_qty || 0).toLocaleString('ru-RU')} шт.${item.days_without_sales ? ` · без продаж ${item.days_without_sales}+ дней` : ''}</span>
+                                            <span class="muted-text">${salesMotivationProductMeta(item)}</span>
                                         </span>
                                     </label>`;
                                 }).join('')}
@@ -3084,9 +3114,11 @@ async function loadSalesMotivationProductCatalog() {
     const location = selectedLocation();
     const source = qs('sales-motivation-source')?.value || 'manual';
     const days = Number(qs('sales-motivation-days')?.value || 0);
+    const expirationDays = selectedSalesMotivationExpirationDays();
     const query = qs('sales-motivation-product-query')?.value || '';
     const params = new URLSearchParams({ location });
     if (source === 'no_sales_days' && days > 0) params.set('no_sales_days', String(days));
+    if (expirationDays !== null) params.set('expiration_days_left', String(expirationDays));
     if (query.trim()) params.set('query', query.trim());
     if (button) {
         button.disabled = true;
@@ -3122,7 +3154,7 @@ function renderSalesMotivations() {
             <summary class="expense-entry-toggle">
                 <div>
                     <strong>${escapeHtml(model.name || 'Мотивация')}</strong>
-                    <div class="muted-text">${escapeHtml(model.source_label || '')} · ${escapeHtml(salesMotivationRewardText(model))} · ${escapeHtml(salesMotivationFiscalizationText(model))} · товаров ${model.product_count || 0}</div>
+                    <div class="muted-text">${escapeHtml(model.source_label || '')}${salesMotivationExpirationText(model) ? ` · ${escapeHtml(salesMotivationExpirationText(model))}` : ''} · ${escapeHtml(salesMotivationRewardText(model))} · ${escapeHtml(salesMotivationFiscalizationText(model))} · товаров ${model.product_count || 0}</div>
                 </div>
                 <div class="expense-entry-toggle-side">
                     <span class="payroll-chip ${model.is_active ? 'green' : 'orange'}">${model.is_active ? 'Активна' : 'Выключена'}</span>
@@ -3134,6 +3166,7 @@ function renderSalesMotivations() {
                     <div><span class="summary-label">Начисление</span><strong>${escapeHtml(salesMotivationRewardText(model))}</strong></div>
                     <div><span class="summary-label">Период</span><strong>${escapeHtml(model.date_from || 'без начала')} — ${escapeHtml(model.date_to || 'без окончания')}</strong></div>
                     <div><span class="summary-label">Фильтр</span><strong>${model.no_sales_days ? `${model.no_sales_days}+ дней без продаж` : 'ручной выбор'}</strong></div>
+                    <div><span class="summary-label">Срок годности</span><strong>${salesMotivationExpirationText(model) ? escapeHtml(salesMotivationExpirationText(model)) : 'не указан'}</strong></div>
                     <div><span class="summary-label">Фискализация</span><strong>${escapeHtml(salesMotivationFiscalizationText(model))}</strong></div>
                 </div>
                 <div class="expense-entry-actions">
@@ -3152,7 +3185,7 @@ function renderSalesMotivations() {
                     </summary>
                     <div class="expense-entry-accordion-body">
                         <div class="payroll-days-container payroll-days-container--note-only">
-                            ${(model.products || []).map((item) => `<div class="muted-text">${escapeHtml(item.item_name || 'Товар')}${item.item_code ? ` · код ${escapeHtml(item.item_code)}` : ''}${item.category_name ? ` · ${escapeHtml(item.category_name)}` : ''}</div>`).join('') || '<div class="muted-text">Товары не указаны.</div>'}
+                            ${(model.products || []).map((item) => `<div class="muted-text">${escapeHtml(item.item_name || 'Товар')}${salesMotivationProductMeta(item, { includeCategory: true, includeStock: false }) ? ` · ${salesMotivationProductMeta(item, { includeCategory: true, includeStock: false })}` : ''}</div>`).join('') || '<div class="muted-text">Товары не указаны.</div>'}
                         </div>
                     </div>
                 </details>
@@ -3191,7 +3224,7 @@ function renderHotProducts(payload) {
             <summary class="expense-entry-toggle">
                 <div>
                     <strong>${escapeHtml(model.name || 'Мотивация')}</strong>
-                    <div class="muted-text">${escapeHtml(salesMotivationRewardText(model))} · ${escapeHtml(salesMotivationFiscalizationText(model))} · товаров ${model.product_count || 0}</div>
+                    <div class="muted-text">${escapeHtml(salesMotivationRewardText(model))}${salesMotivationExpirationText(model) ? ` · ${escapeHtml(salesMotivationExpirationText(model))}` : ''} · ${escapeHtml(salesMotivationFiscalizationText(model))} · товаров ${model.product_count || 0}</div>
                 </div>
                 <span class="btn secondary btn-inline expense-entry-toggle-text">Развернуть</span>
             </summary>
@@ -3199,7 +3232,7 @@ function renderHotProducts(payload) {
                 <div class="expense-entry-grid">
                     ${(model.products || []).map((item) => `
                         <article class="expense-entry-card">
-                            <div class="expense-entry-card-head"><div><strong>${escapeHtml(item.item_name || 'Товар')}</strong><div class="muted-text">${item.item_code ? `код ${escapeHtml(item.item_code)} · ` : ''}${item.category_name ? `${escapeHtml(item.category_name)} · ` : ''}остаток ${Number(item.current_stock_qty || 0).toLocaleString('ru-RU')} шт.${item.days_without_sales ? ` · без продаж ${item.days_without_sales}+ дней` : ''}</div></div></div>
+                            <div class="expense-entry-card-head"><div><strong>${escapeHtml(item.item_name || 'Товар')}</strong><div class="muted-text">${salesMotivationProductMeta(item, { includeCategory: true })}</div></div></div>
                         </article>
                     `).join('') || '<div class="muted-text">Товары не указаны.</div>'}
                 </div>
@@ -3240,6 +3273,7 @@ function setSalesMotivationFormValues(model, { copy = false } = {}) {
     qs('sales-motivation-name').value = copy ? `Копия: ${model.name || 'Мотивация'}` : (model.name || '');
     qs('sales-motivation-source').value = model.source_type || 'manual';
     qs('sales-motivation-days').value = model.no_sales_days || 365;
+    if (qs('sales-motivation-expiration-days')) qs('sales-motivation-expiration-days').value = model.expiration_days_left ?? '';
     qs('sales-motivation-reward-type').value = model.reward_type || 'percent';
     qs('sales-motivation-reward-value').value = model.reward_value || '';
     qs('sales-motivation-date-from').value = model.date_from || '';
@@ -3262,6 +3296,7 @@ function resetSalesMotivationForm() {
     if (qs('sales-motivation-name')) qs('sales-motivation-name').value = '';
     if (qs('sales-motivation-source')) qs('sales-motivation-source').value = 'manual';
     if (qs('sales-motivation-days')) qs('sales-motivation-days').value = 365;
+    if (qs('sales-motivation-expiration-days')) qs('sales-motivation-expiration-days').value = '';
     if (qs('sales-motivation-reward-type')) qs('sales-motivation-reward-type').value = 'percent';
     if (qs('sales-motivation-reward-value')) qs('sales-motivation-reward-value').value = '';
     if (qs('sales-motivation-date-from')) qs('sales-motivation-date-from').value = '';
@@ -3275,7 +3310,14 @@ function resetSalesMotivationForm() {
 }
 
 function buildSalesMotivationPayload(location = selectedLocation()) {
-    const products = [...payrollState.selectedMotivationProducts.values()].map(normalizeMotivationProductForPayload);
+    const expirationDays = selectedSalesMotivationExpirationDays();
+    const products = [...payrollState.selectedMotivationProducts.values()].map((product) => {
+        const normalized = normalizeMotivationProductForPayload(product);
+        if (normalized.expiration_days_left === null && expirationDays !== null) {
+            normalized.expiration_days_left = expirationDays;
+        }
+        return normalized;
+    });
     return {
         location,
         name: qs('sales-motivation-name')?.value?.trim() || '',
@@ -3283,6 +3325,7 @@ function buildSalesMotivationPayload(location = selectedLocation()) {
         reward_type: qs('sales-motivation-reward-type')?.value || 'percent',
         reward_value: Number(qs('sales-motivation-reward-value')?.value || 0),
         no_sales_days: qs('sales-motivation-source')?.value === 'no_sales_days' ? Number(qs('sales-motivation-days')?.value || 0) : null,
+        expiration_days_left: expirationDays,
         include_fiscalized_sales: Boolean(qs('sales-motivation-include-fiscalized')?.checked ?? true),
         date_from: qs('sales-motivation-date-from')?.value || null,
         date_to: qs('sales-motivation-date-to')?.value || null,
@@ -3344,6 +3387,7 @@ window.copySalesMotivationToLocation = async function copySalesMotivationToLocat
         reward_type: model.reward_type || 'percent',
         reward_value: Number(model.reward_value || 0),
         no_sales_days: model.no_sales_days || null,
+        expiration_days_left: model.expiration_days_left ?? null,
         include_fiscalized_sales: model.include_fiscalized_sales !== false,
         date_from: model.date_from || null,
         date_to: model.date_to || null,
@@ -3615,6 +3659,13 @@ qs('sales-motivation-load-products-btn')?.addEventListener('click', loadSalesMot
 qs('sales-motivation-clear-products-btn')?.addEventListener('click', () => {
     payrollState.selectedMotivationProducts.clear();
     renderSalesMotivationProductCatalog({ categories: [] });
+    updateMotivationSelectedMeta();
+});
+qs('sales-motivation-expiration-days')?.addEventListener('input', () => {
+    const expirationDays = selectedSalesMotivationExpirationDays();
+    payrollState.selectedMotivationProducts.forEach((product, key) => {
+        payrollState.selectedMotivationProducts.set(key, { ...product, expiration_days_left: expirationDays });
+    });
     updateMotivationSelectedMeta();
 });
 qs('create-sales-motivation-btn')?.addEventListener('click', createSalesMotivation);

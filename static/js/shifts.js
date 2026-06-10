@@ -73,6 +73,27 @@ function salesMotivationFiscalizationText(model) {
     return 'только без фискализации';
 }
 
+function salesMotivationExpirationText(item) {
+    const raw = item?.expiration_days_left;
+    if (raw === null || raw === undefined || raw === '') return '';
+    const days = Number(raw);
+    if (!Number.isFinite(days) || days < 0) return '';
+    if (days === 0) return 'срок годности: сегодня';
+    if (days === 1) return 'срок годности: 1 день';
+    return `срок годности: ${days.toLocaleString('ru-RU')} дн.`;
+}
+
+function salesMotivationProductMeta(item, { includeCategory = false, includeStock = true, includeDaysWithoutSales = true } = {}) {
+    const parts = [];
+    if (item?.item_code) parts.push(`код ${escapeHtml(item.item_code)}`);
+    if (includeCategory && item?.category_name) parts.push(escapeHtml(item.category_name));
+    if (includeStock) parts.push(`остаток ${Number(item?.current_stock_qty || 0).toLocaleString('ru-RU')} шт.`);
+    if (includeDaysWithoutSales && item?.days_without_sales) parts.push(`без продаж ${Number(item.days_without_sales).toLocaleString('ru-RU')}+ дней`);
+    const expirationText = salesMotivationExpirationText(item);
+    if (expirationText) parts.push(escapeHtml(expirationText));
+    return parts.join(' · ');
+}
+
 function formatLocalDateIso(value) {
     const date = value instanceof Date ? value : new Date(value);
     if (Number.isNaN(date.getTime())) return '';
@@ -391,7 +412,7 @@ function renderShiftHotProducts(payload = null) {
             <summary class="expense-entry-toggle">
                 <div>
                     <strong>${escapeHtml(model.name || 'Мотивация')}</strong>
-                    <div class="muted-text">${escapeHtml(salesMotivationRewardText(model))} · ${escapeHtml(salesMotivationFiscalizationText(model))} · товаров ${model.product_count || 0}</div>
+                    <div class="muted-text">${escapeHtml(salesMotivationRewardText(model))}${salesMotivationExpirationText(model) ? ` · ${escapeHtml(salesMotivationExpirationText(model))}` : ''} · ${escapeHtml(salesMotivationFiscalizationText(model))} · товаров ${model.product_count || 0}</div>
                 </div>
                 <span class="btn secondary btn-inline expense-entry-toggle-text">Развернуть</span>
             </summary>
@@ -402,7 +423,7 @@ function renderShiftHotProducts(payload = null) {
                             <div class="expense-entry-card-head">
                                 <div>
                                     <strong>${escapeHtml(item.item_name || 'Товар')}</strong>
-                                    <div class="muted-text">${item.item_code ? `код ${escapeHtml(item.item_code)} · ` : ''}${item.category_name ? `${escapeHtml(item.category_name)} · ` : ''}остаток ${Number(item.current_stock_qty || 0).toLocaleString('ru-RU')} шт.${item.days_without_sales ? ` · без продаж ${item.days_without_sales}+ дней` : ''}</div>
+                                    <div class="muted-text">${salesMotivationProductMeta(item, { includeCategory: true })}</div>
                                 </div>
                             </div>
                         </article>
