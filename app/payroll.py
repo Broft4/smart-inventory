@@ -86,6 +86,7 @@ SALES_MOTIVATION_FISCAL_ANY = 'any'
 SALES_MOTIVATION_FISCAL_ONLY_NOT_FISCALIZED = 'only_not_fiscalized'
 SALES_MOTIVATION_POS_API_BASE_URL = 'https://online.moysklad.ru/api/posap/1.0'
 SALES_MOTIVATION_CATALOG_CACHE_TTL_SECONDS = 3600
+SALES_MOTIVATION_CATALOG_CACHE_SCHEMA_VERSION = 2
 SALES_MOTIVATION_CURRENT_SHIFT_REFRESH_TTL_SECONDS = 60 * 60
 SALES_MOTIVATION_CURRENT_SHIFT_POLL_SECONDS = 12
 SALES_MOTIVATION_BACKGROUND_RETRY_SECONDS = 60
@@ -3950,12 +3951,26 @@ async def _load_product_financial_cache_map(point: LocationPoint, db: AsyncSessi
 
 
 async def _flatten_inventory_products(point: LocationPoint, db: AsyncSession) -> list[dict[str, Any]]:
+    # Для мотиваций используем обычный inventory с теми же item_id, что и ревизии.
+    # Сроки годности по партиям подтягиваем отдельной картой. Если отчёт по партиям
+    # временно недоступен, подбор товаров не должен падать и не должен обнулять старые модели.
     inventory = await ms_client.get_inventory(
         point.name,
         token=_point_ms_token(point),
         store_id=_point_store_id(point),
     )
     financial_map = await _load_product_financial_cache_map(point, db)
+    expiration_days_by_item_id: dict[str, int] = {}
+    try:
+        expiration_days_by_item_id = await ms_client.get_inventory_expiration_days_map(
+            point.name,
+            token=_point_ms_token(point),
+            store_id=_point_store_id(point),
+        )
+    except Exception:
+        logger.warning('Не удалось загрузить сроки годности партий для точки %s. Каталог мотивации будет без фильтра по сроку.', point.name, exc_info=True)
+        expiration_days_by_item_id = {}
+
     products: list[dict[str, Any]] = []
     seen: set[str] = set()
     for category in inventory.get('categories') or []:
@@ -3971,6 +3986,9 @@ async def _flatten_inventory_products(point: LocationPoint, db: AsyncSession) ->
                 seen.add(item_id)
                 cached = financial_map.get(item_id)
                 qty = float(item.get('expected_qty') or item.get('quantity') or 0.0)
+                item_expiration_days = _normalize_sales_motivation_expiration_days(item.get('expiration_days_left'))
+                if item_expiration_days is None:
+                    item_expiration_days = _normalize_sales_motivation_expiration_days(expiration_days_by_item_id.get(item_id))
                 products.append({
                     'item_id': item_id,
                     'item_name': str(item.get('name') or '').strip() or item_id,
@@ -3980,7 +3998,7 @@ async def _flatten_inventory_products(point: LocationPoint, db: AsyncSession) ->
                     'subcategory_id': subcategory_id or None,
                     'subcategory_name': subcategory_name,
                     'current_stock_qty': round(qty, 3),
-                    'expiration_days_left': _normalize_sales_motivation_expiration_days(item.get('expiration_days_left')),
+                    'expiration_days_left': item_expiration_days,
                 })
     products.sort(key=lambda row: (str(row.get('category_name') or '').lower(), str(row.get('subcategory_name') or '').lower(), str(row.get('item_name') or '').lower()))
     return products
@@ -4375,7 +4393,29 @@ def _normalize_cached_sales_motivation_products(raw_products: Any) -> list[dict[
 
 def _serialize_sales_motivation_catalog_products(products: list[dict[str, Any]]) -> str:
     normalized = _normalize_cached_sales_motivation_products(products)
-    return json.dumps(normalized, ensure_ascii=False)
+    payload = {
+        'schema_version': SALES_MOTIVATION_CATALOG_CACHE_SCHEMA_VERSION,
+        'products': normalized,
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _decode_sales_motivation_catalog_cache_payload(raw_payload: Any) -> tuple[list[dict[str, Any]], bool]:
+    if isinstance(raw_payload, dict):
+        products = raw_payload.get('products')
+        if isinstance(products, list):
+            # Даже если schema_version старый, товары безопаснее показать из БД-кеша,
+            # чем обнулить список мотиваций при временной ошибке МойСклад.
+            return _normalize_cached_sales_motivation_products(products), True
+        return [], False
+
+    # Старый формат кеша был простым массивом. Его оставляем рабочим: при фильтре
+    # по сроку годности каталог всё равно попробует обновиться, но без фильтра
+    # пользователь не теряет уже доступный список товаров.
+    if isinstance(raw_payload, list):
+        return _normalize_cached_sales_motivation_products(raw_payload), True
+
+    return [], False
 
 
 async def _load_sales_motivation_catalog_cache(
@@ -4394,11 +4434,20 @@ async def _load_sales_motivation_catalog_cache(
     if not _sales_motivation_catalog_cache_is_fresh(row):
         return [], row
     try:
-        raw_products = json.loads(row.products_json or '[]')
+        raw_payload = json.loads(row.products_json or '[]')
     except Exception:
         logger.warning('Повреждён кеш каталога мотивационных товаров для точки %s.', point.name, exc_info=True)
         return [], row
-    products = _normalize_cached_sales_motivation_products(raw_products)
+    products, is_current_schema = _decode_sales_motivation_catalog_cache_payload(raw_payload)
+    if not is_current_schema:
+        logger.info(
+            'Кеш каталога мотивационных товаров для точки %s устарел: нужна пересборка с партиями и сроками годности.',
+            point.name,
+        )
+        # Важно сбросить дату прямо в объекте строки: вызывающий код повторно
+        # проверяет свежесть row и иначе вернул бы пустой список как валидный кеш.
+        row.source_refreshed_at = None
+        return [], row
     return products, row
 
 
@@ -4478,12 +4527,31 @@ async def _get_or_refresh_sales_motivation_catalog_products(
 ) -> tuple[list[dict[str, Any]], bool, datetime | None]:
     normalized_days = _normalize_sales_motivation_no_sales_days(no_sales_days)
     cache_row: SalesMotivationProductCatalogCache | None = None
+    cached_products: list[dict[str, Any]] = []
     if not force_refresh:
         cached_products, cache_row = await _load_sales_motivation_catalog_cache(point, normalized_days, db)
-        if cache_row is not None and _sales_motivation_catalog_cache_is_fresh(cache_row):
+        if cache_row is not None and _sales_motivation_catalog_cache_is_fresh(cache_row) and cached_products:
             return cached_products, True, cache_row.source_refreshed_at
 
-    products = await _build_sales_motivation_catalog_products_live(point, db, no_sales_days=normalized_days)
+    try:
+        products = await _build_sales_motivation_catalog_products_live(point, db, no_sales_days=normalized_days)
+    except Exception:
+        if cached_products:
+            logger.warning(
+                'Не удалось обновить каталог мотивационных товаров для точки %s. Возвращаем старый БД-кеш, чтобы не скрыть мотивации.',
+                point.name,
+                exc_info=True,
+            )
+            return cached_products, True, cache_row.source_refreshed_at if cache_row else None
+        raise
+
+    if not products and cached_products:
+        logger.warning(
+            'Обновление каталога мотивационных товаров для точки %s вернуло 0 товаров. Старый БД-кеш сохранён и возвращён пользователю.',
+            point.name,
+        )
+        return cached_products, True, cache_row.source_refreshed_at if cache_row else None
+
     cache_row = await _store_sales_motivation_catalog_cache(point, normalized_days, products, db)
     if commit:
         await db.commit()
