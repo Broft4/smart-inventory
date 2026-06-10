@@ -72,12 +72,14 @@ from app.notifications import list_unread_notifications, mark_unread_notificatio
 from app.registration import (
     approve_registration_request,
     create_referral_link,
+    create_referral_manager,
     create_registration_request,
     delete_referral_link,
     list_referral_links,
     list_registration_requests,
     reject_registration_request,
     resolve_referral_token,
+    update_referral_user,
 )
 from app.payroll import (
     EmployeeBonusCreateRequest,
@@ -161,7 +163,10 @@ from app.schemas import (
     ReferralLinkActionResponse,
     ReferralLinkCreateRequest,
     ReferralLinksResponse,
+    ReferralManagerCreateRequest,
     ReferralResolveResponse,
+    ReferralUserModel,
+    ReferralUserUpdateRequest,
     RegistrationRejectRequest,
     LogoutResponse,
     MeResponse,
@@ -247,7 +252,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260610-motivation-expiration-from-product-v1'
+templates.env.globals['asset_version'] = '20260610-referrals-page-manager-role-v1'
 
 
 @app.middleware('http')
@@ -315,10 +320,24 @@ async def require_platform_admin(user: User = Depends(require_user)) -> User:
     return user
 
 
+async def require_referrals_access(user: User = Depends(require_user)) -> User:
+    if user.role not in {'platform_admin', 'superadmin', 'manager'}:
+        raise HTTPException(status_code=403, detail='Нет доступа к рефералам.')
+    return user
+
+
+def _home_url_for_user(user: User) -> str:
+    if user.role == 'manager':
+        return '/referrals'
+    if user.role in {'platform_admin', 'superadmin', 'admin'}:
+        return '/admin'
+    return '/'
+
+
 @app.get('/login')
 async def login_page(request: Request, user: User | None = Depends(get_current_user)):
     if user:
-        return RedirectResponse(url='/admin' if user.role in {'platform_admin', 'superadmin', 'admin'} else '/', status_code=302)
+        return RedirectResponse(url=_home_url_for_user(user), status_code=302)
     return templates.TemplateResponse(request, 'login.html', {})
 
 
@@ -331,6 +350,8 @@ async def referral_registration_page(token: str):
 async def inventory_page(request: Request, user: User | None = Depends(get_current_user)):
     if not user:
         return RedirectResponse(url='/login', status_code=302)
+    if user.role == 'manager':
+        return RedirectResponse(url='/referrals', status_code=302)
     if user.role in {'platform_admin', 'superadmin', 'admin'}:
         return RedirectResponse(url='/admin', status_code=302)
     _spawn_prewarm(user.location)
@@ -345,6 +366,10 @@ async def inventory_page(request: Request, user: User | None = Depends(get_curre
 async def admin_page(request: Request, user: User | None = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     if not user:
         return RedirectResponse(url='/login', status_code=302)
+    if user.role == 'manager':
+        return RedirectResponse(url='/referrals', status_code=302)
+    if user.role not in {'platform_admin', 'superadmin', 'admin'}:
+        return RedirectResponse(url='/', status_code=302)
     accessible_locations = await get_user_accessible_locations(user, db)
     if accessible_locations:
         _spawn_prewarm(accessible_locations[0])
@@ -358,6 +383,8 @@ async def admin_page(request: Request, user: User | None = Depends(get_current_u
 async def payroll_page(request: Request, user: User | None = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     if not user:
         return RedirectResponse(url='/login', status_code=302)
+    if user.role == 'manager':
+        return RedirectResponse(url='/referrals', status_code=302)
     if user.role == 'employee' and request.query_params.get('view') == 'shifts':
         return RedirectResponse(url='/shifts', status_code=302)
     accessible_locations = await get_payroll_accessible_locations(user, db)
@@ -380,6 +407,8 @@ async def payroll_page(request: Request, user: User | None = Depends(get_current
 async def shifts_page(request: Request, user: User | None = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     if not user:
         return RedirectResponse(url='/login', status_code=302)
+    if user.role == 'manager':
+        return RedirectResponse(url='/referrals', status_code=302)
     accessible_locations = await get_payroll_accessible_locations(user, db)
     location = accessible_locations[0] if accessible_locations else (user.location if user.location else None)
     return templates.TemplateResponse(
@@ -396,6 +425,22 @@ async def shifts_page(request: Request, user: User | None = Depends(get_current_
     )
 
 
+@app.get('/referrals')
+async def referrals_page(request: Request, user: User | None = Depends(get_current_user)):
+    if not user:
+        return RedirectResponse(url='/login', status_code=302)
+    if user.role not in {'platform_admin', 'superadmin', 'manager'}:
+        return RedirectResponse(url=_home_url_for_user(user), status_code=302)
+    return templates.TemplateResponse(
+        request,
+        'referrals.html',
+        {
+            'user': user,
+            'can_open_admin': user.role in {'platform_admin', 'superadmin'},
+        },
+    )
+
+
 @app.post('/api/login', response_model=LoginResponse)
 async def api_login(payload: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
     user = await authenticate_user(payload.username.strip(), payload.password, db)
@@ -407,7 +452,7 @@ async def api_login(payload: LoginRequest, request: Request, db: AsyncSession = 
         success=True,
         message='Вход выполнен.',
         user=user_to_schema(user),
-        redirect_to='/admin' if user.role in {'platform_admin', 'superadmin', 'admin'} else '/',
+        redirect_to=_home_url_for_user(user),
     )
 
 
@@ -422,18 +467,28 @@ async def api_resolve_referral_token(token: str, db: AsyncSession = Depends(get_
 
 
 @app.get('/api/referral-links', response_model=ReferralLinksResponse)
-async def api_list_referral_links(admin: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db)):
-    return await list_referral_links(db)
+async def api_list_referral_links(user: User = Depends(require_referrals_access), db: AsyncSession = Depends(get_db)):
+    return await list_referral_links(db, user)
 
 
 @app.post('/api/referral-links', response_model=ReferralLinkActionResponse)
-async def api_create_referral_link(payload: ReferralLinkCreateRequest, admin: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db)):
-    return await create_referral_link(payload, db, admin)
+async def api_create_referral_link(payload: ReferralLinkCreateRequest, user: User = Depends(require_referrals_access), db: AsyncSession = Depends(get_db)):
+    return await create_referral_link(payload, db, user)
 
 
 @app.delete('/api/referral-links/{link_id}', response_model=DeleteResponse)
-async def api_delete_referral_link(link_id: int, admin: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db)):
-    return await delete_referral_link(link_id, db)
+async def api_delete_referral_link(link_id: int, user: User = Depends(require_referrals_access), db: AsyncSession = Depends(get_db)):
+    return await delete_referral_link(link_id, db, user)
+
+
+@app.post('/api/referral-managers', response_model=ReferralUserModel)
+async def api_create_referral_manager(payload: ReferralManagerCreateRequest, user: User = Depends(require_referrals_access), db: AsyncSession = Depends(get_db)):
+    return await create_referral_manager(payload, db, user)
+
+
+@app.patch('/api/referral-users/{user_id}', response_model=ReferralUserModel)
+async def api_update_referral_user(user_id: int, payload: ReferralUserUpdateRequest, user: User = Depends(require_referrals_access), db: AsyncSession = Depends(get_db)):
+    return await update_referral_user(user_id, payload, db, user)
 
 
 @app.get('/api/registration-requests', response_model=RegistrationListResponse)

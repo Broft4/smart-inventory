@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Рефералы — UCHETKA</title>
+    <script>
+        (function () {
+            try {
+                var theme = localStorage.getItem('uchetka:theme');
+                if (theme === 'dark') {
+                    document.documentElement.dataset.theme = 'dark';
+                }
+            } catch (error) {}
+        })();
+    </script>
+    <link rel="stylesheet" href="/static/css/style.css?v={{ asset_version }}">
+    <link rel="icon" type="image/png" href="/static/img/uchetka-mark.png?v={{ asset_version }}">
+</head>
+<body>
+<div class="container admin-container admin-v2 referrals-page">
+    <header class="page-header admin-header-v2 referrals-header">
+        <div class="app-heading-block">
+            <div class="app-brand-line" aria-label="UCHETKA — ЭФФЕКТИВНЫЙ УЧЕТ И КОНТРОЛЬ">
+                <img src="/static/img/uchetka-logo.png?v={{ asset_version }}" alt="" class="app-brand-mark">
+                <div>
+                    <div class="app-brand-name">UCHETKA</div>
+                    <p class="app-brand-tagline">ЭФФЕКТИВНЫЙ УЧЕТ И КОНТРОЛЬ</p>
+                </div>
+            </div>
+            <h1>Рефералы</h1>
+            <p class="muted-text">{{ user.full_name }}</p>
+        </div>
+        <div class="header-actions">
+            {% if can_open_admin %}
+            <a href="/admin" class="btn secondary btn-inline">Панель управляющего</a>
+            {% endif %}
+            <a href="/logout" id="logout-btn" class="btn secondary btn-inline">Выйти</a>
+        </div>
+    </header>
+
+    <section class="category-card referral-summary-card">
+        <div class="section-title-row">
+            <div>
+                <h2 class="section-title">Реферальная программа</h2>
+                <p class="muted-text" id="referrals-scope-note">Загрузка данных...</p>
+            </div>
+            <div class="modal-header-actions">
+                <button id="refresh-referrals-btn" class="btn secondary btn-inline" type="button">Обновить</button>
+            </div>
+        </div>
+        <div id="referrals-message" class="message"></div>
+        <div id="referrals-kpis" class="referrals-kpis"></div>
+    </section>
+
+    <section id="referral-create-link-card" class="category-card">
+        <div class="section-title-row">
+            <div>
+                <h2 class="section-title">Реферальные ссылки</h2>
+                <p class="muted-text">Создавайте и копируйте ссылки для участников реферальной программы.</p>
+            </div>
+        </div>
+        <div class="referral-create-bar">
+            <label>Участник
+                <select id="referral-owner-select">
+                    <option value="">Загрузка...</option>
+                </select>
+            </label>
+            <button id="create-referral-link-btn" class="btn primary btn-inline" type="button">Создать ссылку</button>
+        </div>
+        <div id="referrals-list" class="users-list referrals-list">
+            <p>Загрузка рефералов...</p>
+        </div>
+    </section>
+
+    <section id="referral-managers-card" class="category-card hidden">
+        <div class="section-title-row">
+            <div>
+                <h2 class="section-title">Менеджеры</h2>
+                <p class="muted-text">Главный управляющий добавляет менеджеров и привязывает их к себе. Админ может менять проценты и привязки.</p>
+            </div>
+        </div>
+        <form id="referral-manager-form" class="user-form referral-manager-form" novalidate>
+            <label>ФИО менеджера
+                <input type="text" id="referral-manager-full-name" required>
+            </label>
+            <label>Дата рождения
+                <input type="date" id="referral-manager-birth-date" required>
+            </label>
+            <label>Логин
+                <input type="text" id="referral-manager-username" required>
+            </label>
+            <label>Email
+                <input type="email" id="referral-manager-email" placeholder="name@example.com">
+            </label>
+            <label>Пароль
+                <input type="password" id="referral-manager-password" required>
+            </label>
+            <label id="referral-manager-parent-row" class="hidden">Главный управляющий
+                <select id="referral-manager-parent-select"></select>
+            </label>
+            <label id="referral-manager-percent-row" class="hidden">Процент менеджера
+                <input type="number" id="referral-manager-percent" min="0" max="100" step="0.01" placeholder="10">
+            </label>
+            <label class="checkbox-row">
+                <input type="checkbox" id="referral-manager-active" checked>
+                Аккаунт активен
+            </label>
+            <div class="form-actions">
+                <button type="submit" class="btn primary">Добавить менеджера</button>
+                <button type="button" id="referral-manager-reset-btn" class="btn secondary">Очистить</button>
+            </div>
+        </form>
+        <div id="referral-users-list" class="users-list referrals-users-list"></div>
+    </section>
+</div>
+
+<script>
+    window.currentReferralUser = {{ {
+        'id': user.id,
+        'full_name': user.full_name,
+        'role': user.role,
+        'manager_parent_user_id': user.manager_parent_user_id,
+        'referral_commission_percent': user.referral_commission_percent,
+    } | tojson }};
+</script>
+<script src="/static/js/app_shell.js?v={{ asset_version }}"></script>
+<script src="/static/js/referrals.js?v={{ asset_version }}"></script>
+</body>
+</html>

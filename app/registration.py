@@ -6,7 +6,7 @@ from datetime import date, datetime
 from typing import Iterable
 
 from fastapi import HTTPException
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -25,8 +25,10 @@ from app.schemas import (
     ReferralLinkCreateRequest,
     ReferralLinkModel,
     ReferralLinksResponse,
+    ReferralManagerCreateRequest,
     ReferralResolveResponse,
     ReferralUserModel,
+    ReferralUserUpdateRequest,
     DeleteResponse,
     RegistrationActionResponse,
     RegistrationApplicationModel,
@@ -42,6 +44,9 @@ logger = logging.getLogger(__name__)
 REGISTRATION_STATUS_PENDING = 'pending'
 REGISTRATION_STATUS_APPROVED = 'approved'
 REGISTRATION_STATUS_REJECTED = 'rejected'
+REFERRAL_MAIN_MANAGER_DEFAULT_PERCENT = 20.0
+REFERRAL_MANAGER_DEFAULT_PERCENT = 10.0
+REFERRAL_ROLES = {RoleEnum.SUPERADMIN.value, RoleEnum.MANAGER.value}
 
 
 def _base_app_url() -> str:
@@ -340,6 +345,8 @@ async def approve_registration_request(request_id: int, db: AsyncSession, curren
         password_hash=row.password_hash,
         role=RoleEnum.SUPERADMIN.value,
         location=None,
+        manager_parent_user_id=None,
+        referral_commission_percent=REFERRAL_MAIN_MANAGER_DEFAULT_PERCENT,
         is_active=True,
         created_at=datetime.utcnow(),
     )
@@ -382,13 +389,22 @@ async def reject_registration_request(request_id: int, payload: RegistrationReje
 
 
 
-def _user_to_referral_user_model(user: User) -> ReferralUserModel:
+async def _user_to_referral_user_model(user: User, db: AsyncSession | None = None) -> ReferralUserModel:
+    parent_name = None
+    parent_id = getattr(user, 'manager_parent_user_id', None)
+    if db is not None and parent_id:
+        parent = await db.get(User, int(parent_id))
+        parent_name = parent.full_name if parent else None
     return ReferralUserModel(
         id=user.id,
         full_name=user.full_name,
         username=user.username,
         role=RoleEnum(user.role),
         location=user.location,
+        is_active=user.is_active,
+        manager_parent_user_id=parent_id,
+        manager_parent_user_name=parent_name,
+        referral_commission_percent=getattr(user, 'referral_commission_percent', None),
     )
 
 
@@ -417,17 +433,110 @@ async def _build_referral_link_model(link: ReferralLink, db: AsyncSession) -> Re
         id=link.id,
         token=link.token,
         url=_referral_url(link.token),
-        owner=_user_to_referral_user_model(owner),
+        owner=await _user_to_referral_user_model(owner, db),
         is_active=link.is_active,
         created_at=link.created_at,
         registrations=[_to_model(row, names.get(int(row.referred_by_user_id or 0))) for row in requests],
     )
 
 
+def _can_edit_referral_commission(current_user: User) -> bool:
+    return current_user.role == RoleEnum.PLATFORM_ADMIN.value
+
+
+def _can_create_referral_manager(current_user: User) -> bool:
+    return current_user.role in {RoleEnum.PLATFORM_ADMIN.value, RoleEnum.SUPERADMIN.value}
+
+
+def _default_commission_for_role(role: str | None) -> float | None:
+    if role == RoleEnum.SUPERADMIN.value:
+        return REFERRAL_MAIN_MANAGER_DEFAULT_PERCENT
+    if role == RoleEnum.MANAGER.value:
+        return REFERRAL_MANAGER_DEFAULT_PERCENT
+    return None
+
+
+def _normalize_commission(value: float | None, role: str | None) -> float | None:
+    if value is None:
+        return _default_commission_for_role(role)
+    percent = float(value)
+    if percent < 0 or percent > 100:
+        raise HTTPException(status_code=400, detail='Процент должен быть от 0 до 100.')
+    return round(percent, 2)
+
+
+async def _validate_manager_parent(parent_user_id: int | None, db: AsyncSession) -> User | None:
+    if not parent_user_id:
+        raise HTTPException(status_code=400, detail='Менеджера нужно привязать к главному управляющему.')
+    parent = await db.get(User, int(parent_user_id))
+    if not parent or parent.role != RoleEnum.SUPERADMIN.value or not parent.is_active:
+        raise HTTPException(status_code=400, detail='Выберите активного главного управляющего.')
+    return parent
+
+
+async def _referral_scope_user_ids(current_user: User, db: AsyncSession) -> list[int]:
+    if current_user.role == RoleEnum.PLATFORM_ADMIN.value:
+        rows = (await db.scalars(
+            select(User.id)
+            .where(User.role.in_([RoleEnum.SUPERADMIN.value, RoleEnum.MANAGER.value]))
+            .order_by(User.full_name.asc())
+        )).all()
+        return [int(row) for row in rows]
+    if current_user.role == RoleEnum.SUPERADMIN.value:
+        rows = (await db.scalars(
+            select(User.id)
+            .where(
+                or_(
+                    User.id == current_user.id,
+                    (User.role == RoleEnum.MANAGER.value) & (User.manager_parent_user_id == current_user.id),
+                )
+            )
+            .order_by(User.full_name.asc())
+        )).all()
+        return [int(row) for row in rows]
+    if current_user.role == RoleEnum.MANAGER.value:
+        return [int(current_user.id)]
+    raise HTTPException(status_code=403, detail='Нет доступа к рефералам.')
+
+
+async def _ensure_referral_scope_owner(owner: User, db: AsyncSession, current_user: User) -> None:
+    if owner.role not in REFERRAL_ROLES:
+        raise HTTPException(status_code=400, detail='Реферальные ссылки доступны только главным управляющим и менеджерам.')
+    allowed_ids = set(await _referral_scope_user_ids(current_user, db))
+    if int(owner.id) not in allowed_ids:
+        raise HTTPException(status_code=403, detail='Нет доступа к этому участнику реферальной программы.')
+
+
+async def _main_manager_models(db: AsyncSession) -> list[ReferralUserModel]:
+    rows = (await db.scalars(
+        select(User)
+        .where(User.role == RoleEnum.SUPERADMIN.value, User.is_active.is_(True))
+        .order_by(User.full_name.asc())
+    )).all()
+    return [await _user_to_referral_user_model(row, db) for row in rows]
+
+
+async def _referral_user_models_for_scope(db: AsyncSession, current_user: User) -> list[ReferralUserModel]:
+    ids = await _referral_scope_user_ids(current_user, db)
+    if not ids:
+        return []
+    rows = (await db.scalars(
+        select(User)
+        .where(User.id.in_(ids))
+        .order_by(User.role.asc(), User.full_name.asc())
+    )).all()
+    role_order = {RoleEnum.SUPERADMIN.value: 0, RoleEnum.MANAGER.value: 1}
+    rows = sorted(rows, key=lambda row: (role_order.get(row.role, 99), row.full_name.lower()))
+    return [await _user_to_referral_user_model(row, db) for row in rows]
+
+
 async def create_referral_link(payload: ReferralLinkCreateRequest, db: AsyncSession, current_user: User) -> ReferralLinkActionResponse:
     owner = await db.get(User, payload.user_id)
     if not owner:
         raise HTTPException(status_code=404, detail='Пользователь не найден.')
+    if not owner.is_active:
+        raise HTTPException(status_code=400, detail='Нельзя создать ссылку для выключенного пользователя.')
+    await _ensure_referral_scope_owner(owner, db, current_user)
     existing = await db.scalar(
         select(ReferralLink)
         .where(ReferralLink.owner_user_id == owner.id, ReferralLink.is_active.is_(True))
@@ -462,21 +571,88 @@ async def create_referral_link(payload: ReferralLinkCreateRequest, db: AsyncSess
     raise HTTPException(status_code=500, detail='Не удалось сгенерировать уникальную ссылку.')
 
 
-async def list_referral_links(db: AsyncSession) -> ReferralLinksResponse:
-    links = (
-        await db.scalars(
-            select(ReferralLink)
-            .where(ReferralLink.is_active.is_(True))
-            .order_by(ReferralLink.created_at.desc(), ReferralLink.id.desc())
-        )
-    ).all()
-    return ReferralLinksResponse(links=[await _build_referral_link_model(link, db) for link in links])
+async def list_referral_links(db: AsyncSession, current_user: User) -> ReferralLinksResponse:
+    scope_ids = await _referral_scope_user_ids(current_user, db)
+    if scope_ids:
+        links = (
+            await db.scalars(
+                select(ReferralLink)
+                .where(ReferralLink.is_active.is_(True), ReferralLink.owner_user_id.in_(scope_ids))
+                .order_by(ReferralLink.created_at.desc(), ReferralLink.id.desc())
+            )
+        ).all()
+    else:
+        links = []
+    return ReferralLinksResponse(
+        links=[await _build_referral_link_model(link, db) for link in links],
+        users=await _referral_user_models_for_scope(db, current_user),
+        main_managers=await _main_manager_models(db) if current_user.role == RoleEnum.PLATFORM_ADMIN.value else [],
+        can_create_manager=_can_create_referral_manager(current_user),
+        can_create_links=current_user.role in {RoleEnum.PLATFORM_ADMIN.value, RoleEnum.SUPERADMIN.value, RoleEnum.MANAGER.value},
+        can_edit_commission=_can_edit_referral_commission(current_user),
+        default_main_commission_percent=REFERRAL_MAIN_MANAGER_DEFAULT_PERCENT,
+        default_manager_commission_percent=REFERRAL_MANAGER_DEFAULT_PERCENT,
+    )
 
 
-async def delete_referral_link(link_id: int, db: AsyncSession) -> DeleteResponse:
+async def create_referral_manager(payload: ReferralManagerCreateRequest, db: AsyncSession, current_user: User) -> ReferralUserModel:
+    if not _can_create_referral_manager(current_user):
+        raise HTTPException(status_code=403, detail='Создавать менеджеров может только админ или главный управляющий.')
+    username = _normalize_username(payload.username)
+    email = _validate_email(payload.email)
+    await _ensure_username_available(username, db)
+    await _ensure_email_is_unique(email, db)
+    parent_id = current_user.id if current_user.role == RoleEnum.SUPERADMIN.value else payload.manager_parent_user_id
+    await _validate_manager_parent(parent_id, db)
+    commission = _normalize_commission(
+        payload.referral_commission_percent if current_user.role == RoleEnum.PLATFORM_ADMIN.value else None,
+        RoleEnum.MANAGER.value,
+    )
+    user = User(
+        full_name=_clean_text(payload.full_name),
+        birth_date=payload.birth_date,
+        username=username,
+        email=email,
+        password_hash=hash_password(payload.password),
+        role=RoleEnum.MANAGER.value,
+        location=None,
+        manager_parent_user_id=parent_id,
+        referral_commission_percent=commission,
+        is_active=payload.is_active,
+        created_at=datetime.utcnow(),
+    )
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    return await _user_to_referral_user_model(user, db)
+
+
+async def update_referral_user(user_id: int, payload: ReferralUserUpdateRequest, db: AsyncSession, current_user: User) -> ReferralUserModel:
+    if not _can_edit_referral_commission(current_user):
+        raise HTTPException(status_code=403, detail='Менять проценты и привязки может только админ.')
+    user = await db.get(User, int(user_id))
+    if not user or user.role not in REFERRAL_ROLES:
+        raise HTTPException(status_code=404, detail='Участник реферальной программы не найден.')
+    if user.role == RoleEnum.MANAGER.value:
+        await _validate_manager_parent(payload.manager_parent_user_id, db)
+        user.manager_parent_user_id = payload.manager_parent_user_id
+    else:
+        user.manager_parent_user_id = None
+    user.referral_commission_percent = _normalize_commission(payload.referral_commission_percent, user.role)
+    if payload.is_active is not None:
+        user.is_active = bool(payload.is_active)
+    await db.commit()
+    await db.refresh(user)
+    return await _user_to_referral_user_model(user, db)
+
+
+async def delete_referral_link(link_id: int, db: AsyncSession, current_user: User) -> DeleteResponse:
     link = await db.get(ReferralLink, link_id)
     if not link:
         raise HTTPException(status_code=404, detail='Реферальная ссылка не найдена.')
+    owner = await db.get(User, link.owner_user_id)
+    if owner:
+        await _ensure_referral_scope_owner(owner, db, current_user)
 
     affected_requests = await db.scalar(
         select(func.count(RegistrationRequest.id)).where(RegistrationRequest.referral_link_id == link.id)

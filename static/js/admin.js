@@ -385,6 +385,7 @@ function roleDisplayName(role) {
     if (role === 'platform_admin') return 'Админ';
     if (role === 'superadmin') return 'Главный управляющий';
     if (role === 'admin') return 'Управляющий';
+    if (role === 'manager') return 'Менеджер';
     if (role === 'employee') return 'Сотрудник';
     return role || '—';
 }
@@ -425,6 +426,9 @@ function updateUserFormByRole({ editingUser = null } = {}) {
         if (option.value === 'admin') {
             option.hidden = !currentCanManageManagers && !(editingUser && editingUser.role === 'admin');
         }
+        if (option.value === 'manager') {
+            option.hidden = !currentCanManageManagers && !(editingUser && editingUser.role === 'manager');
+        }
     });
 
     if (!currentIsPlatformAdmin && selectedRole === 'platform_admin') {
@@ -435,6 +439,9 @@ function updateUserFormByRole({ editingUser = null } = {}) {
     }
     if (!currentCanManageManagers && selectedRole === 'admin') {
         roleSelect.value = editingCurrentAdmin ? 'admin' : 'employee';
+    }
+    if (!currentCanManageManagers && selectedRole === 'manager') {
+        roleSelect.value = editingCurrentAdmin ? 'manager' : 'employee';
     }
 
     const roleValue = roleSelect.value;
@@ -1582,6 +1589,9 @@ function getUserLocationForFilter(user) {
     if (user.role === 'platform_admin') {
         return ['__all__'];
     }
+    if (user.role === 'manager') {
+        return [];
+    }
     return user.location ? [user.location] : [];
 }
 
@@ -1610,7 +1620,7 @@ function renderUsers(users = adminState.allUsers) {
     container.innerHTML = filteredUsers.map(user => {
         const locationInfo = (user.role === 'admin' || user.role === 'superadmin')
             ? (Array.isArray(user.admin_locations) && user.admin_locations.length ? `точки: ${escapeHtml(user.admin_locations.join(', '))}` : 'точки не назначены')
-            : (user.role === 'platform_admin' ? 'доступ ко всем точкам' : escapeHtml(user.location || 'без точки'));
+            : (user.role === 'platform_admin' ? 'доступ ко всем точкам' : (user.role === 'manager' ? `рефералы${user.manager_parent_user_name ? ` · главный: ${escapeHtml(user.manager_parent_user_name)}` : ''}` : escapeHtml(user.location || 'без точки')));
         const email = getUserEmail(user);
         const emailText = email ? escapeHtml(email) : '<span class="muted-text-warning">не указана</span>';
         return `

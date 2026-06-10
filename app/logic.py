@@ -665,9 +665,15 @@ def bootstrap_schema_and_admin(sync_conn) -> None:
         required = {'id', 'full_name', 'birth_date', 'username', 'password_hash', 'role', 'location', 'is_active', 'created_at'}
         if not required.issubset(columns):
             sync_conn.execute(text('DROP TABLE IF EXISTS users'))
-        elif 'email' not in columns:
-            sync_conn.execute(text('ALTER TABLE users ADD COLUMN email VARCHAR(255)'))
-            sync_conn.execute(text('CREATE INDEX IF NOT EXISTS ix_users_email ON users (email)'))
+        else:
+            if 'email' not in columns:
+                sync_conn.execute(text('ALTER TABLE users ADD COLUMN email VARCHAR(255)'))
+                sync_conn.execute(text('CREATE INDEX IF NOT EXISTS ix_users_email ON users (email)'))
+            if 'manager_parent_user_id' not in columns:
+                sync_conn.execute(text('ALTER TABLE users ADD COLUMN manager_parent_user_id INTEGER'))
+                sync_conn.execute(text('CREATE INDEX IF NOT EXISTS ix_users_manager_parent_user_id ON users (manager_parent_user_id)'))
+            if 'referral_commission_percent' not in columns:
+                sync_conn.execute(text('ALTER TABLE users ADD COLUMN referral_commission_percent FLOAT'))
 
     if 'password_reset_requests' in tables:
         cols = {c['name'] for c in inspector.get_columns('password_reset_requests')}
@@ -836,6 +842,10 @@ def is_management_role(role: str | None) -> bool:
     return role in {RoleEnum.PLATFORM_ADMIN.value, RoleEnum.SUPERADMIN.value, RoleEnum.ADMIN.value}
 
 
+def is_referral_role(role: str | None) -> bool:
+    return role in {RoleEnum.PLATFORM_ADMIN.value, RoleEnum.SUPERADMIN.value, RoleEnum.MANAGER.value}
+
+
 def uses_location_access_role(role: str | None) -> bool:
     return role in {RoleEnum.SUPERADMIN.value, RoleEnum.ADMIN.value}
 
@@ -892,8 +902,44 @@ async def _validate_location_ids(location_ids: list[int], db: AsyncSession) -> l
     return rows
 
 
+
+async def _referral_parent_name(user: User, db: AsyncSession) -> str | None:
+    parent_id = getattr(user, 'manager_parent_user_id', None)
+    if not parent_id:
+        return None
+    parent = await db.get(User, int(parent_id))
+    return parent.full_name if parent else None
+
+
+def _default_referral_commission_for_role(role: str | None) -> float | None:
+    if role == RoleEnum.SUPERADMIN.value:
+        return 20.0
+    if role == RoleEnum.MANAGER.value:
+        return 10.0
+    return None
+
+
+def _normalize_referral_commission(value: float | None, role: str | None) -> float | None:
+    if value is None:
+        return _default_referral_commission_for_role(role)
+    percent = float(value)
+    if percent < 0 or percent > 100:
+        raise HTTPException(status_code=400, detail='Процент реферала должен быть от 0 до 100.')
+    return round(percent, 2)
+
+
+async def _validate_manager_parent(parent_user_id: int | None, db: AsyncSession) -> User | None:
+    if not parent_user_id:
+        raise HTTPException(status_code=400, detail='Менеджера нужно привязать к главному управляющему.')
+    parent = await db.get(User, int(parent_user_id))
+    if not parent or parent.role != RoleEnum.SUPERADMIN.value or not parent.is_active:
+        raise HTTPException(status_code=400, detail='Выберите активного главного управляющего для менеджера.')
+    return parent
+
+
 async def _build_user_response(user: User, db: AsyncSession) -> UserResponse:
     admin_rows = await _get_admin_location_rows(user.id, db) if uses_location_access_role(user.role) else []
+    manager_parent_name = await _referral_parent_name(user, db)
     return UserResponse(
         id=user.id,
         full_name=user.full_name,
@@ -905,6 +951,9 @@ async def _build_user_response(user: User, db: AsyncSession) -> UserResponse:
         is_active=user.is_active,
         admin_location_ids=[row.id for row in admin_rows],
         admin_locations=[row.name for row in admin_rows],
+        manager_parent_user_id=getattr(user, 'manager_parent_user_id', None),
+        manager_parent_user_name=manager_parent_name,
+        referral_commission_percent=getattr(user, 'referral_commission_percent', None),
     )
 
 
@@ -975,6 +1024,9 @@ def user_to_schema(user: User) -> UserInfo:
         is_active=user.is_active,
         admin_location_ids=[],
         admin_locations=[],
+        manager_parent_user_id=getattr(user, 'manager_parent_user_id', None),
+        manager_parent_user_name=None,
+        referral_commission_percent=getattr(user, 'referral_commission_percent', None),
     )
 
 
@@ -1017,13 +1069,19 @@ async def list_users(db: AsyncSession, current_user: User) -> UserListResponse:
                 select(AdminLocationAccess.admin_user_id).where(AdminLocationAccess.location_point_id.in_(accessible_location_ids))
             )).all()
             user_ids.update(int(row) for row in manager_ids)
+        if current_user.role == RoleEnum.SUPERADMIN.value:
+            referral_manager_ids = (await db.scalars(
+                select(User.id).where(User.role == RoleEnum.MANAGER.value, User.manager_parent_user_id == current_user.id)
+            )).all()
+            user_ids.update(int(row) for row in referral_manager_ids)
         users = (await db.scalars(select(User).where(User.id.in_(sorted(user_ids))))).all()
 
     role_order = {
         RoleEnum.PLATFORM_ADMIN.value: 0,
         RoleEnum.SUPERADMIN.value: 1,
         RoleEnum.ADMIN.value: 2,
-        RoleEnum.EMPLOYEE.value: 3,
+        RoleEnum.MANAGER.value: 3,
+        RoleEnum.EMPLOYEE.value: 4,
     }
     ordered_users = sorted(users, key=lambda item: (role_order.get(item.role, 99), item.full_name.lower()))
     return UserListResponse(users=[await _build_user_response(user, db) for user in ordered_users])
@@ -1053,12 +1111,17 @@ async def create_user(payload: UserCreateRequest, db: AsyncSession, current_user
 
     if current_user.role == RoleEnum.ADMIN.value and requested_role != RoleEnum.EMPLOYEE.value:
         raise HTTPException(status_code=403, detail='Управляющий может создавать только сотрудников.')
-    if current_user.role == RoleEnum.SUPERADMIN.value and requested_role not in {RoleEnum.ADMIN.value, RoleEnum.EMPLOYEE.value}:
-        raise HTTPException(status_code=403, detail='Главный управляющий может создавать только управляющих и сотрудников.')
+    if current_user.role == RoleEnum.SUPERADMIN.value and requested_role not in {RoleEnum.ADMIN.value, RoleEnum.EMPLOYEE.value, RoleEnum.MANAGER.value}:
+        raise HTTPException(status_code=403, detail='Главный управляющий может создавать только управляющих, менеджеров и сотрудников.')
     if requested_role == RoleEnum.PLATFORM_ADMIN.value and current_user.role != RoleEnum.PLATFORM_ADMIN.value:
         raise HTTPException(status_code=403, detail='Назначать роль админа может только админ.')
     if requested_role == RoleEnum.SUPERADMIN.value and current_user.role != RoleEnum.PLATFORM_ADMIN.value:
         raise HTTPException(status_code=403, detail='Создавать главных управляющих может только админ.')
+    if requested_role == RoleEnum.MANAGER.value and current_user.role not in {RoleEnum.PLATFORM_ADMIN.value, RoleEnum.SUPERADMIN.value}:
+        raise HTTPException(status_code=403, detail='Создавать менеджеров может только админ или главный управляющий.')
+
+    manager_parent_user_id: int | None = None
+    referral_commission_percent: float | None = None
 
     if requested_role == RoleEnum.EMPLOYEE.value:
         if not normalized_location:
@@ -1068,8 +1131,17 @@ async def create_user(payload: UserCreateRequest, db: AsyncSession, current_user
             raise HTTPException(status_code=400, detail='Выбрана несуществующая точка.')
         if current_user.role != RoleEnum.PLATFORM_ADMIN.value:
             await ensure_user_can_access_location(current_user, normalized_location, db)
+    elif requested_role == RoleEnum.MANAGER.value:
+        normalized_location = None
+        manager_parent_user_id = current_user.id if current_user.role == RoleEnum.SUPERADMIN.value else payload.manager_parent_user_id
+        await _validate_manager_parent(manager_parent_user_id, db)
+        referral_commission_percent = _normalize_referral_commission(
+            payload.referral_commission_percent if current_user.role == RoleEnum.PLATFORM_ADMIN.value else None,
+            requested_role,
+        )
     else:
         normalized_location = None
+        referral_commission_percent = _normalize_referral_commission(payload.referral_commission_percent, requested_role)
 
     access_location_rows: list[LocationPoint] = []
     if requested_role in {RoleEnum.SUPERADMIN.value, RoleEnum.ADMIN.value}:
@@ -1085,6 +1157,8 @@ async def create_user(payload: UserCreateRequest, db: AsyncSession, current_user
         password_hash=hash_password(payload.password),
         role=requested_role,
         location=normalized_location,
+        manager_parent_user_id=manager_parent_user_id,
+        referral_commission_percent=referral_commission_percent,
         is_active=payload.is_active,
     )
     db.add(user)
@@ -1134,11 +1208,15 @@ async def update_user(user_id: int, payload: UserUpdateRequest, db: AsyncSession
     if current_user.role == RoleEnum.SUPERADMIN.value:
         if user.id == current_user.id and requested_role != RoleEnum.SUPERADMIN.value:
             raise HTTPException(status_code=400, detail='Нельзя снять роль главного управляющего у своего аккаунта.')
-        if requested_role not in {RoleEnum.SUPERADMIN.value, RoleEnum.ADMIN.value, RoleEnum.EMPLOYEE.value}:
-            raise HTTPException(status_code=403, detail='Главный управляющий не может назначать роль админа.')
+        if requested_role not in {RoleEnum.SUPERADMIN.value, RoleEnum.ADMIN.value, RoleEnum.EMPLOYEE.value, RoleEnum.MANAGER.value}:
+            raise HTTPException(status_code=403, detail='Главный управляющий может назначать только управляющих, менеджеров и сотрудников.')
         if user.id != current_user.id and requested_role == RoleEnum.SUPERADMIN.value:
             raise HTTPException(status_code=403, detail='Назначать главных управляющих может только админ.')
 
+    if requested_role == RoleEnum.MANAGER.value and current_user.role not in {RoleEnum.PLATFORM_ADMIN.value, RoleEnum.SUPERADMIN.value}:
+        raise HTTPException(status_code=403, detail='Назначать роль менеджера может только админ или главный управляющий.')
+    if current_user.role == RoleEnum.SUPERADMIN.value and user.role == RoleEnum.MANAGER.value and user.manager_parent_user_id != current_user.id:
+        raise HTTPException(status_code=403, detail='Нет доступа к этому менеджеру.')
     if requested_role == RoleEnum.PLATFORM_ADMIN.value and current_user.role != RoleEnum.PLATFORM_ADMIN.value:
         raise HTTPException(status_code=403, detail='Назначать роль админа может только админ.')
     if requested_role == RoleEnum.SUPERADMIN.value and current_user.role != RoleEnum.PLATFORM_ADMIN.value and user.id != current_user.id:
@@ -1148,6 +1226,9 @@ async def update_user(user_id: int, payload: UserUpdateRequest, db: AsyncSession
         raise HTTPException(status_code=400, detail='Нельзя снять роль админа у своего аккаунта.')
 
     old_platform_admin = user.role == RoleEnum.PLATFORM_ADMIN.value
+
+    manager_parent_user_id: int | None = None
+    referral_commission_percent: float | None = None
 
     access_location_rows: list[LocationPoint] = []
     if requested_role in {RoleEnum.SUPERADMIN.value, RoleEnum.ADMIN.value}:
@@ -1163,8 +1244,17 @@ async def update_user(user_id: int, payload: UserUpdateRequest, db: AsyncSession
             raise HTTPException(status_code=400, detail='Выбрана несуществующая точка.')
         if current_user.role != RoleEnum.PLATFORM_ADMIN.value:
             await ensure_user_can_access_location(current_user, normalized_location, db)
+    elif requested_role == RoleEnum.MANAGER.value:
+        normalized_location = None
+        manager_parent_user_id = current_user.id if current_user.role == RoleEnum.SUPERADMIN.value else (payload.manager_parent_user_id or user.manager_parent_user_id)
+        await _validate_manager_parent(manager_parent_user_id, db)
+        referral_commission_percent = _normalize_referral_commission(
+            payload.referral_commission_percent if current_user.role == RoleEnum.PLATFORM_ADMIN.value else getattr(user, 'referral_commission_percent', None),
+            requested_role,
+        )
     else:
         normalized_location = None
+        referral_commission_percent = _normalize_referral_commission(payload.referral_commission_percent, requested_role)
 
     old_name = user.full_name
     user.full_name = payload.full_name.strip()
@@ -1173,6 +1263,8 @@ async def update_user(user_id: int, payload: UserUpdateRequest, db: AsyncSession
     user.email = normalized_email
     user.role = requested_role
     user.location = normalized_location
+    user.manager_parent_user_id = manager_parent_user_id
+    user.referral_commission_percent = referral_commission_percent
     user.is_active = payload.is_active
     if payload.password:
         user.password_hash = hash_password(payload.password)
@@ -1187,6 +1279,7 @@ async def update_user(user_id: int, payload: UserUpdateRequest, db: AsyncSession
         elif user.id != current_user.id:
             await _assign_admin_location_access_by_ids(user.id, [], db, granted_by_user_id=current_user.id)
         user.location = None
+        user.manager_parent_user_id = None
     else:
         await db.execute(delete(AdminLocationAccess).where(AdminLocationAccess.admin_user_id == user.id))
 
@@ -1216,8 +1309,8 @@ async def delete_user(user_id: int, db: AsyncSession, current_user: User) -> Del
             raise HTTPException(status_code=403, detail='Нет доступа к пользователю из другой точки.')
 
     if current_user.role == RoleEnum.SUPERADMIN.value:
-        if user.role not in {RoleEnum.ADMIN.value, RoleEnum.EMPLOYEE.value}:
-            raise HTTPException(status_code=403, detail='Главный управляющий может удалять только управляющих и сотрудников.')
+        if user.role not in {RoleEnum.ADMIN.value, RoleEnum.MANAGER.value, RoleEnum.EMPLOYEE.value}:
+            raise HTTPException(status_code=403, detail='Главный управляющий может удалять только управляющих, менеджеров и сотрудников.')
         accessible_location_ids = set(await get_user_accessible_location_ids(current_user, db))
         if user.role == RoleEnum.EMPLOYEE.value:
             if not user.location or _normalize_location(user.location) not in set(await get_user_accessible_locations(current_user, db)):
@@ -1226,6 +1319,9 @@ async def delete_user(user_id: int, db: AsyncSession, current_user: User) -> Del
             user_location_ids = set(await get_user_accessible_location_ids(user, db))
             if not user_location_ids or not user_location_ids.intersection(accessible_location_ids):
                 raise HTTPException(status_code=403, detail='Нет доступа к управляющему из другой точки.')
+        elif user.role == RoleEnum.MANAGER.value:
+            if user.manager_parent_user_id != current_user.id:
+                raise HTTPException(status_code=403, detail='Нет доступа к этому менеджеру.')
 
     if user.role == RoleEnum.PLATFORM_ADMIN.value:
         platform_admin_count = await db.scalar(select(func.count()).select_from(User).where(User.role == RoleEnum.PLATFORM_ADMIN.value))

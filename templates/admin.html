@@ -37,6 +37,9 @@
             {% if user.role == 'platform_admin' %}
             <button id="open-registration-requests-btn" class="btn secondary btn-inline" type="button">Заявки</button>
             {% endif %}
+            {% if user.role in ['platform_admin', 'superadmin'] %}
+            <a href="/referrals" class="btn secondary btn-inline">Рефералы</a>
+            {% endif %}
             <a href="/shifts" class="btn secondary btn-inline">Смены</a>
             <a href="/payroll" class="btn secondary btn-inline">Бухгалтерия</a>
             <button id="open-users-btn" class="btn secondary btn-inline" type="button">Сотрудники</button>
@@ -299,6 +302,7 @@
                     <option value="platform_admin">Админ</option>
                     <option value="superadmin">Главный управляющий</option>
                     <option value="admin">Управляющий</option>
+                    <option value="manager">Менеджер</option>
                     <option value="employee">Сотрудник</option>
                 </select>
             </label>
@@ -318,40 +322,12 @@
                 <p class="muted-text">Новые участники получают доступ только после ручного подтверждения.</p>
             </div>
             <div class="modal-header-actions">
-                <button id="open-referrals-btn" class="btn secondary btn-inline" type="button">Просмотр рефералов</button>
                 <button id="refresh-registration-requests-btn" class="btn secondary btn-inline" type="button">Обновить</button>
                 <button id="close-registration-requests-modal-btn" class="btn secondary btn-inline" type="button">Закрыть</button>
             </div>
         </div>
         <div id="registration-requests-list" class="users-list modal-users-list">
             <p>Загрузка заявок...</p>
-        </div>
-    </div>
-</div>
-
-<div id="referrals-modal" class="modal-overlay hidden">
-    <div class="modal-card users-modal-card">
-        <div class="modal-header">
-            <div>
-                <h2>Реферальные ссылки</h2>
-                <p class="muted-text">Админ может создать ссылку для любого пользователя и видеть заявки, которые пришли по этой ссылке.</p>
-            </div>
-            <div class="modal-header-actions">
-                <button id="refresh-referrals-btn" class="btn secondary btn-inline" type="button">Обновить</button>
-                <button id="close-referrals-modal-btn" class="btn secondary btn-inline" type="button">Закрыть</button>
-            </div>
-        </div>
-        <div class="referral-create-bar">
-            <label>Пользователь
-                <select id="referral-owner-select">
-                    <option value="">Сначала загрузите пользователей</option>
-                </select>
-            </label>
-            <button id="create-referral-link-btn" class="btn primary btn-inline" type="button">Создать ссылку</button>
-        </div>
-        <div id="referrals-message" class="message"></div>
-        <div id="referrals-list" class="users-list modal-users-list">
-            <p>Загрузка рефералов...</p>
         </div>
     </div>
 </div>
@@ -388,6 +364,7 @@
                 <select id="user-role">
                     <option value="employee">Сотрудник</option>
                     <option value="admin">Управляющий</option>
+                    <option value="manager">Менеджер</option>
                     <option value="superadmin">Главный управляющий</option>
                     <option value="platform_admin">Админ</option>
                 </select>

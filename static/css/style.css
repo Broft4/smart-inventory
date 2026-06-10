@@ -4534,3 +4534,66 @@ html[data-theme="dark"] .employee-empty-state {
         text-overflow: ellipsis;
     }
 }
+
+/* Referrals page */
+.referrals-page .category-card {
+    margin-bottom: 18px;
+}
+
+.referrals-kpis {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    margin-top: 14px;
+}
+
+.referral-page-link-row,
+.referral-user-row {
+    align-items: stretch;
+}
+
+.referral-user-actions {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px;
+    align-items: end;
+    min-width: min(520px, 100%);
+}
+
+.referral-inline-label {
+    display: grid;
+    gap: 6px;
+    font-weight: 700;
+}
+
+.referral-inline-checkbox {
+    align-self: center;
+}
+
+.referral-manager-form {
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    align-items: end;
+    margin-bottom: 18px;
+}
+
+.referral-manager-form .form-actions,
+.referral-manager-form .message {
+    grid-column: 1 / -1;
+}
+
+.referrals-list,
+.referrals-users-list {
+    margin-top: 12px;
+}
+
+@media (max-width: 760px) {
+    .referral-user-row,
+    .referral-page-link-row {
+        flex-direction: column;
+    }
+
+    .referral-user-actions {
+        min-width: 0;
+        grid-template-columns: 1fr;
+    }
+}

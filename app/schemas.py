@@ -18,6 +18,7 @@ class RoleEnum(str, Enum):
     PLATFORM_ADMIN = 'platform_admin'  # Админ сервиса: доступ ко всем точкам, заявкам и рефералам.
     SUPERADMIN = 'superadmin'          # Главный управляющий своего пространства/точек.
     ADMIN = 'admin'                    # Управляющий назначенных точек.
+    MANAGER = 'manager'                # Менеджер рефералов: доступ только к странице «Рефералы».
     EMPLOYEE = 'employee'              # Сотрудник точки.
 
 
@@ -32,6 +33,9 @@ class UserInfo(BaseModel):
     is_active: bool
     admin_location_ids: list[int] = Field(default_factory=list)
     admin_locations: list[str] = Field(default_factory=list)
+    manager_parent_user_id: Optional[int] = None
+    manager_parent_user_name: Optional[str] = None
+    referral_commission_percent: Optional[float] = None
 
 
 class RegistrationCreateRequest(BaseModel):
@@ -95,12 +99,33 @@ class ReferralLinkCreateRequest(BaseModel):
     user_id: int = Field(..., ge=1)
 
 
+class ReferralManagerCreateRequest(BaseModel):
+    full_name: str = Field(..., min_length=3, max_length=255)
+    birth_date: date
+    username: str = Field(..., min_length=3, max_length=100)
+    email: Optional[str] = Field(default=None, max_length=255)
+    password: str = Field(..., min_length=6, max_length=255)
+    manager_parent_user_id: Optional[int] = Field(default=None, ge=1)
+    referral_commission_percent: Optional[float] = Field(default=None, ge=0, le=100)
+    is_active: bool = True
+
+
+class ReferralUserUpdateRequest(BaseModel):
+    manager_parent_user_id: Optional[int] = Field(default=None, ge=1)
+    referral_commission_percent: Optional[float] = Field(default=None, ge=0, le=100)
+    is_active: Optional[bool] = None
+
+
 class ReferralUserModel(BaseModel):
     id: int
     full_name: str
     username: str
     role: RoleEnum
     location: Optional[str] = None
+    is_active: bool = True
+    manager_parent_user_id: Optional[int] = None
+    manager_parent_user_name: Optional[str] = None
+    referral_commission_percent: Optional[float] = None
 
 
 class ReferralLinkModel(BaseModel):
@@ -115,6 +140,13 @@ class ReferralLinkModel(BaseModel):
 
 class ReferralLinksResponse(BaseModel):
     links: list[ReferralLinkModel]
+    users: list[ReferralUserModel] = Field(default_factory=list)
+    main_managers: list[ReferralUserModel] = Field(default_factory=list)
+    can_create_manager: bool = False
+    can_create_links: bool = False
+    can_edit_commission: bool = False
+    default_main_commission_percent: float = 20.0
+    default_manager_commission_percent: float = 10.0
 
 
 class ReferralLinkActionResponse(BaseModel):
@@ -191,6 +223,8 @@ class UserCreateRequest(BaseModel):
     role: RoleEnum = RoleEnum.EMPLOYEE
     location: Optional[str] = None
     admin_location_ids: list[int] = Field(default_factory=list)
+    manager_parent_user_id: Optional[int] = Field(default=None, ge=1)
+    referral_commission_percent: Optional[float] = Field(default=None, ge=0, le=100)
     is_active: bool = True
 
 
@@ -203,6 +237,8 @@ class UserUpdateRequest(BaseModel):
     role: RoleEnum = RoleEnum.EMPLOYEE
     location: Optional[str] = None
     admin_location_ids: list[int] = Field(default_factory=list)
+    manager_parent_user_id: Optional[int] = Field(default=None, ge=1)
+    referral_commission_percent: Optional[float] = Field(default=None, ge=0, le=100)
     is_active: bool = True
 
 
@@ -217,6 +253,9 @@ class UserResponse(BaseModel):
     is_active: bool
     admin_location_ids: list[int] = Field(default_factory=list)
     admin_locations: list[str] = Field(default_factory=list)
+    manager_parent_user_id: Optional[int] = None
+    manager_parent_user_name: Optional[str] = None
+    referral_commission_percent: Optional[float] = None
 
     model_config = {'from_attributes': True}
 
