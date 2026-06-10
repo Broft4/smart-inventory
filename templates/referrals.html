@@ -53,66 +53,197 @@
         <div id="referrals-kpis" class="referrals-kpis"></div>
     </section>
 
-    <section id="referral-create-link-card" class="category-card">
-        <div class="section-title-row">
+    <details id="referral-links-section" class="category-card payroll-collapse referral-collapse-card" open>
+        <summary class="report-summary-header payroll-collapse-summary referral-collapse-summary">
             <div>
                 <h2 class="section-title">Реферальные ссылки</h2>
-                <p class="muted-text">Создавайте и копируйте ссылки для участников реферальной программы.</p>
+                <p class="muted-text">Создавайте и копируйте ссылки, смотрите заявки и доли участников.</p>
             </div>
-        </div>
-        <div class="referral-create-bar">
-            <label>Участник
-                <select id="referral-owner-select">
-                    <option value="">Загрузка...</option>
-                </select>
-            </label>
-            <button id="create-referral-link-btn" class="btn primary btn-inline" type="button">Создать ссылку</button>
-        </div>
-        <div id="referrals-list" class="users-list referrals-list">
-            <p>Загрузка рефералов...</p>
-        </div>
-    </section>
+            <span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span>
+        </summary>
+        <div class="payroll-collapse-body referral-collapse-body">
+            <div class="referral-filter-bar" id="referral-links-filters">
+                <label>Поиск
+                    <input type="search" id="referral-link-filter-search" placeholder="Имя, логин, организация, email">
+                </label>
+                <label>Владелец
+                    <select id="referral-link-filter-role">
+                        <option value="all">Все роли</option>
+                        <option value="superadmin">Главные управляющие</option>
+                        <option value="manager">Менеджеры</option>
+                    </select>
+                </label>
+                <label class="referral-admin-only-filter hidden">Главный управляющий
+                    <select id="referral-link-filter-parent">
+                        <option value="all">Все управляющие</option>
+                    </select>
+                </label>
+                <label>Статус заявок
+                    <select id="referral-link-filter-status">
+                        <option value="all">Все статусы</option>
+                        <option value="pending">Ожидают</option>
+                        <option value="approved">Одобрены</option>
+                        <option value="rejected">Отклонены</option>
+                        <option value="none">Без заявок</option>
+                    </select>
+                </label>
+                <label>Заявки
+                    <select id="referral-link-filter-registrations">
+                        <option value="all">Все ссылки</option>
+                        <option value="with">Есть заявки</option>
+                        <option value="empty">Нет заявок</option>
+                    </select>
+                </label>
+                <label>Сортировка
+                    <select id="referral-link-filter-sort">
+                        <option value="created_desc">Сначала новые ссылки</option>
+                        <option value="owner_asc">По владельцу А–Я</option>
+                        <option value="registrations_desc">Больше заявок</option>
+                        <option value="approved_desc">Больше одобренных</option>
+                    </select>
+                </label>
+            </div>
 
-    <section id="referral-managers-card" class="category-card hidden">
-        <div class="section-title-row">
-            <div>
-                <h2 class="section-title">Менеджеры</h2>
-                <p class="muted-text">Главный управляющий добавляет менеджеров и привязывает их к себе. Админ может менять проценты и привязки.</p>
+            <div id="referral-create-link-card" class="referral-create-link-panel">
+                <div class="referral-subsection-title">
+                    <div>
+                        <h3>Создание ссылки</h3>
+                        <p class="muted-text">Выберите главного управляющего или менеджера, для которого нужно создать ссылку.</p>
+                    </div>
+                </div>
+                <div class="referral-create-bar">
+                    <label>Участник
+                        <select id="referral-owner-select">
+                            <option value="">Загрузка...</option>
+                        </select>
+                    </label>
+                    <button id="create-referral-link-btn" class="btn primary btn-inline" type="button">Создать ссылку</button>
+                </div>
+            </div>
+
+            <div id="referrals-list" class="users-list referrals-list">
+                <p>Загрузка рефералов...</p>
             </div>
         </div>
-        <form id="referral-manager-form" class="user-form referral-manager-form" novalidate>
-            <label>ФИО менеджера
-                <input type="text" id="referral-manager-full-name" required>
-            </label>
-            <label>Дата рождения
-                <input type="date" id="referral-manager-birth-date" required>
-            </label>
-            <label>Логин
-                <input type="text" id="referral-manager-username" required>
-            </label>
-            <label>Email
-                <input type="email" id="referral-manager-email" placeholder="name@example.com">
-            </label>
-            <label>Пароль
-                <input type="password" id="referral-manager-password" required>
-            </label>
-            <label id="referral-manager-parent-row" class="hidden">Главный управляющий
-                <select id="referral-manager-parent-select"></select>
-            </label>
-            <label id="referral-manager-percent-row" class="hidden">Процент менеджера
-                <input type="number" id="referral-manager-percent" min="0" max="100" step="0.01" placeholder="10">
-            </label>
-            <label class="checkbox-row">
-                <input type="checkbox" id="referral-manager-active" checked>
-                Аккаунт активен
-            </label>
-            <div class="form-actions">
-                <button type="submit" class="btn primary">Добавить менеджера</button>
-                <button type="button" id="referral-manager-reset-btn" class="btn secondary">Очистить</button>
+    </details>
+
+    <details id="referral-manager-create-section" class="category-card payroll-collapse referral-collapse-card hidden" open>
+        <summary class="report-summary-header payroll-collapse-summary referral-collapse-summary">
+            <div>
+                <h2 class="section-title">Добавление менеджера</h2>
+                <p class="muted-text">Форма отделена от списка участников, чтобы не смешивать создание и управление.</p>
             </div>
-        </form>
-        <div id="referral-users-list" class="users-list referrals-users-list"></div>
-    </section>
+            <span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span>
+        </summary>
+        <div class="payroll-collapse-body referral-collapse-body">
+            <form id="referral-manager-form" class="user-form referral-manager-form" novalidate>
+                <label>ФИО менеджера
+                    <input type="text" id="referral-manager-full-name" required>
+                </label>
+                <label>Дата рождения
+                    <input type="date" id="referral-manager-birth-date" required>
+                </label>
+                <label>Логин
+                    <input type="text" id="referral-manager-username" required>
+                </label>
+                <label>Email
+                    <input type="email" id="referral-manager-email" placeholder="name@example.com">
+                </label>
+                <label>Пароль
+                    <input type="password" id="referral-manager-password" required>
+                </label>
+                <label id="referral-manager-parent-row" class="hidden">Главный управляющий
+                    <select id="referral-manager-parent-select"></select>
+                </label>
+                <label id="referral-manager-percent-row" class="hidden">Процент менеджера
+                    <input type="number" id="referral-manager-percent" min="0" max="100" step="0.01" placeholder="10">
+                </label>
+                <label class="checkbox-row">
+                    <input type="checkbox" id="referral-manager-active" checked>
+                    Аккаунт активен
+                </label>
+                <div class="form-actions">
+                    <button type="submit" class="btn primary">Добавить менеджера</button>
+                    <button type="button" id="referral-manager-reset-btn" class="btn secondary">Очистить</button>
+                </div>
+            </form>
+        </div>
+    </details>
+
+    <details id="referral-users-section" class="category-card payroll-collapse referral-collapse-card hidden" open>
+        <summary class="report-summary-header payroll-collapse-summary referral-collapse-summary">
+            <div>
+                <h2 class="section-title">Управляющие и менеджеры</h2>
+                <p class="muted-text">Раздельные списки участников реферальной программы с фильтрами и настройками долей.</p>
+            </div>
+            <span class="btn secondary btn-inline payroll-collapse-btn">Свернуть</span>
+        </summary>
+        <div class="payroll-collapse-body referral-collapse-body">
+            <div class="referral-filter-bar" id="referral-users-filters">
+                <label>Поиск
+                    <input type="search" id="referral-user-filter-search" placeholder="Имя, логин, управляющий">
+                </label>
+                <label>Роль
+                    <select id="referral-user-filter-role">
+                        <option value="all">Все</option>
+                        <option value="superadmin">Главные управляющие</option>
+                        <option value="manager">Менеджеры</option>
+                    </select>
+                </label>
+                <label class="referral-admin-only-filter hidden">Главный управляющий
+                    <select id="referral-user-filter-parent">
+                        <option value="all">Все управляющие</option>
+                    </select>
+                </label>
+                <label>Ссылка
+                    <select id="referral-user-filter-link">
+                        <option value="all">Все</option>
+                        <option value="with">Ссылка создана</option>
+                        <option value="without">Без ссылки</option>
+                    </select>
+                </label>
+                <label>Активность
+                    <select id="referral-user-filter-active">
+                        <option value="all">Все</option>
+                        <option value="active">Активные</option>
+                        <option value="inactive">Выключенные</option>
+                    </select>
+                </label>
+                <label>Сортировка
+                    <select id="referral-user-filter-sort">
+                        <option value="role_name">Роль и имя</option>
+                        <option value="name_asc">Имя А–Я</option>
+                        <option value="commission_desc">Доля по убыванию</option>
+                        <option value="referrals_desc">Больше рефералов</option>
+                    </select>
+                </label>
+            </div>
+
+            <div class="referral-participant-grid">
+                <section class="referral-participant-section">
+                    <div class="referral-subsection-title">
+                        <div>
+                            <h3>Главные управляющие</h3>
+                            <p class="muted-text">Получают долю главного управляющего и могут иметь привязанных менеджеров.</p>
+                        </div>
+                        <span id="referral-main-managers-count" class="status-chip grey">0</span>
+                    </div>
+                    <div id="referral-main-managers-list" class="users-list referrals-users-list"></div>
+                </section>
+
+                <section class="referral-participant-section">
+                    <div class="referral-subsection-title">
+                        <div>
+                            <h3>Менеджеры</h3>
+                            <p class="muted-text">Менеджеры привязаны к главным управляющим и получают отдельную долю.</p>
+                        </div>
+                        <span id="referral-managers-count" class="status-chip grey">0</span>
+                    </div>
+                    <div id="referral-managers-list" class="users-list referrals-users-list"></div>
+                </section>
+            </div>
+        </div>
+    </details>
 </div>
 
 <script>

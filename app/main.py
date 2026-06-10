@@ -252,7 +252,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260610-referrals-page-manager-role-v1'
+templates.env.globals['asset_version'] = '20260610-referrals-filters-collapse-v2'
 
 
 @app.middleware('http')

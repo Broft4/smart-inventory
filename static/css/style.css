@@ -4597,3 +4597,106 @@ html[data-theme="dark"] .employee-empty-state {
         grid-template-columns: 1fr;
     }
 }
+
+/* Referrals page filters and collapsible sections */
+.referral-collapse-card {
+    padding: 18px 20px;
+}
+
+.referral-collapse-summary {
+    margin: 0;
+}
+
+.referral-collapse-body {
+    margin-top: 16px;
+}
+
+.referral-filter-bar {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 12px;
+    align-items: end;
+    margin: 0 0 18px;
+    padding: 14px;
+    border: 1px solid #e3e8f0;
+    border-radius: 14px;
+    background: #f8fbff;
+}
+
+.referral-filter-bar label {
+    display: grid;
+    gap: 6px;
+    font-weight: 700;
+}
+
+.referral-create-link-panel {
+    border: 1px solid #e3e8f0;
+    border-radius: 14px;
+    padding: 14px;
+    margin-bottom: 16px;
+    background: #fbfcfe;
+}
+
+.referral-subsection-title {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.referral-subsection-title h3 {
+    margin: 0 0 4px;
+}
+
+.referral-link-copy-row {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.referral-mini-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.referral-participant-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 18px;
+}
+
+.referral-participant-section {
+    border: 1px solid #e3e8f0;
+    border-radius: 14px;
+    padding: 14px;
+    background: #fbfcfe;
+}
+
+.referrals-users-list:empty::before {
+    content: 'Нет данных.';
+    color: #64748b;
+}
+
+html[data-theme="dark"] .referral-filter-bar,
+html[data-theme="dark"] .referral-create-link-panel,
+html[data-theme="dark"] .referral-participant-section {
+    background: #132038;
+    border-color: #2c3f5c;
+    color: #e8f1fb;
+}
+
+@media (max-width: 760px) {
+    .referral-collapse-card {
+        padding: 14px;
+    }
+
+    .referral-collapse-summary {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .referral-link-copy-row {
+        grid-template-columns: 1fr;
+    }
+}
