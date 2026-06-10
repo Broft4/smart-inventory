@@ -68,8 +68,8 @@ class MoySkladClient:
         self.folder_cache_ttl = max(1800, self.inventory_cache_ttl)
         self.assortment_item_cache_ttl = max(900, self.inventory_cache_ttl)
 
-        self._inventory_cache: dict[tuple[Any, ...], CacheEntry] = {}
-        self._inventory_locks: dict[tuple[Any, ...], asyncio.Lock] = {}
+        self._inventory_cache: dict[tuple[str, str | None], CacheEntry] = {}
+        self._inventory_locks: dict[tuple[str, str | None], asyncio.Lock] = {}
 
         self._folders_cache: dict[tuple[str, str | None], CacheEntry] = {}
         self._folders_locks: dict[tuple[str, str | None], asyncio.Lock] = {}
@@ -89,12 +89,6 @@ class MoySkladClient:
 
         self._assortment_search_cache: dict[str, CacheEntry] = {}
         self._assortment_search_locks: dict[str, asyncio.Lock] = {}
-
-        # Отдельный кеш сроков годности по товарам/модификациям. Он нужен только
-        # для мотиваций продавцов и не должен менять основную структуру inventory,
-        # иначе можно сломать ревизии и уже сохранённые мотивационные товары.
-        self._expiration_days_cache: dict[tuple[str, str | None], CacheEntry] = {}
-        self._expiration_days_locks: dict[tuple[str, str | None], asyncio.Lock] = {}
 
         self.max_concurrent_requests = max(1, min(4, int(settings.ms_max_concurrent_requests or 2)))
 
@@ -740,47 +734,13 @@ class MoySkladClient:
             logger.info('Закешировано %s папок МоегоСклада для точки %s', len(folder_by_id), normalized_location or 'default')
             return folder_by_id
 
-    def _stock_row_entity_meta(self, stock_row: dict[str, Any] | None) -> dict[str, Any]:
-        if not isinstance(stock_row, dict):
-            return {}
-
-        direct_meta = stock_row.get('meta')
-        if isinstance(direct_meta, dict) and (direct_meta.get('href') or direct_meta.get('id')):
-            return direct_meta
-
-        assortment = stock_row.get('assortment')
-        if isinstance(assortment, dict):
-            assortment_meta = assortment.get('meta')
-            if isinstance(assortment_meta, dict) and (assortment_meta.get('href') or assortment_meta.get('id')):
-                return assortment_meta
-
-        return {}
-
-    def _stock_row_entity_type(self, stock_row: dict[str, Any] | None) -> str | None:
-        meta = self._stock_row_entity_meta(stock_row)
-        entity_type = str((meta or {}).get('type') or (stock_row or {}).get('type') or '').strip().lower()
-        return entity_type or None
-
-    def _base_assortment_meta_from_row(self, row: dict[str, Any] | None) -> dict[str, Any] | None:
-        if not isinstance(row, dict):
-            return None
-
-        for key in ('assortment', 'product', 'variant'):
-            candidate = row.get(key)
-            if isinstance(candidate, dict):
-                candidate_meta = candidate.get('meta')
-                if isinstance(candidate_meta, dict) and (candidate_meta.get('href') or candidate_meta.get('id')):
-                    return candidate_meta
-        return None
-
     async def _get_assortment_row_by_meta(self, assortment_meta: dict[str, Any] | None, *, token: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
         if not assortment_meta:
             return None, None
 
         href = assortment_meta.get('href')
-        entity_type = str(assortment_meta.get('type') or '').strip().lower()
         assortment_id = self._normalize_entity_id(assortment_meta.get('id')) or self._extract_id_from_href(href)
-        cache_key = self._sanitize_meta_href(href) or (f'{entity_type}:{assortment_id}' if entity_type and assortment_id else assortment_id)
+        cache_key = self._sanitize_meta_href(href) or assortment_id
         if not cache_key:
             return None, None
 
@@ -799,31 +759,12 @@ class MoySkladClient:
                     sanitized_href = self._sanitize_meta_href(href)
                     try:
                         row = await self.get_absolute(sanitized_href or href, token=token)
-                        source = f'{entity_type or "assortment"}.meta.href'
+                        source = 'assortment.meta.href'
                     except httpx.HTTPStatusError as exc:
                         if exc.response is None or exc.response.status_code not in {400, 404}:
                             raise
                         if not assortment_id:
                             raise
-                        if entity_type in {'product', 'variant', 'service', 'bundle', 'consignment'}:
-                            row = await self.get(f'entity/{entity_type}/{assortment_id}', token=token)
-                            source = f'{entity_type}.id'
-                        else:
-                            data = await self.get(
-                                'entity/assortment',
-                                params={'filter': f'id={assortment_id}', 'limit': 1},
-                                token=token,
-                            )
-                            rows = data.get('rows') or []
-                            row = rows[0] if rows else None
-                            if row is None:
-                                return None, None
-                            source = 'assortment.filter.id'
-                elif assortment_id:
-                    if entity_type in {'product', 'variant', 'service', 'bundle', 'consignment'}:
-                        row = await self.get(f'entity/{entity_type}/{assortment_id}', token=token)
-                        source = f'{entity_type}.id'
-                    else:
                         data = await self.get(
                             'entity/assortment',
                             params={'filter': f'id={assortment_id}', 'limit': 1},
@@ -834,6 +775,17 @@ class MoySkladClient:
                         if row is None:
                             return None, None
                         source = 'assortment.filter.id'
+                elif assortment_id:
+                    data = await self.get(
+                        'entity/assortment',
+                        params={'filter': f'id={assortment_id}', 'limit': 1},
+                        token=token,
+                    )
+                    rows = data.get('rows') or []
+                    row = rows[0] if rows else None
+                    if row is None:
+                        return None, None
+                    source = 'assortment.filter.id'
                 else:
                     return None, None
             except httpx.HTTPError:
@@ -887,50 +839,32 @@ class MoySkladClient:
             'reason': None,
         }
 
-        def _folder_id_from_source(source: dict[str, Any] | None) -> tuple[str | None, str | None]:
-            if not isinstance(source, dict):
-                return None, None
-            for key in ('productFolder', 'folder'):
-                candidate = source.get(key) or {}
-                if isinstance(candidate, dict) and candidate:
-                    meta = candidate.get('meta') or {}
-                    folder_id = candidate.get('id') or meta.get('id') or self._extract_id_from_href(meta.get('href'))
-                    if folder_id:
-                        return folder_id, key
-            return None, None
+        for key in ('productFolder', 'folder'):
+            candidate = stock_row.get(key) or {}
+            if candidate:
+                meta = candidate.get('meta') or {}
+                folder_id = candidate.get('id') or meta.get('id') or self._extract_id_from_href(meta.get('href'))
+                diagnostics['folder_source'] = f'stock_row.{key}'
+                if folder_id:
+                    return folder_id, diagnostics
 
-        folder_id, folder_key = _folder_id_from_source(stock_row)
-        if folder_id:
-            diagnostics['folder_source'] = f'stock_row.{folder_key}'
-            return folder_id, diagnostics
-
-        entity_meta = self._stock_row_entity_meta(stock_row)
-        assortment_row, lookup_source = await self._get_assortment_row_by_meta(entity_meta, token=token)
+        assortment_meta = (stock_row.get('assortment') or {}).get('meta') or {}
+        assortment_row, lookup_source = await self._get_assortment_row_by_meta(assortment_meta, token=token)
         diagnostics['assortment_lookup'] = lookup_source or 'не найдено'
         diagnostics['assortment_found'] = bool(assortment_row)
 
-        folder_id, folder_key = _folder_id_from_source(assortment_row)
-        if folder_id:
-            diagnostics['folder_source'] = f'assortment.{folder_key}'
-            if folder_id not in folder_by_id:
-                logger.warning('Папка %s найдена у ассортимента, но отсутствует в кеше productfolder', folder_id)
-            return folder_id, diagnostics
+        if not assortment_row:
+            return None, diagnostics
 
-        # Для строк отчёта по партиям groupBy=consignment карточка партии обычно
-        # содержит ссылку на базовый товар/модификацию. Папка хранится уже у него.
-        base_meta = self._base_assortment_meta_from_row(assortment_row)
-        if base_meta:
-            base_row, base_lookup_source = await self._get_assortment_row_by_meta(base_meta, token=token)
-            if base_lookup_source:
-                diagnostics['assortment_lookup'] = f'{diagnostics["assortment_lookup"]}->{base_lookup_source}'
-            folder_id, folder_key = _folder_id_from_source(base_row)
-            if folder_id:
-                diagnostics['folder_source'] = f'base_assortment.{folder_key}'
-                if folder_id not in folder_by_id:
-                    logger.warning('Папка %s найдена у базового ассортимента, но отсутствует в кеше productfolder', folder_id)
-                return folder_id, diagnostics
+        folder = assortment_row.get('productFolder') or assortment_row.get('folder') or {}
+        meta = folder.get('meta') or {}
+        folder_id = folder.get('id') or meta.get('id') or self._extract_id_from_href(meta.get('href'))
+        diagnostics['folder_source'] = 'assortment.productFolder'
 
-        return None, diagnostics
+        if folder_id and folder_id not in folder_by_id:
+            logger.warning('Папка %s найдена у ассортимента, но отсутствует в кеше productfolder', folder_id)
+
+        return folder_id, diagnostics
 
     def _build_item_diagnostics(
         self,
@@ -1124,11 +1058,11 @@ class MoySkladClient:
         return None
 
     def _extract_item_identity(self, location: str, stock_row: dict[str, Any]) -> tuple[str, str]:
-        entity_meta = self._stock_row_entity_meta(stock_row)
-        entity_id = self._normalize_entity_id(entity_meta.get('id')) or self._extract_id_from_href(entity_meta.get('href'))
+        assortment_meta = (stock_row.get('assortment') or {}).get('meta') or {}
+        assortment_id = self._normalize_entity_id(assortment_meta.get('id')) or self._extract_id_from_href(assortment_meta.get('href'))
         code = (stock_row.get('code') or '').strip()
         item_name = (stock_row.get('name') or code or 'Без названия').strip()
-        item_id = entity_id or code or f"{location.lower()}-{item_name.lower().replace(' ', '-')}"
+        item_id = assortment_id or code or f"{location.lower()}-{item_name.lower().replace(' ', '-')}"
         return item_id, item_name
 
     def _extract_expected_qty(self, stock_row: dict[str, Any]) -> float:
@@ -1137,145 +1071,6 @@ class MoySkladClient:
             return float(value or 0)
         except (TypeError, ValueError):
             return 0.0
-
-    def _entity_id_from_meta(self, meta: dict[str, Any] | None) -> str | None:
-        if not isinstance(meta, dict):
-            return None
-        return self._normalize_entity_id(meta.get('id')) or self._extract_id_from_href(meta.get('href'))
-
-    def _remember_min_expiration_days(self, output: dict[str, int], item_id: str | None, days: int | None) -> None:
-        if not item_id or days is None:
-            return
-        normalized_days = max(int(days), 0)
-        previous = output.get(item_id)
-        if previous is None or normalized_days < previous:
-            output[item_id] = normalized_days
-
-    async def _build_expiration_days_map_from_stock_report(
-        self,
-        location: str,
-        *,
-        token: str | None = None,
-        store_id: str | None = None,
-    ) -> dict[str, int]:
-        """Return min days-left by base product/variant id using stock report rows.
-
-        Важно: этот метод не строит inventory и не меняет id товаров. Он только
-        пытается достать сроки годности партий и привязать их к базовому товару
-        или модификации, чтобы старые выбранные мотивационные товары не пропали.
-        """
-        normalized, resolved_store_id = await self._resolve_store(location, token=token, store_id=store_id)
-        store_href = f'{self.base_url}/entity/store/{resolved_store_id}'
-        stock_rows = await self.get_all_pages(
-            'report/stock/all',
-            params={
-                'filter': f'stockMode=all;quantityMode=all;store={store_href}',
-                'groupBy': 'consignment',
-            },
-            token=token,
-        )
-
-        output: dict[str, int] = {}
-        semaphore = asyncio.Semaphore(self.max_concurrent_requests)
-
-        async def process_row(stock_row: dict[str, Any]) -> None:
-            if not isinstance(stock_row, dict):
-                return
-            try:
-                if self._extract_expected_qty(stock_row) <= 0:
-                    return
-            except Exception:
-                return
-
-            stock_assortment = stock_row.get('assortment') if isinstance(stock_row.get('assortment'), dict) else None
-            days = self._extract_expiration_days_from_sources(stock_row, stock_assortment)
-            entity_meta = self._stock_row_entity_meta(stock_row)
-            entity_type = str(entity_meta.get('type') or '').strip().lower()
-            base_meta = entity_meta
-
-            if entity_type == 'consignment':
-                async with semaphore:
-                    consignment_row, _source = await self._get_assortment_row_by_meta(entity_meta, token=token)
-                days = days if days is not None else self._extract_expiration_days_from_sources(consignment_row)
-                base_meta = self._base_assortment_meta_from_row(consignment_row) or stock_assortment
-            elif stock_assortment:
-                base_meta = stock_assortment.get('meta') if isinstance(stock_assortment.get('meta'), dict) else entity_meta
-
-            base_id = self._entity_id_from_meta(base_meta)
-            self._remember_min_expiration_days(output, base_id, days)
-
-        await asyncio.gather(*(process_row(row) for row in stock_rows or []))
-        logger.info('Для точки %s собрано сроков годности по партиям: %s', normalized, len(output))
-        return output
-
-    async def _build_expiration_days_map_from_consignments(
-        self,
-        location: str,
-        *,
-        token: str | None = None,
-    ) -> dict[str, int]:
-        """Fallback via entity/consignment when stock report by consignments fails.
-
-        Этот вариант не фильтруется по складу, зато не ломает подбор товаров, если
-        тяжёлый отчёт остатков временно недоступен.
-        """
-        rows = await self.get_all_pages('entity/consignment', token=token, location=location)
-        output: dict[str, int] = {}
-        for row in rows or []:
-            if not isinstance(row, dict):
-                continue
-            days = self._extract_expiration_days_from_sources(row)
-            base_meta = self._base_assortment_meta_from_row(row)
-            base_id = self._entity_id_from_meta(base_meta)
-            self._remember_min_expiration_days(output, base_id, days)
-        logger.info('Для точки %s собрано сроков годности через entity/consignment: %s', location, len(output))
-        return output
-
-    async def get_inventory_expiration_days_map(
-        self,
-        location: str,
-        *,
-        token: str | None = None,
-        store_id: str | None = None,
-    ) -> dict[str, int]:
-        normalized, normalized_store_id = self._inventory_cache_key(location, store_id)
-        cache_key = (normalized, normalized_store_id)
-        cached = self._expiration_days_cache.get(cache_key)
-        if self._cache_alive(cached):
-            return cached.value
-
-        lock = self._expiration_days_locks.setdefault(cache_key, asyncio.Lock())
-        async with lock:
-            cached = self._expiration_days_cache.get(cache_key)
-            if self._cache_alive(cached):
-                return cached.value
-
-            output: dict[str, int] = {}
-            try:
-                output = await self._build_expiration_days_map_from_stock_report(
-                    normalized,
-                    token=token,
-                    store_id=normalized_store_id,
-                )
-            except Exception:
-                logger.warning(
-                    'Не удалось получить сроки годности из отчёта остатков по партиям для точки %s. Пробуем справочник партий.',
-                    normalized,
-                    exc_info=True,
-                )
-
-            if not output:
-                try:
-                    output = await self._build_expiration_days_map_from_consignments(normalized, token=token)
-                except Exception:
-                    logger.warning('Не удалось получить сроки годности из справочника партий для точки %s.', normalized, exc_info=True)
-                    output = {}
-
-            self._expiration_days_cache[cache_key] = CacheEntry(
-                value=output,
-                expires_at=monotonic() + self.inventory_cache_ttl,
-            )
-            return output
 
     async def _get_entity_by_meta(self, meta: dict[str, Any] | None, *, cache: dict[str, CacheEntry], locks: dict[str, asyncio.Lock], entity_name: str, token: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
         if not meta:
@@ -1368,15 +1163,14 @@ class MoySkladClient:
         return self._normalize_money_value(stock_row.get('salePrice'))
 
     def _build_financial_seed(self, stock_row: dict[str, Any], item_id: str) -> dict[str, Any]:
-        entity_meta = self._stock_row_entity_meta(stock_row)
+        assortment_meta = (stock_row.get('assortment') or {}).get('meta') or {}
         code = (stock_row.get('code') or '').strip() or None
         return {
             'item_id': item_id,
             'code': code,
             'retail_price': self._extract_stock_retail_price(stock_row),
-            'assortment_id': self._normalize_entity_id(entity_meta.get('id')) or self._extract_id_from_href(entity_meta.get('href')),
-            'assortment_href': entity_meta.get('href'),
-            'assortment_type': entity_meta.get('type'),
+            'assortment_id': self._normalize_entity_id(assortment_meta.get('id')) or self._extract_id_from_href(assortment_meta.get('href')),
+            'assortment_href': assortment_meta.get('href'),
         }
 
     def _get_financial_seed(self, location: str, item_id: str, *, store_id: str | None = None) -> dict[str, Any] | None:
@@ -1538,21 +1332,15 @@ class MoySkladClient:
             )
             return result
 
-    async def _build_inventory(self, location: str, *, token: str | None = None, store_id: str | None = None, include_consignments: bool = False) -> dict[str, Any]:
+    async def _build_inventory(self, location: str, *, token: str | None = None, store_id: str | None = None) -> dict[str, Any]:
         normalized, resolved_store_id = await self._resolve_store(location, token=token, store_id=store_id)
         store_href = f'{self.base_url}/entity/store/{resolved_store_id}'
-
-        stock_params: dict[str, Any] = {
-            'filter': f'stockMode=all;quantityMode=all;store={store_href}',
-        }
-        if include_consignments:
-            stock_params['groupBy'] = 'consignment'
 
         folder_by_id, stock_rows = await asyncio.gather(
             self._get_folder_map(token=token, location=normalized),
             self.get_all_pages(
                 'report/stock/all',
-                params=stock_params,
+                params={'filter': f'stockMode=all;quantityMode=all;store={store_href}'},
                 token=token,
             ),
         )
@@ -1567,14 +1355,14 @@ class MoySkladClient:
 
             async with semaphore:
                 folder_id, diagnostics = await self._extract_folder_id(stock_row, folder_by_id, token=token)
-                entity_meta = self._stock_row_entity_meta(stock_row)
-                assortment_row, _assortment_source = await self._get_assortment_row_by_meta(entity_meta, token=token)
+                assortment_meta = (stock_row.get('assortment') or {}).get('meta') or {}
+                assortment_row, _assortment_source = await self._get_assortment_row_by_meta(assortment_meta, token=token)
                 stock_assortment = stock_row.get('assortment') if isinstance(stock_row.get('assortment'), dict) else None
                 expiration_days_left = self._extract_expiration_days_from_sources(stock_row, stock_assortment, assortment_row)
                 if expiration_days_left is None and isinstance(assortment_row, dict):
-                    base_meta = self._base_assortment_meta_from_row(assortment_row)
-                    base_row, _base_source = await self._get_assortment_row_by_meta(base_meta, token=token) if base_meta else (None, None)
-                    expiration_days_left = self._extract_expiration_days_from_sources(base_row)
+                    product_meta = assortment_row.get('product') if isinstance(assortment_row.get('product'), dict) else None
+                    product_row, _product_source = await self._get_product_row_by_meta((product_meta or {}).get('meta') if isinstance(product_meta, dict) else None, token=token)
+                    expiration_days_left = self._extract_expiration_days_from_sources(product_row, product_meta)
 
             folder_chain = self._resolve_folder_chain(folder_id, folder_by_id)
             item_diagnostics = self._build_item_diagnostics(stock_row, diagnostics, folder_id, folder_chain)
@@ -1648,49 +1436,34 @@ class MoySkladClient:
                 'subcategories': subcategories,
             })
 
-        if not include_consignments:
-            financial_cache_key = self._inventory_cache_key(normalized, resolved_store_id)
-            self._financials_by_location_cache[financial_cache_key] = CacheEntry(
-                value=financial_index,
-                expires_at=monotonic() + self.inventory_cache_ttl,
-            )
-
-        logger.info(
-            'Для точки %s собрано %s категорий и %s товаров%s',
-            normalized,
-            len(categories),
-            len(stock_rows),
-            ' по партиям' if include_consignments else '',
+        financial_cache_key = self._inventory_cache_key(normalized, resolved_store_id)
+        self._financials_by_location_cache[financial_cache_key] = CacheEntry(
+            value=financial_index,
+            expires_at=monotonic() + self.inventory_cache_ttl,
         )
+
+        logger.info('Для точки %s собрано %s категорий и %s товаров', normalized, len(categories), len(stock_rows))
         return {'location': normalized, 'categories': categories}
 
-    async def get_inventory(
-        self,
-        location: str,
-        *,
-        token: str | None = None,
-        store_id: str | None = None,
-        include_consignments: bool = False,
-    ) -> dict[str, Any]:
+    async def get_inventory(self, location: str, *, token: str | None = None, store_id: str | None = None) -> dict[str, Any]:
         normalized, normalized_store_id = self._inventory_cache_key(location, store_id)
-        mode = 'consignment' if include_consignments else 'variant'
-        cache_key = (*self._inventory_cache_key(normalized, normalized_store_id), mode)
+        cache_key = self._inventory_cache_key(normalized, normalized_store_id)
         cached = self._inventory_cache.get(cache_key)
         if self._cache_alive(cached):
-            logger.debug('Inventory cache hit. location=%s mode=%s', normalized, mode)
+            logger.debug('Inventory cache hit. location=%s', normalized)
             return cached.value
 
         lock = self._inventory_locks.setdefault(cache_key, asyncio.Lock())
         async with lock:
             cached = self._inventory_cache.get(cache_key)
             if self._cache_alive(cached):
-                logger.debug('Inventory cache hit after lock. location=%s mode=%s', normalized, mode)
+                logger.debug('Inventory cache hit after lock. location=%s', normalized)
                 return cached.value
 
             started = monotonic()
-            logger.info('Inventory cache miss. Начинаем полную сборку. location=%s mode=%s ttl_seconds=%s', normalized, mode, self.inventory_cache_ttl)
+            logger.info('Inventory cache miss. Начинаем полную сборку. location=%s ttl_seconds=%s', normalized, self.inventory_cache_ttl)
             try:
-                inventory = await self._build_inventory(normalized, token=token, store_id=normalized_store_id, include_consignments=include_consignments)
+                inventory = await self._build_inventory(normalized, token=token, store_id=normalized_store_id)
             except Exception:
                 stale_cached = self._inventory_cache.get(cache_key)
                 if stale_cached and stale_cached.value:
@@ -1724,8 +1497,6 @@ class MoySkladClient:
             self._financials_by_location_cache.clear()
             self._financial_result_cache.clear()
             self._financial_result_locks.clear()
-            self._expiration_days_cache.clear()
-            self._expiration_days_locks.clear()
             self._location_config_cache.clear()
             return
 
@@ -1742,9 +1513,6 @@ class MoySkladClient:
         for key in [key for key in self._financial_result_cache if key.startswith(normalized_prefix)]:
             self._financial_result_cache.pop(key, None)
             self._financial_result_locks.pop(key, None)
-        for key in [key for key in self._expiration_days_cache if isinstance(key, tuple) and key[0] == normalized]:
-            self._expiration_days_cache.pop(key, None)
-            self._expiration_days_locks.pop(key, None)
         self._location_config_cache.pop(normalized, None)
 
     async def prewarm_inventory(self, location: str, *, token: str | None = None, store_id: str | None = None) -> None:

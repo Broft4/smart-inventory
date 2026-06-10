@@ -13,7 +13,7 @@ from typing import Any
 from openpyxl import Workbook
 from openpyxl.styles import Font
 from pydantic import BaseModel, Field
-from sqlalchemy import inspect, and_, delete, func, or_, select, text
+from sqlalchemy import inspect, and_, delete, func, or_, select
 from sqlalchemy.exc import DatabaseError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
@@ -53,8 +53,6 @@ from app.notifications import notify_location_managers
 
 logger = logging.getLogger(__name__)
 
-_sales_motivation_runtime_schema_checked = False
-
 MSK_TZ = timezone(timedelta(hours=3))
 DEFAULT_EXIT_AMOUNT = 2000.0
 DEFAULT_BONUS_THRESHOLD = 40000.0
@@ -88,7 +86,6 @@ SALES_MOTIVATION_FISCAL_ANY = 'any'
 SALES_MOTIVATION_FISCAL_ONLY_NOT_FISCALIZED = 'only_not_fiscalized'
 SALES_MOTIVATION_POS_API_BASE_URL = 'https://online.moysklad.ru/api/posap/1.0'
 SALES_MOTIVATION_CATALOG_CACHE_TTL_SECONDS = 3600
-SALES_MOTIVATION_CATALOG_CACHE_SCHEMA_VERSION = 2
 SALES_MOTIVATION_CURRENT_SHIFT_REFRESH_TTL_SECONDS = 60 * 60
 SALES_MOTIVATION_CURRENT_SHIFT_POLL_SECONDS = 12
 SALES_MOTIVATION_BACKGROUND_RETRY_SECONDS = 60
@@ -3879,73 +3876,6 @@ def _sales_motivation_reward_label(value: Any) -> str:
     return '₽ за позицию' if _normalize_sales_motivation_reward(value) == SALES_MOTIVATION_REWARD_FIXED else '% от суммы продаж'
 
 
-
-async def _ensure_sales_motivation_runtime_schema(db: AsyncSession) -> None:
-    """One-time safety net for partially applied motivation migrations.
-
-    Старые записи мотиваций не должны пропадать из интерфейса, если сервер уже
-    обновил Python-модели, а PostgreSQL/SQLite ещё не получил новые колонки
-    сроков годности. Основная миграция остаётся в bootstrap_payroll_schema(), но
-    этот защитный блок позволяет API мотиваций восстановиться даже после
-    частичного деплоя.
-    """
-    global _sales_motivation_runtime_schema_checked
-    if _sales_motivation_runtime_schema_checked:
-        return
-
-    dialect = str((db.get_bind().dialect.name if db.get_bind() is not None else '') or '').lower()
-
-    try:
-        if dialect.startswith('postgres'):
-            await db.execute(text("ALTER TABLE sales_motivation_models ADD COLUMN IF NOT EXISTS expiration_days_left INTEGER"))
-            await db.execute(text("ALTER TABLE sales_motivation_products ADD COLUMN IF NOT EXISTS expiration_days_left INTEGER"))
-            await db.execute(text("ALTER TABLE shift_sales_motivation_snapshots ADD COLUMN IF NOT EXISTS expiration_days_left INTEGER"))
-            await db.execute(text("ALTER TABLE sales_motivation_daily_snapshots ADD COLUMN IF NOT EXISTS expiration_days_left INTEGER"))
-            await db.execute(text("ALTER TABLE sales_motivation_models ADD COLUMN IF NOT EXISTS include_fiscalized_sales BOOLEAN NOT NULL DEFAULT TRUE"))
-            await db.execute(text("ALTER TABLE shift_sales_motivation_snapshots ADD COLUMN IF NOT EXISTS include_fiscalized_sales BOOLEAN NOT NULL DEFAULT TRUE"))
-            await db.execute(text("ALTER TABLE shift_sales_motivation_snapshots ADD COLUMN IF NOT EXISTS fiscalization_status VARCHAR(30) NOT NULL DEFAULT 'any'"))
-        else:
-            def _sync_ensure(sync_session) -> None:
-                connection = sync_session.connection()
-                inspector = inspect(connection)
-                tables = set(inspector.get_table_names())
-
-                def cols(table_name: str) -> set[str]:
-                    if table_name not in tables:
-                        return set()
-                    return {str(column['name']) for column in inspector.get_columns(table_name)}
-
-                table_columns = cols('sales_motivation_models')
-                if table_columns and 'expiration_days_left' not in table_columns:
-                    connection.exec_driver_sql("ALTER TABLE sales_motivation_models ADD COLUMN expiration_days_left INTEGER")
-                if table_columns and 'include_fiscalized_sales' not in table_columns:
-                    connection.exec_driver_sql("ALTER TABLE sales_motivation_models ADD COLUMN include_fiscalized_sales BOOLEAN NOT NULL DEFAULT 1")
-
-                table_columns = cols('sales_motivation_products')
-                if table_columns and 'expiration_days_left' not in table_columns:
-                    connection.exec_driver_sql("ALTER TABLE sales_motivation_products ADD COLUMN expiration_days_left INTEGER")
-
-                table_columns = cols('shift_sales_motivation_snapshots')
-                if table_columns and 'expiration_days_left' not in table_columns:
-                    connection.exec_driver_sql("ALTER TABLE shift_sales_motivation_snapshots ADD COLUMN expiration_days_left INTEGER")
-                if table_columns and 'include_fiscalized_sales' not in table_columns:
-                    connection.exec_driver_sql("ALTER TABLE shift_sales_motivation_snapshots ADD COLUMN include_fiscalized_sales BOOLEAN NOT NULL DEFAULT 1")
-                if table_columns and 'fiscalization_status' not in table_columns:
-                    connection.exec_driver_sql("ALTER TABLE shift_sales_motivation_snapshots ADD COLUMN fiscalization_status VARCHAR(30) NOT NULL DEFAULT 'any'")
-
-                table_columns = cols('sales_motivation_daily_snapshots')
-                if table_columns and 'expiration_days_left' not in table_columns:
-                    connection.exec_driver_sql("ALTER TABLE sales_motivation_daily_snapshots ADD COLUMN expiration_days_left INTEGER")
-
-            await db.run_sync(_sync_ensure)
-        await db.commit()
-        _sales_motivation_runtime_schema_checked = True
-    except Exception:
-        await db.rollback()
-        logger.warning('Не удалось выполнить защитную миграцию таблиц мотивации продавцов.', exc_info=True)
-        raise
-
-
 def _clean_optional_string(value: Any, *, max_length: int = 255) -> str | None:
     text = str(value or '').strip()
     if not text:
@@ -4020,26 +3950,12 @@ async def _load_product_financial_cache_map(point: LocationPoint, db: AsyncSessi
 
 
 async def _flatten_inventory_products(point: LocationPoint, db: AsyncSession) -> list[dict[str, Any]]:
-    # Для мотиваций используем обычный inventory с теми же item_id, что и ревизии.
-    # Сроки годности по партиям подтягиваем отдельной картой. Если отчёт по партиям
-    # временно недоступен, подбор товаров не должен падать и не должен обнулять старые модели.
     inventory = await ms_client.get_inventory(
         point.name,
         token=_point_ms_token(point),
         store_id=_point_store_id(point),
     )
     financial_map = await _load_product_financial_cache_map(point, db)
-    expiration_days_by_item_id: dict[str, int] = {}
-    try:
-        expiration_days_by_item_id = await ms_client.get_inventory_expiration_days_map(
-            point.name,
-            token=_point_ms_token(point),
-            store_id=_point_store_id(point),
-        )
-    except Exception:
-        logger.warning('Не удалось загрузить сроки годности партий для точки %s. Каталог мотивации будет без фильтра по сроку.', point.name, exc_info=True)
-        expiration_days_by_item_id = {}
-
     products: list[dict[str, Any]] = []
     seen: set[str] = set()
     for category in inventory.get('categories') or []:
@@ -4055,9 +3971,6 @@ async def _flatten_inventory_products(point: LocationPoint, db: AsyncSession) ->
                 seen.add(item_id)
                 cached = financial_map.get(item_id)
                 qty = float(item.get('expected_qty') or item.get('quantity') or 0.0)
-                item_expiration_days = _normalize_sales_motivation_expiration_days(item.get('expiration_days_left'))
-                if item_expiration_days is None:
-                    item_expiration_days = _normalize_sales_motivation_expiration_days(expiration_days_by_item_id.get(item_id))
                 products.append({
                     'item_id': item_id,
                     'item_name': str(item.get('name') or '').strip() or item_id,
@@ -4067,7 +3980,7 @@ async def _flatten_inventory_products(point: LocationPoint, db: AsyncSession) ->
                     'subcategory_id': subcategory_id or None,
                     'subcategory_name': subcategory_name,
                     'current_stock_qty': round(qty, 3),
-                    'expiration_days_left': item_expiration_days,
+                    'expiration_days_left': _normalize_sales_motivation_expiration_days(item.get('expiration_days_left')),
                 })
     products.sort(key=lambda row: (str(row.get('category_name') or '').lower(), str(row.get('subcategory_name') or '').lower(), str(row.get('item_name') or '').lower()))
     return products
@@ -4462,29 +4375,7 @@ def _normalize_cached_sales_motivation_products(raw_products: Any) -> list[dict[
 
 def _serialize_sales_motivation_catalog_products(products: list[dict[str, Any]]) -> str:
     normalized = _normalize_cached_sales_motivation_products(products)
-    payload = {
-        'schema_version': SALES_MOTIVATION_CATALOG_CACHE_SCHEMA_VERSION,
-        'products': normalized,
-    }
-    return json.dumps(payload, ensure_ascii=False)
-
-
-def _decode_sales_motivation_catalog_cache_payload(raw_payload: Any) -> tuple[list[dict[str, Any]], bool]:
-    if isinstance(raw_payload, dict):
-        products = raw_payload.get('products')
-        if isinstance(products, list):
-            # Даже если schema_version старый, товары безопаснее показать из БД-кеша,
-            # чем обнулить список мотиваций при временной ошибке МойСклад.
-            return _normalize_cached_sales_motivation_products(products), True
-        return [], False
-
-    # Старый формат кеша был простым массивом. Его оставляем рабочим: при фильтре
-    # по сроку годности каталог всё равно попробует обновиться, но без фильтра
-    # пользователь не теряет уже доступный список товаров.
-    if isinstance(raw_payload, list):
-        return _normalize_cached_sales_motivation_products(raw_payload), True
-
-    return [], False
+    return json.dumps(normalized, ensure_ascii=False)
 
 
 async def _load_sales_motivation_catalog_cache(
@@ -4503,20 +4394,11 @@ async def _load_sales_motivation_catalog_cache(
     if not _sales_motivation_catalog_cache_is_fresh(row):
         return [], row
     try:
-        raw_payload = json.loads(row.products_json or '[]')
+        raw_products = json.loads(row.products_json or '[]')
     except Exception:
         logger.warning('Повреждён кеш каталога мотивационных товаров для точки %s.', point.name, exc_info=True)
         return [], row
-    products, is_current_schema = _decode_sales_motivation_catalog_cache_payload(raw_payload)
-    if not is_current_schema:
-        logger.info(
-            'Кеш каталога мотивационных товаров для точки %s устарел: нужна пересборка с партиями и сроками годности.',
-            point.name,
-        )
-        # Важно сбросить дату прямо в объекте строки: вызывающий код повторно
-        # проверяет свежесть row и иначе вернул бы пустой список как валидный кеш.
-        row.source_refreshed_at = None
-        return [], row
+    products = _normalize_cached_sales_motivation_products(raw_products)
     return products, row
 
 
@@ -4596,31 +4478,12 @@ async def _get_or_refresh_sales_motivation_catalog_products(
 ) -> tuple[list[dict[str, Any]], bool, datetime | None]:
     normalized_days = _normalize_sales_motivation_no_sales_days(no_sales_days)
     cache_row: SalesMotivationProductCatalogCache | None = None
-    cached_products: list[dict[str, Any]] = []
     if not force_refresh:
         cached_products, cache_row = await _load_sales_motivation_catalog_cache(point, normalized_days, db)
-        if cache_row is not None and _sales_motivation_catalog_cache_is_fresh(cache_row) and cached_products:
+        if cache_row is not None and _sales_motivation_catalog_cache_is_fresh(cache_row):
             return cached_products, True, cache_row.source_refreshed_at
 
-    try:
-        products = await _build_sales_motivation_catalog_products_live(point, db, no_sales_days=normalized_days)
-    except Exception:
-        if cached_products:
-            logger.warning(
-                'Не удалось обновить каталог мотивационных товаров для точки %s. Возвращаем старый БД-кеш, чтобы не скрыть мотивации.',
-                point.name,
-                exc_info=True,
-            )
-            return cached_products, True, cache_row.source_refreshed_at if cache_row else None
-        raise
-
-    if not products and cached_products:
-        logger.warning(
-            'Обновление каталога мотивационных товаров для точки %s вернуло 0 товаров. Старый БД-кеш сохранён и возвращён пользователю.',
-            point.name,
-        )
-        return cached_products, True, cache_row.source_refreshed_at if cache_row else None
-
+    products = await _build_sales_motivation_catalog_products_live(point, db, no_sales_days=normalized_days)
     cache_row = await _store_sales_motivation_catalog_cache(point, normalized_days, products, db)
     if commit:
         await db.commit()
@@ -4704,7 +4567,6 @@ async def get_sales_motivation_product_catalog(
     expiration_days_left: int | None = None,
     query: str | None = None,
 ) -> dict[str, Any]:
-    await _ensure_sales_motivation_runtime_schema(db)
     await ensure_user_can_access_location(current_user, location, db)
     point = await _get_location_point_by_name(location, db)
     normalized_days = _normalize_sales_motivation_no_sales_days(no_sales_days)
@@ -4850,7 +4712,6 @@ async def _replace_sales_motivation_products(
 
 
 async def list_sales_motivation_models(location: str, db: AsyncSession, current_user: User) -> dict[str, Any]:
-    await _ensure_sales_motivation_runtime_schema(db)
     await ensure_user_can_access_location(current_user, location, db)
     point = await _get_location_point_by_name(location, db)
     models = (
@@ -4871,17 +4732,9 @@ async def list_sales_motivation_models(location: str, db: AsyncSession, current_
         ).all()
         for product in products:
             products_by_model[int(product.model_id)].append(product)
-    serialized_models = [_serialize_sales_motivation_model(model, products_by_model.get(int(model.id), [])) for model in models]
-    logger.info(
-        'Загружены модели мотивации продавцов: location=%s point_id=%s models=%s products=%s',
-        point.name,
-        point.id,
-        len(serialized_models),
-        sum(len(products_by_model.get(int(model.id), [])) for model in models),
-    )
     return {
         'location': point.name,
-        'models': serialized_models,
+        'models': [_serialize_sales_motivation_model(model, products_by_model.get(int(model.id), [])) for model in models],
     }
 
 
@@ -4897,7 +4750,6 @@ def _validate_sales_motivation_payload(payload: SalesMotivationCreateRequest | S
 
 
 async def create_sales_motivation_model(payload: SalesMotivationCreateRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
-    await _ensure_sales_motivation_runtime_schema(db)
     if current_user.role not in {'platform_admin', 'admin', 'superadmin'}:
         raise HTTPException(status_code=403, detail='Создавать мотивации может только управляющий.')
     await ensure_user_can_access_location(current_user, payload.location, db)
@@ -4938,7 +4790,6 @@ async def create_sales_motivation_model(payload: SalesMotivationCreateRequest, d
 
 
 async def update_sales_motivation_model(model_id: int, payload: SalesMotivationUpdateRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
-    await _ensure_sales_motivation_runtime_schema(db)
     if current_user.role not in {'platform_admin', 'admin', 'superadmin'}:
         raise HTTPException(status_code=403, detail='Редактировать мотивации может только управляющий.')
     model = await db.get(SalesMotivationModel, model_id)
@@ -4977,7 +4828,6 @@ async def update_sales_motivation_model(model_id: int, payload: SalesMotivationU
 
 
 async def delete_sales_motivation_model(model_id: int, db: AsyncSession, current_user: User) -> dict[str, Any]:
-    await _ensure_sales_motivation_runtime_schema(db)
     if current_user.role not in {'platform_admin', 'admin', 'superadmin'}:
         raise HTTPException(status_code=403, detail='Удалять мотивации может только управляющий.')
     model = await db.get(SalesMotivationModel, model_id)
@@ -5003,7 +4853,6 @@ async def delete_sales_motivation_model(model_id: int, db: AsyncSession, current
 
 
 async def get_active_sales_motivation_products(location: str, db: AsyncSession, current_user: User) -> dict[str, Any]:
-    await _ensure_sales_motivation_runtime_schema(db)
     await ensure_user_can_access_location(current_user, location, db)
     point = await _get_location_point_by_name(location, db)
     today = get_moscow_today()

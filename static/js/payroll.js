@@ -29,8 +29,6 @@ const payrollState = {
     employeeBonuses: [],
     employeePenalties: [],
     salesMotivations: [],
-    salesMotivationsLoadError: '',
-    hotProductsLoadError: '',
     selectedMotivationProducts: new Map(),
     selectedMotivationProductsSort: 'name_asc',
     editingSalesMotivationId: null,
@@ -3199,10 +3197,6 @@ async function loadSalesMotivationProductCatalog() {
 function renderSalesMotivations() {
     const list = qs('sales-motivation-model-list');
     if (!list) return;
-    if (payrollState.salesMotivationsLoadError) {
-        list.innerHTML = `<div class="status-message error">${escapeHtml(payrollState.salesMotivationsLoadError)}</div>`;
-        return;
-    }
     const models = payrollState.salesMotivations || [];
     if (!models.length) {
         list.innerHTML = '<div class="muted-text">Модели мотивации пока не созданы.</div>';
@@ -3263,23 +3257,16 @@ async function loadSalesMotivations(expectedLocation = selectedLocation()) {
     try {
         const payload = await api(`/api/payroll/sales-motivations?location=${encodeURIComponent(location)}`);
         if (selectedLocation() !== location || isAllLocationsSelected()) return;
-        payrollState.salesMotivationsLoadError = '';
         payrollState.salesMotivations = payload.models || [];
         renderSalesMotivations();
     } catch (error) {
-        payrollState.salesMotivationsLoadError = error.message || 'Не удалось загрузить мотивации.';
-        renderSalesMotivations();
-        showScopedStatus('sales-motivations-status', payrollState.salesMotivationsLoadError, 'error');
+        showScopedStatus('sales-motivations-status', error.message || 'Не удалось загрузить мотивации.', 'error');
     }
 }
 
 function renderHotProducts(payload) {
     const list = qs('hot-products-list');
     if (!list) return;
-    if (payrollState.hotProductsLoadError) {
-        list.innerHTML = `<div class="status-message error">${escapeHtml(payrollState.hotProductsLoadError)}</div>`;
-        return;
-    }
     const models = payload?.models || [];
     if (!models.length) {
         list.innerHTML = '<div class="muted-text">Активных горящих товаров по этой точке сейчас нет.</div>';
@@ -3317,12 +3304,9 @@ async function loadHotProducts(expectedLocation = selectedLocation()) {
     try {
         const payload = await api(`/api/payroll/sales-motivations/active-products?location=${encodeURIComponent(location)}`);
         if (selectedLocation() !== location || isAllLocationsSelected()) return;
-        payrollState.hotProductsLoadError = '';
         renderHotProducts(payload);
     } catch (error) {
-        payrollState.hotProductsLoadError = error.message || 'Не удалось загрузить горящие товары.';
-        renderHotProducts({ models: [] });
-        showScopedStatus('hot-products-status', payrollState.hotProductsLoadError, 'error');
+        showScopedStatus('hot-products-status', error.message || 'Не удалось загрузить горящие товары.', 'error');
     }
 }
 
