@@ -6,7 +6,7 @@ import os
 import sqlite3
 from collections import deque
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from time import monotonic
 from typing import Any
 from urllib.parse import urlparse, urlunparse
@@ -925,6 +925,138 @@ class MoySkladClient:
             'reason': 'У остатка нет папки и не удалось определить карточку ассортимента, поэтому товар попал в «Без категории».',
         }
 
+    def _parse_moysklad_date(self, value: Any) -> date | None:
+        if isinstance(value, date) and not isinstance(value, datetime):
+            return value
+        if isinstance(value, datetime):
+            return value.date()
+        if value is None:
+            return None
+        raw = str(value or '').strip()
+        if not raw:
+            return None
+        normalized = raw.replace('T', ' ').split('+', 1)[0].split('Z', 1)[0].strip()
+        if ' ' in normalized:
+            normalized = normalized.split(' ', 1)[0]
+        try:
+            return date.fromisoformat(normalized[:10])
+        except (TypeError, ValueError):
+            return None
+
+    def _expiration_days_from_date_value(self, value: Any) -> int | None:
+        expiration_date = self._parse_moysklad_date(value)
+        if expiration_date is None:
+            return None
+        return max((expiration_date - date.today()).days, 0)
+
+    def _extract_positive_int_value(self, value: Any) -> int | None:
+        if isinstance(value, bool) or value is None:
+            return None
+        if isinstance(value, dict):
+            for key in ('value', 'name'):
+                nested = self._extract_positive_int_value(value.get(key))
+                if nested is not None:
+                    return nested
+            return None
+        raw = str(value).strip().replace(',', '.')
+        if not raw:
+            return None
+        try:
+            number = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if number < 0:
+            return None
+        return int(number)
+
+    def _attribute_name_looks_like_expiration(self, name: Any) -> bool:
+        text = str(name or '').strip().lower()
+        if not text:
+            return False
+        compact = text.replace('ё', 'е')
+        return (
+            ('срок' in compact and ('годн' in compact or 'годен' in compact))
+            or 'годен до' in compact
+            or 'expires' in compact
+            or 'expiry' in compact
+            or 'expiration' in compact
+            or 'best before' in compact
+            or 'use by' in compact
+            or 'sell by' in compact
+        )
+
+    def _extract_expiration_days_from_attributes(self, source: dict[str, Any] | None) -> int | None:
+        if not isinstance(source, dict):
+            return None
+        attributes = source.get('attributes')
+        rows = attributes.get('rows') if isinstance(attributes, dict) else attributes
+        if not isinstance(rows, list):
+            return None
+        for attribute in rows:
+            if not isinstance(attribute, dict):
+                continue
+            name = attribute.get('name') or (attribute.get('meta') or {}).get('name')
+            if not self._attribute_name_looks_like_expiration(name):
+                continue
+            value = attribute.get('value')
+            if isinstance(value, dict):
+                value = value.get('value') or value.get('name') or value.get('moment') or value.get('date')
+            by_date = self._expiration_days_from_date_value(value)
+            if by_date is not None:
+                return by_date
+            by_number = self._extract_positive_int_value(value)
+            if by_number is not None:
+                return by_number
+        return None
+
+    def _extract_expiration_days_from_source(self, source: dict[str, Any] | None) -> int | None:
+        if not isinstance(source, dict):
+            return None
+        day_fields = (
+            'expiration_days_left',
+            'expirationDaysLeft',
+            'expiryDaysLeft',
+            'daysUntilExpiration',
+            'daysToExpiration',
+            'daysBeforeExpiration',
+            'remainingShelfLifeDays',
+            'expiresInDays',
+            'shelfLifeDaysLeft',
+        )
+        for field in day_fields:
+            days = self._extract_positive_int_value(source.get(field))
+            if days is not None:
+                return days
+
+        date_fields = (
+            'expiration_date',
+            'expirationDate',
+            'expiryDate',
+            'expiresAt',
+            'expiredAt',
+            'bestBefore',
+            'bestBeforeDate',
+            'sellBy',
+            'sellByDate',
+            'useBy',
+            'useByDate',
+            'validUntil',
+            'dateOfExpiry',
+        )
+        for field in date_fields:
+            days = self._expiration_days_from_date_value(source.get(field))
+            if days is not None:
+                return days
+
+        return self._extract_expiration_days_from_attributes(source)
+
+    def _extract_expiration_days_from_sources(self, *sources: dict[str, Any] | None) -> int | None:
+        for source in sources:
+            days = self._extract_expiration_days_from_source(source)
+            if days is not None:
+                return days
+        return None
+
     def _extract_item_identity(self, location: str, stock_row: dict[str, Any]) -> tuple[str, str]:
         assortment_meta = (stock_row.get('assortment') or {}).get('meta') or {}
         assortment_id = self._normalize_entity_id(assortment_meta.get('id')) or self._extract_id_from_href(assortment_meta.get('href'))
@@ -1223,6 +1355,14 @@ class MoySkladClient:
 
             async with semaphore:
                 folder_id, diagnostics = await self._extract_folder_id(stock_row, folder_by_id, token=token)
+                assortment_meta = (stock_row.get('assortment') or {}).get('meta') or {}
+                assortment_row, _assortment_source = await self._get_assortment_row_by_meta(assortment_meta, token=token)
+                stock_assortment = stock_row.get('assortment') if isinstance(stock_row.get('assortment'), dict) else None
+                expiration_days_left = self._extract_expiration_days_from_sources(stock_row, stock_assortment, assortment_row)
+                if expiration_days_left is None and isinstance(assortment_row, dict):
+                    product_meta = assortment_row.get('product') if isinstance(assortment_row.get('product'), dict) else None
+                    product_row, _product_source = await self._get_product_row_by_meta((product_meta or {}).get('meta') if isinstance(product_meta, dict) else None, token=token)
+                    expiration_days_left = self._extract_expiration_days_from_sources(product_row, product_meta)
 
             folder_chain = self._resolve_folder_chain(folder_id, folder_by_id)
             item_diagnostics = self._build_item_diagnostics(stock_row, diagnostics, folder_id, folder_chain)
@@ -1254,6 +1394,7 @@ class MoySkladClient:
                 'category_name': category_name,
                 'subcategory_id': subcategory_id,
                 'subcategory_name': subcategory_name,
+                'expiration_days_left': expiration_days_left,
                 'item_diagnostics': item_diagnostics,
             }
 
@@ -1275,6 +1416,7 @@ class MoySkladClient:
                 'id': item_id,
                 'name': prepared['item_name'],
                 'expected_qty': prepared['expected_qty'],
+                'expiration_days_left': prepared.get('expiration_days_left'),
                 'diagnostics': prepared['item_diagnostics'],
             })
 

@@ -2774,6 +2774,16 @@ function salesMotivationExpirationText(item) {
     return `срок годности: ${days.toLocaleString('ru-RU')} дн.`;
 }
 
+function salesMotivationExpirationFilterText(model) {
+    const raw = model?.expiration_days_left;
+    if (raw === null || raw === undefined || raw === '') return '';
+    const days = Number(raw);
+    if (!Number.isFinite(days) || days < 0) return '';
+    if (days === 0) return 'до срока годности: сегодня';
+    if (days === 1) return 'до срока годности: ≤ 1 день';
+    return `до срока годности: ≤ ${days.toLocaleString('ru-RU')} дн.`;
+}
+
 function salesMotivationProductMeta(item, { includeCategory = false, includeStock = true, includeDaysWithoutSales = true } = {}) {
     const parts = [];
     if (item?.item_code) parts.push(`код ${escapeHtml(item.item_code)}`);
@@ -3197,7 +3207,7 @@ function renderSalesMotivations() {
             <summary class="expense-entry-toggle">
                 <div>
                     <strong>${escapeHtml(model.name || 'Мотивация')}</strong>
-                    <div class="muted-text">${escapeHtml(model.source_label || '')}${salesMotivationExpirationText(model) ? ` · ${escapeHtml(salesMotivationExpirationText(model))}` : ''} · ${escapeHtml(salesMotivationRewardText(model))} · ${escapeHtml(salesMotivationFiscalizationText(model))} · товаров ${model.product_count || 0}</div>
+                    <div class="muted-text">${escapeHtml(model.source_label || '')}${salesMotivationExpirationFilterText(model) ? ` · ${escapeHtml(salesMotivationExpirationFilterText(model))}` : ''} · ${escapeHtml(salesMotivationRewardText(model))} · ${escapeHtml(salesMotivationFiscalizationText(model))} · товаров ${model.product_count || 0}</div>
                 </div>
                 <div class="expense-entry-toggle-side">
                     <span class="payroll-chip ${model.is_active ? 'green' : 'orange'}">${model.is_active ? 'Активна' : 'Выключена'}</span>
@@ -3209,7 +3219,7 @@ function renderSalesMotivations() {
                     <div><span class="summary-label">Начисление</span><strong>${escapeHtml(salesMotivationRewardText(model))}</strong></div>
                     <div><span class="summary-label">Период</span><strong>${escapeHtml(model.date_from || 'без начала')} — ${escapeHtml(model.date_to || 'без окончания')}</strong></div>
                     <div><span class="summary-label">Фильтр</span><strong>${model.no_sales_days ? `${model.no_sales_days}+ дней без продаж` : 'ручной выбор'}</strong></div>
-                    <div><span class="summary-label">Срок годности</span><strong>${salesMotivationExpirationText(model) ? escapeHtml(salesMotivationExpirationText(model)) : 'не указан'}</strong></div>
+                    <div><span class="summary-label">Фильтр срока годности</span><strong>${salesMotivationExpirationFilterText(model) ? escapeHtml(salesMotivationExpirationFilterText(model)) : 'не указан'}</strong></div>
                     <div><span class="summary-label">Фискализация</span><strong>${escapeHtml(salesMotivationFiscalizationText(model))}</strong></div>
                 </div>
                 <div class="expense-entry-actions">
@@ -3355,13 +3365,7 @@ function resetSalesMotivationForm() {
 
 function buildSalesMotivationPayload(location = selectedLocation()) {
     const expirationDays = selectedSalesMotivationExpirationDays();
-    const products = [...payrollState.selectedMotivationProducts.values()].map((product) => {
-        const normalized = normalizeMotivationProductForPayload(product);
-        if (normalized.expiration_days_left === null && expirationDays !== null) {
-            normalized.expiration_days_left = expirationDays;
-        }
-        return normalized;
-    });
+    const products = [...payrollState.selectedMotivationProducts.values()].map(normalizeMotivationProductForPayload);
     return {
         location,
         name: qs('sales-motivation-name')?.value?.trim() || '',
@@ -3706,10 +3710,8 @@ qs('sales-motivation-clear-products-btn')?.addEventListener('click', () => {
     updateMotivationSelectedMeta();
 });
 qs('sales-motivation-expiration-days')?.addEventListener('input', () => {
-    const expirationDays = selectedSalesMotivationExpirationDays();
-    payrollState.selectedMotivationProducts.forEach((product, key) => {
-        payrollState.selectedMotivationProducts.set(key, { ...product, expiration_days_left: expirationDays });
-    });
+    // Это поле теперь является фильтром отбора: оно не прописывает один срок
+    // всем выбранным товарам. Фактический срок берётся из карточки/атрибутов товара.
     updateMotivationSelectedMeta();
 });
 qs('sales-motivation-selected-sort')?.addEventListener('change', (event) => {

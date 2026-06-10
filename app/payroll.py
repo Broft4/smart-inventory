@@ -3980,6 +3980,7 @@ async def _flatten_inventory_products(point: LocationPoint, db: AsyncSession) ->
                     'subcategory_id': subcategory_id or None,
                     'subcategory_name': subcategory_name,
                     'current_stock_qty': round(qty, 3),
+                    'expiration_days_left': _normalize_sales_motivation_expiration_days(item.get('expiration_days_left')),
                 })
     products.sort(key=lambda row: (str(row.get('category_name') or '').lower(), str(row.get('subcategory_name') or '').lower(), str(row.get('item_name') or '').lower()))
     return products
@@ -4515,7 +4516,11 @@ def _build_sales_motivation_catalog_response(
     normalized_expiration_days = _normalize_sales_motivation_expiration_days(expiration_days_left)
     filtered_products = _filter_sales_motivation_catalog_products(products, query)
     if normalized_expiration_days is not None:
-        filtered_products = [dict(row, expiration_days_left=normalized_expiration_days) for row in filtered_products]
+        filtered_products = [
+            row for row in filtered_products
+            if _normalize_sales_motivation_expiration_days(row.get('expiration_days_left')) is not None
+            and _normalize_sales_motivation_expiration_days(row.get('expiration_days_left')) <= normalized_expiration_days
+        ]
     categories: dict[str, dict[str, Any]] = {}
     for row in filtered_products:
         category_key = row.get('category_id') or f"category-name:{row.get('category_name') or DEFAULT_CATEGORY_NAME}"
@@ -4572,6 +4577,20 @@ async def get_sales_motivation_product_catalog(
         force_refresh=False,
         commit=True,
     )
+    if expiration_days_left is not None and from_cache and not any(
+        _normalize_sales_motivation_expiration_days(row.get('expiration_days_left')) is not None
+        for row in products
+    ):
+        # Кеш мог быть создан старой версией, где введённое значение вручную
+        # подставлялось всем товарам и фактический срок из карточки ещё не читался.
+        # При фильтре по сроку годности один раз принудительно обновляем каталог из МойСклад.
+        products, from_cache, refreshed_at = await _get_or_refresh_sales_motivation_catalog_products(
+            point,
+            db,
+            no_sales_days=normalized_days,
+            force_refresh=True,
+            commit=True,
+        )
     return _build_sales_motivation_catalog_response(
         point,
         products,
@@ -4676,8 +4695,6 @@ async def _replace_sales_motivation_products(
             continue
         seen.add(item_id)
         product_expiration_days = _normalize_sales_motivation_expiration_days(product.expiration_days_left)
-        if product_expiration_days is None:
-            product_expiration_days = _normalize_sales_motivation_expiration_days(getattr(model, 'expiration_days_left', None))
         db.add(SalesMotivationProduct(
             model_id=model.id,
             item_id=item_id[:120],
@@ -5363,10 +5380,10 @@ async def _load_shift_sales_motivation_snapshot_rows(snapshot_id: int, db: Async
 
 
 def _resolve_sales_motivation_expiration_days(product: Any, model: Any) -> int | None:
-    product_days = _normalize_sales_motivation_expiration_days(getattr(product, 'expiration_days_left', None))
-    if product_days is not None:
-        return product_days
-    return _normalize_sales_motivation_expiration_days(getattr(model, 'expiration_days_left', None))
+    # expiration_days_left у модели теперь используется только как фильтр отбора
+    # (например, показать товары, у которых осталось <= 7 дней). В строках товаров
+    # и снимках смен сохраняем только фактический срок из карточки/атрибутов товара.
+    return _normalize_sales_motivation_expiration_days(getattr(product, 'expiration_days_left', None))
 
 
 def _resolve_sales_motivation_days_without_sales(product: SalesMotivationProduct, model: SalesMotivationModel, snapshot_date: date, sold_quantity: float) -> int | None:
@@ -5545,6 +5562,9 @@ async def refresh_sales_motivation_daily_snapshots(
                     subcategory_name = _clean_optional_string(inventory_row.get('subcategory_name') or product.subcategory_name, max_length=255)
                     stock_source = inventory_row.get('current_stock_qty') if inventory_row else product.current_stock_qty
                     current_stock_qty = round(float(stock_source or 0.0), 3)
+                    expiration_days_left = _normalize_sales_motivation_expiration_days(inventory_row.get('expiration_days_left')) if inventory_row else None
+                    if expiration_days_left is None:
+                        expiration_days_left = _resolve_sales_motivation_expiration_days(product, model)
                     last_sale_date = day if is_sold else product.last_sale_date
                     days_without_sales = _resolve_sales_motivation_days_without_sales(product, model, day, sold_quantity)
                     row = SalesMotivationDailySnapshot(
@@ -5556,7 +5576,7 @@ async def refresh_sales_motivation_daily_snapshots(
                         reward_type=reward_type,
                         reward_value=reward_value,
                         no_sales_days=model.no_sales_days,
-                        expiration_days_left=_resolve_sales_motivation_expiration_days(product, model),
+                        expiration_days_left=expiration_days_left,
                         include_fiscalized_sales=include_fiscalized_sales,
                         fiscalization_status=fiscalization_status,
                         item_id=str(product.item_id or '')[:120],
