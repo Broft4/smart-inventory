@@ -13,7 +13,7 @@ from typing import Any
 from openpyxl import Workbook
 from openpyxl.styles import Font
 from pydantic import BaseModel, Field
-from sqlalchemy import inspect, and_, delete, func, or_, select
+from sqlalchemy import inspect, and_, delete, func, or_, select, text
 from sqlalchemy.exc import DatabaseError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
@@ -52,6 +52,8 @@ from app.moysklad import DEFAULT_CATEGORY_NAME, DEFAULT_SUBCATEGORY_NAME, ms_cli
 from app.notifications import notify_location_managers
 
 logger = logging.getLogger(__name__)
+
+_sales_motivation_runtime_schema_checked = False
 
 MSK_TZ = timezone(timedelta(hours=3))
 DEFAULT_EXIT_AMOUNT = 2000.0
@@ -3877,6 +3879,73 @@ def _sales_motivation_reward_label(value: Any) -> str:
     return '₽ за позицию' if _normalize_sales_motivation_reward(value) == SALES_MOTIVATION_REWARD_FIXED else '% от суммы продаж'
 
 
+
+async def _ensure_sales_motivation_runtime_schema(db: AsyncSession) -> None:
+    """One-time safety net for partially applied motivation migrations.
+
+    Старые записи мотиваций не должны пропадать из интерфейса, если сервер уже
+    обновил Python-модели, а PostgreSQL/SQLite ещё не получил новые колонки
+    сроков годности. Основная миграция остаётся в bootstrap_payroll_schema(), но
+    этот защитный блок позволяет API мотиваций восстановиться даже после
+    частичного деплоя.
+    """
+    global _sales_motivation_runtime_schema_checked
+    if _sales_motivation_runtime_schema_checked:
+        return
+
+    dialect = str((db.get_bind().dialect.name if db.get_bind() is not None else '') or '').lower()
+
+    try:
+        if dialect.startswith('postgres'):
+            await db.execute(text("ALTER TABLE sales_motivation_models ADD COLUMN IF NOT EXISTS expiration_days_left INTEGER"))
+            await db.execute(text("ALTER TABLE sales_motivation_products ADD COLUMN IF NOT EXISTS expiration_days_left INTEGER"))
+            await db.execute(text("ALTER TABLE shift_sales_motivation_snapshots ADD COLUMN IF NOT EXISTS expiration_days_left INTEGER"))
+            await db.execute(text("ALTER TABLE sales_motivation_daily_snapshots ADD COLUMN IF NOT EXISTS expiration_days_left INTEGER"))
+            await db.execute(text("ALTER TABLE sales_motivation_models ADD COLUMN IF NOT EXISTS include_fiscalized_sales BOOLEAN NOT NULL DEFAULT TRUE"))
+            await db.execute(text("ALTER TABLE shift_sales_motivation_snapshots ADD COLUMN IF NOT EXISTS include_fiscalized_sales BOOLEAN NOT NULL DEFAULT TRUE"))
+            await db.execute(text("ALTER TABLE shift_sales_motivation_snapshots ADD COLUMN IF NOT EXISTS fiscalization_status VARCHAR(30) NOT NULL DEFAULT 'any'"))
+        else:
+            def _sync_ensure(sync_session) -> None:
+                connection = sync_session.connection()
+                inspector = inspect(connection)
+                tables = set(inspector.get_table_names())
+
+                def cols(table_name: str) -> set[str]:
+                    if table_name not in tables:
+                        return set()
+                    return {str(column['name']) for column in inspector.get_columns(table_name)}
+
+                table_columns = cols('sales_motivation_models')
+                if table_columns and 'expiration_days_left' not in table_columns:
+                    connection.exec_driver_sql("ALTER TABLE sales_motivation_models ADD COLUMN expiration_days_left INTEGER")
+                if table_columns and 'include_fiscalized_sales' not in table_columns:
+                    connection.exec_driver_sql("ALTER TABLE sales_motivation_models ADD COLUMN include_fiscalized_sales BOOLEAN NOT NULL DEFAULT 1")
+
+                table_columns = cols('sales_motivation_products')
+                if table_columns and 'expiration_days_left' not in table_columns:
+                    connection.exec_driver_sql("ALTER TABLE sales_motivation_products ADD COLUMN expiration_days_left INTEGER")
+
+                table_columns = cols('shift_sales_motivation_snapshots')
+                if table_columns and 'expiration_days_left' not in table_columns:
+                    connection.exec_driver_sql("ALTER TABLE shift_sales_motivation_snapshots ADD COLUMN expiration_days_left INTEGER")
+                if table_columns and 'include_fiscalized_sales' not in table_columns:
+                    connection.exec_driver_sql("ALTER TABLE shift_sales_motivation_snapshots ADD COLUMN include_fiscalized_sales BOOLEAN NOT NULL DEFAULT 1")
+                if table_columns and 'fiscalization_status' not in table_columns:
+                    connection.exec_driver_sql("ALTER TABLE shift_sales_motivation_snapshots ADD COLUMN fiscalization_status VARCHAR(30) NOT NULL DEFAULT 'any'")
+
+                table_columns = cols('sales_motivation_daily_snapshots')
+                if table_columns and 'expiration_days_left' not in table_columns:
+                    connection.exec_driver_sql("ALTER TABLE sales_motivation_daily_snapshots ADD COLUMN expiration_days_left INTEGER")
+
+            await db.run_sync(_sync_ensure)
+        await db.commit()
+        _sales_motivation_runtime_schema_checked = True
+    except Exception:
+        await db.rollback()
+        logger.warning('Не удалось выполнить защитную миграцию таблиц мотивации продавцов.', exc_info=True)
+        raise
+
+
 def _clean_optional_string(value: Any, *, max_length: int = 255) -> str | None:
     text = str(value or '').strip()
     if not text:
@@ -4635,6 +4704,7 @@ async def get_sales_motivation_product_catalog(
     expiration_days_left: int | None = None,
     query: str | None = None,
 ) -> dict[str, Any]:
+    await _ensure_sales_motivation_runtime_schema(db)
     await ensure_user_can_access_location(current_user, location, db)
     point = await _get_location_point_by_name(location, db)
     normalized_days = _normalize_sales_motivation_no_sales_days(no_sales_days)
@@ -4780,6 +4850,7 @@ async def _replace_sales_motivation_products(
 
 
 async def list_sales_motivation_models(location: str, db: AsyncSession, current_user: User) -> dict[str, Any]:
+    await _ensure_sales_motivation_runtime_schema(db)
     await ensure_user_can_access_location(current_user, location, db)
     point = await _get_location_point_by_name(location, db)
     models = (
@@ -4800,9 +4871,17 @@ async def list_sales_motivation_models(location: str, db: AsyncSession, current_
         ).all()
         for product in products:
             products_by_model[int(product.model_id)].append(product)
+    serialized_models = [_serialize_sales_motivation_model(model, products_by_model.get(int(model.id), [])) for model in models]
+    logger.info(
+        'Загружены модели мотивации продавцов: location=%s point_id=%s models=%s products=%s',
+        point.name,
+        point.id,
+        len(serialized_models),
+        sum(len(products_by_model.get(int(model.id), [])) for model in models),
+    )
     return {
         'location': point.name,
-        'models': [_serialize_sales_motivation_model(model, products_by_model.get(int(model.id), [])) for model in models],
+        'models': serialized_models,
     }
 
 
@@ -4818,6 +4897,7 @@ def _validate_sales_motivation_payload(payload: SalesMotivationCreateRequest | S
 
 
 async def create_sales_motivation_model(payload: SalesMotivationCreateRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
+    await _ensure_sales_motivation_runtime_schema(db)
     if current_user.role not in {'platform_admin', 'admin', 'superadmin'}:
         raise HTTPException(status_code=403, detail='Создавать мотивации может только управляющий.')
     await ensure_user_can_access_location(current_user, payload.location, db)
@@ -4858,6 +4938,7 @@ async def create_sales_motivation_model(payload: SalesMotivationCreateRequest, d
 
 
 async def update_sales_motivation_model(model_id: int, payload: SalesMotivationUpdateRequest, db: AsyncSession, current_user: User) -> dict[str, Any]:
+    await _ensure_sales_motivation_runtime_schema(db)
     if current_user.role not in {'platform_admin', 'admin', 'superadmin'}:
         raise HTTPException(status_code=403, detail='Редактировать мотивации может только управляющий.')
     model = await db.get(SalesMotivationModel, model_id)
@@ -4896,6 +4977,7 @@ async def update_sales_motivation_model(model_id: int, payload: SalesMotivationU
 
 
 async def delete_sales_motivation_model(model_id: int, db: AsyncSession, current_user: User) -> dict[str, Any]:
+    await _ensure_sales_motivation_runtime_schema(db)
     if current_user.role not in {'platform_admin', 'admin', 'superadmin'}:
         raise HTTPException(status_code=403, detail='Удалять мотивации может только управляющий.')
     model = await db.get(SalesMotivationModel, model_id)
@@ -4921,6 +5003,7 @@ async def delete_sales_motivation_model(model_id: int, db: AsyncSession, current
 
 
 async def get_active_sales_motivation_products(location: str, db: AsyncSession, current_user: User) -> dict[str, Any]:
+    await _ensure_sales_motivation_runtime_schema(db)
     await ensure_user_can_access_location(current_user, location, db)
     point = await _get_location_point_by_name(location, db)
     today = get_moscow_today()

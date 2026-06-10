@@ -247,7 +247,7 @@ app.add_middleware(
 
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
-templates.env.globals['asset_version'] = '20260610-motivation-expiration-safe-v3'
+templates.env.globals['asset_version'] = '20260610-motivation-restore-v4'
 
 
 @app.middleware('http')
