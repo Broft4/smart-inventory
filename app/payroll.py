@@ -86,6 +86,7 @@ SALES_MOTIVATION_FISCAL_ANY = 'any'
 SALES_MOTIVATION_FISCAL_ONLY_NOT_FISCALIZED = 'only_not_fiscalized'
 SALES_MOTIVATION_POS_API_BASE_URL = 'https://online.moysklad.ru/api/posap/1.0'
 SALES_MOTIVATION_CATALOG_CACHE_TTL_SECONDS = 3600
+SALES_MOTIVATION_CATALOG_CACHE_SCHEMA_VERSION = 2
 SALES_MOTIVATION_CURRENT_SHIFT_REFRESH_TTL_SECONDS = 60 * 60
 SALES_MOTIVATION_CURRENT_SHIFT_POLL_SECONDS = 12
 SALES_MOTIVATION_BACKGROUND_RETRY_SECONDS = 60
@@ -3954,6 +3955,7 @@ async def _flatten_inventory_products(point: LocationPoint, db: AsyncSession) ->
         point.name,
         token=_point_ms_token(point),
         store_id=_point_store_id(point),
+        include_consignments=True,
     )
     financial_map = await _load_product_financial_cache_map(point, db)
     products: list[dict[str, Any]] = []
@@ -4375,7 +4377,27 @@ def _normalize_cached_sales_motivation_products(raw_products: Any) -> list[dict[
 
 def _serialize_sales_motivation_catalog_products(products: list[dict[str, Any]]) -> str:
     normalized = _normalize_cached_sales_motivation_products(products)
-    return json.dumps(normalized, ensure_ascii=False)
+    payload = {
+        'schema_version': SALES_MOTIVATION_CATALOG_CACHE_SCHEMA_VERSION,
+        'products': normalized,
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _decode_sales_motivation_catalog_cache_payload(raw_payload: Any) -> tuple[list[dict[str, Any]], bool]:
+    if isinstance(raw_payload, dict):
+        schema_version = raw_payload.get('schema_version')
+        products = raw_payload.get('products')
+        if schema_version == SALES_MOTIVATION_CATALOG_CACHE_SCHEMA_VERSION and isinstance(products, list):
+            return _normalize_cached_sales_motivation_products(products), True
+        return [], False
+
+    # Старый формат кеша был массивом. После перехода на сроки годности по партиям
+    # его нужно считать устаревшим, иначе останутся старые значения без expiryDate.
+    if isinstance(raw_payload, list):
+        return [], False
+
+    return [], False
 
 
 async def _load_sales_motivation_catalog_cache(
@@ -4394,11 +4416,20 @@ async def _load_sales_motivation_catalog_cache(
     if not _sales_motivation_catalog_cache_is_fresh(row):
         return [], row
     try:
-        raw_products = json.loads(row.products_json or '[]')
+        raw_payload = json.loads(row.products_json or '[]')
     except Exception:
         logger.warning('Повреждён кеш каталога мотивационных товаров для точки %s.', point.name, exc_info=True)
         return [], row
-    products = _normalize_cached_sales_motivation_products(raw_products)
+    products, is_current_schema = _decode_sales_motivation_catalog_cache_payload(raw_payload)
+    if not is_current_schema:
+        logger.info(
+            'Кеш каталога мотивационных товаров для точки %s устарел: нужна пересборка с партиями и сроками годности.',
+            point.name,
+        )
+        # Важно сбросить дату прямо в объекте строки: вызывающий код повторно
+        # проверяет свежесть row и иначе вернул бы пустой список как валидный кеш.
+        row.source_refreshed_at = None
+        return [], row
     return products, row
 
 
