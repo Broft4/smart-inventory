@@ -682,6 +682,12 @@
     function readSession() {
         const session = safeParse(localStorage.getItem(SESSION_KEY));
         if (!session || !SCENARIOS[session.scenarioKey]) return null;
+        const startedAt = Number(session.startedAt || 0);
+        const maxAgeMs = 6 * 60 * 60 * 1000;
+        if (!Number.isFinite(startedAt) || startedAt <= 0 || Date.now() - startedAt > maxAgeMs) {
+            clearSession();
+            return null;
+        }
         return session;
     }
 
@@ -818,10 +824,7 @@
             return;
         }
         if (expectedPageKey !== currentPageKey) {
-            const expected = PAGE_DEFINITIONS[expectedPageKey];
-            if (expected && expected.route && window.location.pathname !== expected.route) {
-                window.location.href = expected.route;
-            }
+            clearSession();
             return;
         }
         const pageDefinition = PAGE_DEFINITIONS[expectedPageKey];
