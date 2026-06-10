@@ -305,6 +305,15 @@
                         </div>
                         <div class="payroll-category-filters">
                             <label>Поиск товаров<input type="text" id="sales-motivation-product-query" placeholder="Название, код, категория..."></label>
+                            <label>Сортировка выбранных товаров
+                                <select id="sales-motivation-selected-sort">
+                                    <option value="name_asc">По названию</option>
+                                    <option value="expiration_asc">Срок годности: меньше дней → больше</option>
+                                    <option value="expiration_desc">Срок годности: больше дней → меньше</option>
+                                    <option value="no_sales_asc">Без продаж: меньше дней → больше</option>
+                                    <option value="no_sales_desc">Без продаж: больше дней → меньше</option>
+                                </select>
+                            </label>
                             <div class="payroll-filter-actions-inline">
                                 <button id="sales-motivation-load-products-btn" type="button" class="btn secondary btn-inline">Подобрать товары</button>
                                 <button id="sales-motivation-clear-products-btn" type="button" class="btn secondary btn-inline">Очистить выбор</button>

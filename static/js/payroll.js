@@ -30,6 +30,7 @@ const payrollState = {
     employeePenalties: [],
     salesMotivations: [],
     selectedMotivationProducts: new Map(),
+    selectedMotivationProductsSort: 'name_asc',
     editingSalesMotivationId: null,
     editingSalesMotivationLocation: null,
     audit: [],
@@ -2778,10 +2779,44 @@ function salesMotivationProductMeta(item, { includeCategory = false, includeStoc
     if (item?.item_code) parts.push(`код ${escapeHtml(item.item_code)}`);
     if (includeCategory && item?.category_name) parts.push(escapeHtml(item.category_name));
     if (includeStock) parts.push(`остаток ${Number(item?.current_stock_qty || 0).toLocaleString('ru-RU')} шт.`);
-    if (includeDaysWithoutSales && item?.days_without_sales) parts.push(`без продаж ${Number(item.days_without_sales).toLocaleString('ru-RU')}+ дней`);
+    if (includeDaysWithoutSales && item?.days_without_sales != null && item.days_without_sales !== '') parts.push(`без продаж ${Number(item.days_without_sales).toLocaleString('ru-RU')}+ дней`);
     const expirationText = salesMotivationExpirationText(item);
     if (expirationText) parts.push(escapeHtml(expirationText));
     return parts.join(' · ');
+}
+
+function salesMotivationSortableNumber(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+}
+
+function salesMotivationCompareNullableNumber(a, b, direction = 'asc') {
+    const left = salesMotivationSortableNumber(a);
+    const right = salesMotivationSortableNumber(b);
+    if (left === null && right === null) return 0;
+    if (left === null) return 1;
+    if (right === null) return -1;
+    return direction === 'desc' ? right - left : left - right;
+}
+
+function sortSalesMotivationProducts(products, sortMode = payrollState.selectedMotivationProductsSort || 'name_asc') {
+    const sorted = [...(Array.isArray(products) ? products : [])];
+    sorted.sort((a, b) => {
+        let result = 0;
+        if (sortMode === 'expiration_asc') {
+            result = salesMotivationCompareNullableNumber(a.expiration_days_left, b.expiration_days_left, 'asc');
+        } else if (sortMode === 'expiration_desc') {
+            result = salesMotivationCompareNullableNumber(a.expiration_days_left, b.expiration_days_left, 'desc');
+        } else if (sortMode === 'no_sales_asc') {
+            result = salesMotivationCompareNullableNumber(a.days_without_sales, b.days_without_sales, 'asc');
+        } else if (sortMode === 'no_sales_desc') {
+            result = salesMotivationCompareNullableNumber(a.days_without_sales, b.days_without_sales, 'desc');
+        }
+        if (result !== 0) return result;
+        return String(a.item_name || '').localeCompare(String(b.item_name || ''), 'ru');
+    });
+    return sorted;
 }
 
 function selectedSalesMotivationExpirationDays() {
@@ -2894,9 +2929,10 @@ function renderShiftSalesMotivations(day) {
 function renderMotivationSelectedProducts() {
     const list = qs('sales-motivation-selected-list');
     if (!list) return;
-    const products = [...payrollState.selectedMotivationProducts.values()]
-        .map(normalizeMotivationProductForPayload)
-        .sort((a, b) => String(a.item_name || '').localeCompare(String(b.item_name || ''), 'ru'));
+    const products = sortSalesMotivationProducts(
+        [...payrollState.selectedMotivationProducts.values()].map(normalizeMotivationProductForPayload),
+        payrollState.selectedMotivationProductsSort
+    );
     if (!products.length) {
         list.innerHTML = '';
         return;
@@ -3022,7 +3058,14 @@ function setMotivationProductsFromInputs(productInputs, checked, productMap) {
 function renderSalesMotivationProductCatalog(payload) {
     const container = qs('sales-motivation-product-catalog');
     if (!container) return;
-    const categories = Array.isArray(payload?.categories) ? payload.categories : [];
+    const sortMode = payrollState.selectedMotivationProductsSort || 'name_asc';
+    const categories = (Array.isArray(payload?.categories) ? payload.categories : []).map((category) => ({
+        ...category,
+        subcategories: (Array.isArray(category.subcategories) ? category.subcategories : []).map((subcategory) => ({
+            ...subcategory,
+            items: sortSalesMotivationProducts(Array.isArray(subcategory.items) ? subcategory.items : [], sortMode),
+        })),
+    }));
     if (!categories.length) {
         container.innerHTML = '<div class="muted-text">Товары не найдены. Попробуйте изменить фильтр или поиск.</div>';
         updateMotivationSelectedMeta();
@@ -3304,6 +3347,7 @@ function resetSalesMotivationForm() {
     if (qs('sales-motivation-include-fiscalized')) qs('sales-motivation-include-fiscalized').checked = true;
     if (qs('sales-motivation-active')) qs('sales-motivation-active').checked = true;
     if (qs('sales-motivation-product-query')) qs('sales-motivation-product-query').value = '';
+    if (qs('sales-motivation-selected-sort')) qs('sales-motivation-selected-sort').value = payrollState.selectedMotivationProductsSort || 'name_asc';
     payrollState.selectedMotivationProducts.clear();
     renderSalesMotivationProductCatalog({ categories: [] });
     updateMotivationSelectedMeta();
@@ -3667,6 +3711,14 @@ qs('sales-motivation-expiration-days')?.addEventListener('input', () => {
         payrollState.selectedMotivationProducts.set(key, { ...product, expiration_days_left: expirationDays });
     });
     updateMotivationSelectedMeta();
+});
+qs('sales-motivation-selected-sort')?.addEventListener('change', (event) => {
+    payrollState.selectedMotivationProductsSort = event.target?.value || 'name_asc';
+    updateMotivationSelectedMeta();
+    const catalog = qs('sales-motivation-product-catalog');
+    if (catalog?.innerHTML?.trim()) {
+        loadSalesMotivationProductCatalog().catch((error) => console.error(error));
+    }
 });
 qs('create-sales-motivation-btn')?.addEventListener('click', createSalesMotivation);
 qs('cancel-sales-motivation-edit-btn')?.addEventListener('click', resetSalesMotivationForm);
